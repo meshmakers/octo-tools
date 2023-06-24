@@ -1,4 +1,4 @@
-function Invoke-StartOcto
+function Invoke-StartOcto([Boolean]$botService=$true)
 {
     $logDir = "logFiles"
     $jobs = New-Object System.Collections.ArrayList
@@ -66,7 +66,10 @@ function Invoke-StartOcto
     Start-Service -workingDirectory "octo-identity-services/bin/Debug/IdentityServices/$publishVersion/publish/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003/") -jobName "IdentityServices"
     Start-Service -workingDirectory "octo-asset-repo-services/bin/Debug/AssetRepositoryServices/$publishVersion/publish/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://localhost:5000;https://localhost:5001") -jobName "AssetRepositoryServices"
     Start-Service -workingDirectory "octo-time-series-repo-services/bin/Debug/HistorianRepositoryServices/$publishVersion/publish/" -cmd "dotnet" -logname "HistorianRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.HistorianRepositoryServices.dll", "--urls=https://localhost:5013") -jobName "HistorianRepositoryServices"
-    Start-Service -workingDirectory "octo-bot-services/bin/Debug/BotServices/$publishVersion/publish/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
+    if ($botService)
+    {
+        Start-Service -workingDirectory "octo-bot-services/bin/Debug/BotServices/$publishVersion/publish/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
+    }
     Start-Service -workingDirectory "octo-frontend-admin-panel/bin/Debug/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://localhost:5005") -jobName "AdminPanel" -aspnetEnvironment "Staging"
 
 
