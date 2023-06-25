@@ -1,4 +1,4 @@
-function Invoke-StartOcto([Boolean]$botService=$true)
+function Invoke-StartOcto([Boolean]$botService=$true,[Boolean]$communicationControllerService=$true)
 {
     $logDir = "logFiles"
     $jobs = New-Object System.Collections.ArrayList
@@ -59,6 +59,7 @@ function Invoke-StartOcto([Boolean]$botService=$true)
     Delete-LogFile -file "PolicyServices.log"
     Delete-LogFile -file "AssetRepositoryServices.log"
     Delete-LogFile -file "HistorianRepositoryServices.log"
+    Delete-LogFile -file "CommunicationControllerServices.log"
     Delete-LogFile -file "BotServices.log"
     Delete-LogFile -file "AdminPanel.log"
 
@@ -69,6 +70,10 @@ function Invoke-StartOcto([Boolean]$botService=$true)
     if ($botService)
     {
         Start-Service -workingDirectory "octo-bot-services/bin/Debug/BotServices/$publishVersion/publish/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
+    }
+    if ($communicationControllerService)
+    {
+        Start-Service -workingDirectory "octo-communication-controller-services/bin/Debug/CommunicationControllerServices/$publishVersion/publish/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://localhost:5015") -jobName "CommunicationControllerServices"
     }
     Start-Service -workingDirectory "octo-frontend-admin-panel/bin/Debug/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://localhost:5005") -jobName "AdminPanel" -aspnetEnvironment "Staging"
 
