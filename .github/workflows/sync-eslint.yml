@@ -12,7 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        repo: ['meshmakers/octo-frontend-libraries', 'meshmakers/octo-frontend-admin-panel']
+        repo: 
+        - name: 'meshmakers/octo-frontend-libraries'
+          path: 'src/FrontendLibraries/ClientApp/'
+        - name: 'meshmakers/octo-frontend-admin-panel'
+          path: 'src/AdminPanel/ClientApp/'
 
     steps:
     - name: Checkout octo-tools repo
@@ -23,12 +27,12 @@ jobs:
     - name: Checkout other repo
       uses: actions/checkout@v2
       with:
-        repository: ${{ matrix.repo }}
+        repository: ${{ matrix.repo.name }}
         token: ${{ secrets.REPO_ACCESS_TOKEN }}
         path: other-repo
 
     - name: Copy ESLint config
-      run: cp octo-tools/typescript/.eslintrc-global.json other-repo/.eslintrc-global.json
+      run: cp octo-tools/typescript/.eslintrc-global.json other-repo/${{ matrix.repo.path }}.eslintrc-global.json
 
     - name: Create Pull Request
       uses: peter-evans/create-pull-request@v3
