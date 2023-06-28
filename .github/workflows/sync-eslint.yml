@@ -1,0 +1,40 @@
+name: Sync ESLint Config
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'typescript/.eslintrc-global.json'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ['meshmakers/octo-frontend-libraries', 'meshmakers/octo-frontend-admin-panel']
+
+    steps:
+    - name: Checkout octo-tools repo
+      uses: actions/checkout@v2
+      with:
+        path: octo-tools
+
+    - name: Checkout other repo
+      uses: actions/checkout@v2
+      with:
+        repository: ${{ matrix.repo }}
+        token: ${{ secrets.REPO_ACCESS_TOKEN }}
+        path: other-repo
+
+    - name: Copy ESLint config
+      run: cp octo-tools/typescript/.eslintrc-global.json other-repo/.eslintrc-global.json
+
+    - name: Create Pull Request
+      uses: peter-evans/create-pull-request@v3
+      with:
+        token: ${{ secrets.REPO_ACCESS_TOKEN }}
+        path: other-repo
+        title: "Update ESLint config"
+        body: "Automated sync of ESLint config from octo-tools"
+        branch: "automated-eslint-update"
