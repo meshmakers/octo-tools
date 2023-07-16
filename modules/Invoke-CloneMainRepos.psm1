@@ -1,0 +1,60 @@
+<#
+.Synopsis
+Clones all main Octo Mesh repositories
+.Description
+This function clones all major git repositories of
+Octo Mesh from GitHub
+.Example
+ Set-PsEnv
+.Example
+ # This is function is called by convention in PowerShell
+ function prompt {
+     Update-GitSubmodules
+ }
+#>
+function Global:Invoke-CloneMainRepos {
+
+    if (!(Test-Path $rootPath))
+    {
+        Write-Error "Root path $rootPath does not exist"
+        return;
+    }
+
+    $basedir = $PWD
+    Write-Host Root directory $rootPath
+    Clone-Repo "octo-core"
+    Clone-Repo "octo-sdk"
+    Clone-Repo "octo-common-services"
+    Clone-Repo "octo-construction-kit"
+    Clone-Repo "octo-cli"
+    Clone-Repo "octo-identity-services"
+    Clone-Repo "octo-asset-repo-services"
+    Clone-Repo "octo-bot-services"
+    Clone-Repo "octo-time-series-repo-services"
+    Clone-Repo "octo-communication-controller-services"
+    Clone-Repo "octo-communication-operator"
+    Clone-Repo "octo-frontend-admin-panel"
+    Clone-Repo "octo-frontend-libraries"
+}
+
+function Clone-Repo
+{
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    param($repositoryName = ".\")
+
+    $basedir = $PWD
+    $repositoryPath = Join-Path $rootPath $repositoryName
+    if (Test-Path $repositoryPath)
+    {
+        Write-Warning "Repo already exists: $repositoryPath "
+        return;
+    }
+    Set-Location $rootPath
+
+    git clone --recurse-submodules https://github.com/meshmakers/$repositoryName
+
+    Set-Location $basedir
+
+}
+
+Export-ModuleMember -Function @('Invoke-CloneMainRepos')
