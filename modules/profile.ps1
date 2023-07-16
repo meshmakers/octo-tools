@@ -1,4 +1,5 @@
 Write-Host "Loading Octo Profile"
+$startPath = Get-Location
 $modulePath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $rootPath = Join-Path $modulePath "../../"
 $rootPath = Resolve-Path $rootPath
@@ -20,7 +21,13 @@ else
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 
-$env:PATH += ";$rootPath" + "octo-tools/"
+$env:PATH += ";$toolsPath"
+
+function Test-SubPath( [string]$directory, [string]$subpath ) {
+    $dPath = [IO.Path]::GetFullPath( $directory )
+    $sPath = [IO.Path]::GetFullPath( $subpath )
+    return $sPath.StartsWith( $dPath, [StringComparison]::OrdinalIgnoreCase )
+  }
 
 Import-Module "$modulePath/Invoke-PullGitRepo.psm1"
 Import-Module "$modulePath/Invoke-PullAllGitRepos.psm1"
@@ -29,8 +36,13 @@ Import-Module "$modulePath/Update-GitReposAndSubmodules.psm1"
 Import-Module "$modulePath/Invoke-BuildOcto.psm1"
 Import-Module "$modulePath/Invoke-StartOcto.psm1"
 Import-Module "$modulePath/Invoke-BuildAndStartOcto.psm1"
+Import-Module "$modulePath/Invoke-CloneMainRepos.psm1"
 
-Set-Location $rootPath
+if (!(Test-SubPath $rootPath $startPath))
+{
+    Set-Location $rootPath
+}
+
 $Global:rootPath = $rootPath
 
 function  Global:prompt {"OCTO $PWD> "}
