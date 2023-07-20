@@ -1,6 +1,6 @@
 function Invoke-BuildAndStartOcto
 {
-    Invoke-BuildOcto
+    Invoke-BuildAll
     Invoke-StartOcto
 }
 

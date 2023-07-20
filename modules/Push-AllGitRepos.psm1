@@ -1,5 +1,5 @@
 
-function Push-GitRepos
+function Push-AllGitRepos
 {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]    
     param($commitMessage = "Updated")
@@ -11,7 +11,7 @@ function Push-GitRepos
     
     
     # Get all directories starting with "octo-"
-    $octoDirectories = Get-ChildItem -Directory -Path $rootDirectory -Filter "octo-*"
+    $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
 
     foreach ($directory in $octoDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"
@@ -24,4 +24,4 @@ function Push-GitRepos
     }
 }
 
-Export-ModuleMember -Function @('Push-GitRepos')
+Export-ModuleMember -Function @('Push-AllGitRepos')

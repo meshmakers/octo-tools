@@ -1,4 +1,15 @@
 
+function Wait-DockerContainer([string]$containerId)
+{
+    Write-Host "Waiting for docker container $containerId"
+    
+    # Loop until the container is running
+    while ((docker inspect -f '{{.State.Status}}' $containerId) -ne "running") {
+        Start-Sleep -Seconds 2
+        Write-Host Waiting more...
+    }
+}
+
 function Install-OctoInfrastructure
 {
     if (!(Test-Path $infrastructurePath)) {
@@ -7,6 +18,7 @@ function Install-OctoInfrastructure
     }
     
     $basedir = $PWD
+    Set-Location $infrastructurePath
     
     Write-Host "Initializing infrastructure for octo mesh";
     
@@ -28,8 +40,9 @@ function Install-OctoInfrastructure
     # run ...
     docker compose up -d
     
-    Write-Host "Waiting for 5s for the containers to be started...";
-    Start-Sleep -s 5
+    Write-Host "Waiting for the containers to be started...";
+    Wait-DockerContainer mongo-0.mongo
+    Start-Sleep -s 3
     
     Write-Host "Initializing replica set...";
     docker exec mongo-0.mongo sh -c "mongosh /scripts/init-database.js"
@@ -42,9 +55,10 @@ function Install-OctoInfrastructure
     docker exec mongo-0.mongo sh -c "mongosh /scripts/create-admin-user.js"
     
     Write-Host "Initialization done. Containers are running."
-    Write-Host "For the next start just 'run docker-compose up'"
+    Write-Host "For the next start just 'Start-OctoInfrastructure'"
     
-     Set-Location $basedir
+    Set-Location $basedir
 }
 
 Export-ModuleMember -Function @('Install-OctoInfrastructure')
+Export-ModuleMember -Function @('Wait-DockerContainer')

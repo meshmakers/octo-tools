@@ -56,7 +56,6 @@ services:
     - "./file.key:/data/file.key"
     - "mongo-data0:/data/db"
 
-
   redis:
     hostname: redis
     container_name: redis
@@ -66,3 +65,13 @@ services:
     ports:
       - "6379:6379"
       
+  rabbitmq:
+    container_name: rabbitmq
+    image: rabbitmq:3.12-management   
+    
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"

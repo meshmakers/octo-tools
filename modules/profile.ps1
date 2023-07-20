@@ -35,12 +35,16 @@ Import-Module "$modulePath/Sync-AllSubmodules.psm1"
 Import-Module "$modulePath/Sync-GitRepo.psm1"
 Import-Module "$modulePath/Sync-Submodule.psm1"
 Import-Module "$modulePath/Push-GitRepo.psm1"
-Import-Module "$modulePath/Push-GitRepos.psm1"
+Import-Module "$modulePath/Push-AllGitRepos.psm1"
 Import-Module "$modulePath/Install-OctoInfrastructure.psm1"
+Import-Module "$modulePath/Uninstall-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Invoke-BuildAndStartOcto.psm1"
-Import-Module "$modulePath/Invoke-BuildOcto.psm1"
+Import-Module "$modulePath/Invoke-Build.psm1"
+Import-Module "$modulePath/Invoke-BuildAll.psm1"
 Import-Module "$modulePath/Invoke-CloneMainRepos.psm1"
 Import-Module "$modulePath/Start-Octo.psm1"
+Import-Module "$modulePath/Start-OctoInfrastructure.psm1"
+Import-Module "$modulePath/Stop-OctoInfrastructure.psm1"
 
 
 if (!(Test-SubPath $rootPath $startPath))
@@ -48,6 +52,6 @@ if (!(Test-SubPath $rootPath $startPath))
     Set-Location $rootPath
 }
 
-$Global:rootPath = $rootPath
+$Global:ROOTPATH = $rootPath
 
 function  Global:prompt {"OCTO $PWD> "}
