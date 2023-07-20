@@ -51,7 +51,7 @@ function Clone-Repo
     }
     Set-Location $rootPath
 
-    git clone --recurse-submodules https://github.com/meshmakers/$repositoryName
+    git clone --recurse-submodules git@github.com:meshmakers/$repositoryName.git 
 
     Set-Location $basedir
 

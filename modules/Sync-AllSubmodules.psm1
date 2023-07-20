@@ -7,7 +7,7 @@ function Sync-AllSubmodules
     }
 
      # Get all directories starting with "octo-"
-    $octoDirectories = Get-ChildItem -Directory -Path $rootDirectory -Filter "octo-*"
+    $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
 
     foreach ($directory in $octoDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"
