@@ -7,16 +7,16 @@ OCTO MESH revolutionizes the way companies exchange data between software applic
 ## System requirements
 
 For the development environment, it must be ensured that all system requirements are met.<br>
-Details can be found in [here](./systemRequirements.md).
+Details can be found in [here](./docs/systemRequirements.md).
 
 ## OCTO MESH PowerShell 
 
-OCTO MESH PowerShell enables to simplyfi the process of cloning, building and starting Octo Mesh including infrastructure.
+OCTO MESH PowerShell enables to simplify the process of cloning, building and starting Octo Mesh including infrastructure.
 
-To get started, clone repository https://github.com/meshmakers/octo-tools to a directory like ~/source/meshmakers/octo-tools.
+To get started, clone repository https://github.com/meshmakers/octo-tools to a directory like ~/Development/meshmakers/octo-tools.
 ```
-mkdir ~/source/meshmakers/
-cd ~/source/meshmakers/
+mkdir ~/Development/meshmakers/
+cd ~/Development/meshmakers/
 git clone git@github.com:meshmakers/octo-tools.git
 ```
 
@@ -28,7 +28,7 @@ code $PROFILE
 
 Add to the profile:
 ```powershell
-. "~/source/meshmakers/octo-tools/modules/profile.ps1"
+. "~/Development/meshmakers/octo-tools/modules/profile.ps1"
 ``` 
 
 Restart powershell, during start you should see a message like
@@ -37,13 +37,13 @@ Loading Octo Profile
 ``` 
 
 After loading Octo Profile, there are some powershell variables existing
-- $ROOTPATH: The base directory of Octo Mesh. e. g. ~/source/meshmakers/. This directory is called root directory
-- $TOOLSPATH: The directory of the tools repository.  e. g. ~/source/meshmakers/octo-tools
-- $INFRASTRUCTUREPATH: The directory of infrastructure within the tools repository. e. g. ~/source/meshmakers/octo-tools/infrastructure
+- $ROOTPATH: The base directory of Octo Mesh. e. g. ~/Development/meshmakers/. This directory is called root directory
+- $TOOLSPATH: The directory of the tools repository.  e. g. ~/Development/meshmakers/octo-tools
+- $INFRASTRUCTUREPATH: The directory of infrastructure within the tools repository. e. g. ~/Development/meshmakers/octo-tools/infrastructure
 
 ### Definitions
 
-- Main Repositories: All repositories that are the "core" of Octo Mesh, currently all except Plugs and Sockets
+- Main Repositories: All repositories that are the "core" of Octo Mesh, currently all except Plugs and Sockets. They are connecting directly or indirectly to MongoDB directly.
 - Main Services: The services of the main repositories
 - 
 ### Commands
@@ -66,63 +66,61 @@ After loading Octo Profile, there are some powershell variables existing
 | Sync-GitRepo                 | Pulls a repository from github using the current directory by default or defining by parameter repositoryPath                   |
 | Sync-Submodule               | Pulls all submodules of a repository from github using the current directory by default or defining by parameter repositoryPath |
 
- 
 
 ## Configurations
 
-The following files provide support for the configurations:
+In IDE's like Visual Studio or JetBrains Rider it is needed to configure some secrets
+- [Configure UserSecrets](./docs/configureUserSecrets.md)
 
-- [configureUserSecrets](./configureUserSecrets.md)
+Here is a list of users that are needed for main services to connect to mongodb.
 
-You can choose to run the infrastructure either locally...
-
-- [configureMongoDb](./configureMongoDb.md)
-- [configureRedisServer](./configureRedisServer.md)
-
-... or run it in docker containers
-
-- [start infrastructure in docker-compose](./startInfraOnDocker.md)‚
+| User                    | Default Password in dev environment | Comment                                                                                                    |
+|-------------------------|-------------------------------------|------------------------------------------------------------------------------------------------------------|
+| octo-system-admin       | OctoAdmin1                          | User for creating tenants and configuration tenant independent                                             |     
+| octo-system-ds-user-{0} | OctoUser1                           | User that access a mongodb database for a specific tenant, the placeholder {0} is the name of the database |     
 
 
 ## Git and NuGet repositories
 
-Difficulties with cloning the project or with private NuGet repositories are dealt with
-in [cloneTheProject.md](./cloneTheProject.md).
+All git repositories are hosted on GitHub, all packages are hosted on nuget or npmjs.
+
+We decided to use SSH keys to connect to github, therefore are some good-to-know issues documented at [Configure Git](./docs/configureGit.md).
+
 
 ## Build and start services
 
-Once the requirements have been met, the script [buildAndstartservices.ps1](../../buildAndstartservices.ps1) can be used
+Once the requirements have been met, there are following scripts that can be used
 to build the project and start the services.
+```powershell
+Invoke-BuildAll
+Install-OctoInfrastructure # First time
+Start-OctoInfrastructure  # After install
+Start-Octo
+``` 
 
 After that, the following services should be available:
 
-- [**Core Service** (https://localhost:5001)](https://localhost:5001)
+- [**Asset Repo Service** (https://localhost:5001)](https://localhost:5001)
 - [**Identity Service** (https://localhost:5003)](https://localhost:5003)
-- [**Dashboard** (https://localhost:5005)](https://localhost:5005)
-- [**Job Service** (https://localhost:5009)](https://localhost:5009)
+- [**Admin Panel** (https://localhost:5005)](https://localhost:5005)
+- [**Bot Service** (https://localhost:5009)](https://localhost:5009)
+- [**Time Repo Service** (https://localhost:5013)](https://localhost:5013)
+- [**Communication Controller Service** (https://localhost:5015)](https://localhost:5015)
 
 ## Create the first user account
 
 Go to the [Identity service](https://localhost:5003) to create the first admin user.<br>
-After that, new data sources can be created in the [Dashboard](https://localhost:5005).
+After that, new data sources can be created in the [Admin Panel](https://localhost:5005).
 
 ## General
 
 Additional useful information can be found in the following files:
 
-- [**OSP CLI - OspTool** (ospTool.md)](../ospTool.md)
+- [**Octo CLI**](../ospTool.md)
 - [**Graph QL samples** (graphQLSamples.md)](../graphQLSamples.md)
 - [**NPM** (npm.md)](../npm.md)
 
 ## Troubleshooting
-
-### WARNING: Service redis-server is in status Completed
-
-When starting the project, the error message `WARNING: Service redis-server is in status Completed` appears before the
-services are stopped again.
-
-**Solution**:<br>
-Make sure that the Redis server is not running when the project is started. It is automatically started with the script.
 
 ### Issues with `.NET dev certificates` under Linux
 
@@ -136,4 +134,4 @@ It is confirmed if the console output contains the following error: `CERTIFICATE
 
 **Solution:**<br>
 Details on how to solve this issue can be found
-under [systemRequirements.md](./systemRequirements.md) `Install .NET SDK 6`.
+under [System Requirements](./docs/systemRequirements.md).
