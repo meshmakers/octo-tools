@@ -40,7 +40,7 @@ Import-Module "$modulePath/Install-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Invoke-BuildAndStartOcto.psm1"
 Import-Module "$modulePath/Invoke-BuildOcto.psm1"
 Import-Module "$modulePath/Invoke-CloneMainRepos.psm1"
-Import-Module "$modulePath/Invoke-StartOcto.psm1"
+Import-Module "$modulePath/Start-Octo.psm1"
 
 
 if (!(Test-SubPath $rootPath $startPath))
