@@ -1,4 +1,4 @@
-function Invoke-StartOcto([Boolean]$botService=$true,
+function Start-Octo([Boolean]$botService=$true,
                           [Boolean]$identityService=$true,
                           [Boolean]$assetRepService=$true,
                           [Boolean]$timeSeriesRepService=$true,
@@ -68,10 +68,11 @@ function Invoke-StartOcto([Boolean]$botService=$true,
     $env:OCTO_BOT_LOGDIR = "../../../../logs/bot/"
     $env:OCTO_HISTORIAN_LOGDIR = "../../../../logs/historian/"
     $env:OCTO_POLICY_LOGDIR = "../../../../logs/historian/"
+    $env:OCTO_SYSTEM__ADMINUSERPASSWORD="OctoAdmin1"
+    $env:OCTO_SYSTEM__DATABASEUSERPASSWORD="OctoUser1"
 
 
     Create-LogDirectory
-    Delete-LogFile -file "redis-server.log"
     Delete-LogFile -file "IdentityServices.log"
     Delete-LogFile -file "PolicyServices.log"
     Delete-LogFile -file "AssetRepositoryServices.log"
@@ -79,8 +80,7 @@ function Invoke-StartOcto([Boolean]$botService=$true,
     Delete-LogFile -file "CommunicationControllerServices.log"
     Delete-LogFile -file "BotServices.log"
     Delete-LogFile -file "AdminPanel.log"
-
-    Start-Service -cmd "redis-server" -logname "redis-server.log" -jobName "redis-server"
+    
     if ($identityService)
     {
         Start-Service -workingDirectory "octo-identity-services/bin/Debug/IdentityServices/$publishVersion/publish/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003/") -jobName "IdentityServices"
@@ -151,4 +151,4 @@ function Invoke-StartOcto([Boolean]$botService=$true,
     Get-ServiceStatus
 }
 
-Export-ModuleMember -Function @('Invoke-StartOcto')
+Export-ModuleMember -Function @('Start-Octo')
