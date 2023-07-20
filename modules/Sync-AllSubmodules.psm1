@@ -16,7 +16,7 @@ function Sync-AllSubmodules
         # Check if the ".git" directory exists
         if ((Test-Path -Path $gitDirectory -PathType Container) -And (Test-Path -Path $modulesFile)) {
             Write-Host "Pulling git repository $($directory.FullName)"
-            Pull-Submodule $directory.FullName $commitMessage
+            Sync-Submodule $directory.FullName
         }
     }
 }

@@ -20,8 +20,6 @@ function Sync-Submodule {
     $basedir = $PWD
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
-    git config pull.rebase true
-    git pull origin
     git submodule update --remote
     git add .
     Set-Location $basedir
