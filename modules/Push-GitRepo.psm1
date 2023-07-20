@@ -1,16 +1,15 @@
 <#
 .Synopsis
-Updates submodules of git repositories including commit and push.
+Pushs a git repo
 .Description
 This function changes to the directory provides by the argument repositoryPath,
-configures to use pull.rebase option, pulls from origin and updates the submodules
-from remote. After that the changes are commited and pushed.
+configures pushs to origin
 .Example
- Set-PsEnv
+Push-GitRepo
 .Example
  # This is function is called by convention in PowerShell
  function prompt {
-     Update-GitSubmodules
+     Push-GitRepo
  }
 #>
 function Push-GitRepo() {
@@ -20,9 +19,6 @@ function Push-GitRepo() {
     $basedir = $PWD
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
-    git config pull.rebase true
-    git pull origin
-  
     git commit -m $commitMessage
     git push origin
     Set-Location $basedir
