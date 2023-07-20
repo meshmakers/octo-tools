@@ -80,12 +80,13 @@ Here is a list of users that are needed for main services to connect to mongodb.
 | octo-system-ds-user-{0} | OctoUser1                           | User that access a mongodb database for a specific tenant, the placeholder {0} is the name of the database |     
 
 
-## Git and NuGet repositories
+## Git and repositories
 
 All git repositories are hosted on GitHub, all packages are hosted on nuget or npmjs.
 
 We decided to use SSH keys to connect to github, therefore are some good-to-know issues documented at [Configure Git](./docs/configureGit.md).
 
+To clone the main repos, you need to run the command ```Invoke-CloneMainRepos``` within the PowerShell with Octo Mesh profile.
 
 ## Build and start services
 
@@ -99,8 +100,6 @@ Install-OctoInfrastructure # First time
 Start-OctoInfrastructure  # After install
 Start-Octo
 ``` 
-
-
 
 After that, the following services should be available:
 
