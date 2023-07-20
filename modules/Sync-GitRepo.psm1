@@ -9,10 +9,10 @@ Invoke-PullGitRepo
 .Example
  # This is function is called by convention in PowerShell
  function prompt {
-     Invoke-PullGitRepo
+     Pull-GitRepo
  }
 #>
-function Invoke-PullGitRepo {
+function Sync-GitRepo {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param($repositoryPath = ".\")
 
@@ -24,4 +24,4 @@ function Invoke-PullGitRepo {
     Set-Location $basedir
 }
 
-Export-ModuleMember -Function @('Invoke-PullGitRepo')
+Export-ModuleMember -Function @('Sync-GitRepo')

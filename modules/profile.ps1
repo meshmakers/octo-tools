@@ -20,6 +20,7 @@ else
     $env:PATH += ";$octoCliPath"
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
+$infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
 
 $env:PATH += ";$toolsPath"
 
@@ -29,14 +30,18 @@ function Test-SubPath( [string]$directory, [string]$subpath ) {
     return $sPath.StartsWith( $dPath, [StringComparison]::OrdinalIgnoreCase )
   }
 
-Import-Module "$modulePath/Invoke-PullGitRepo.psm1"
-Import-Module "$modulePath/Invoke-PullAllGitRepos.psm1"
-Import-Module "$modulePath/Update-GitSubmodules.psm1"
-Import-Module "$modulePath/Update-GitReposAndSubmodules.psm1"
-Import-Module "$modulePath/Invoke-BuildOcto.psm1"
-Import-Module "$modulePath/Invoke-StartOcto.psm1"
+Import-Module "$modulePath/Sync-AllGitRepos.psm1"
+Import-Module "$modulePath/Sync-AllSubmodules.psm1"
+Import-Module "$modulePath/Sync-GitRepo.psm1"
+Import-Module "$modulePath/Sync-Submodule.psm1"
+Import-Module "$modulePath/Push-GitRepo.psm1"
+Import-Module "$modulePath/Push-GitRepos.psm1"
+Import-Module "$modulePath/Install-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Invoke-BuildAndStartOcto.psm1"
+Import-Module "$modulePath/Invoke-BuildOcto.psm1"
 Import-Module "$modulePath/Invoke-CloneMainRepos.psm1"
+Import-Module "$modulePath/Invoke-StartOcto.psm1"
+
 
 if (!(Test-SubPath $rootPath $startPath))
 {

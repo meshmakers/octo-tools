@@ -13,20 +13,19 @@ from remote. After that the changes are commited and pushed.
      Update-GitSubmodules
  }
 #>
-function Global:Update-GitSubmodules {
+function Push-GitRepo() {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
-    param($repositoryPath = ".\")
+    param([string]$repositoryPath = ".\", [string]$commitMessage = "Updated")
 
     $basedir = $PWD
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
     git config pull.rebase true
     git pull origin
-    git submodule update --remote
-    git add .
-    git commit -m "git submodule updated"
+  
+    git commit -m $commitMessage
     git push origin
     Set-Location $basedir
 }
 
-Export-ModuleMember -Function @('Update-GitSubmodules')
+Export-ModuleMember -Function @('Push-GitRepo')
