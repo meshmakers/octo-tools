@@ -89,14 +89,18 @@ We decided to use SSH keys to connect to github, therefore are some good-to-know
 
 ## Build and start services
 
-Once the requirements have been met, there are following scripts that can be used
-to build the project and start the services.
+Once the requirements have been met, there are following scripts that can be used to build the project and start the services.
+
+After build, the infrastructure services needs to be started. To handle the steps to install, start, stop or uninstall you find [here](./docs/startInfraOnDocker.md)
+
 ```powershell
 Invoke-BuildAll
 Install-OctoInfrastructure # First time
 Start-OctoInfrastructure  # After install
 Start-Octo
 ``` 
+
+
 
 After that, the following services should be available:
 
