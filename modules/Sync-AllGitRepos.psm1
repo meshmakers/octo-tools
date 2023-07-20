@@ -1,4 +1,4 @@
-function Invoke-PullAllGitRepos {
+function Sync-AllGitRepos {
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
@@ -14,9 +14,9 @@ function Invoke-PullAllGitRepos {
         # Check if the ".git" directory exists
         if (Test-Path -Path $gitDirectory -PathType Container) {
             Write-Host "Pulling git repository $($directory.FullName)"
-            Invoke-PullGitRepo $directory.FullName
+            Pull-GitRepo $directory.FullName
         }
     }
 }
 
-Export-ModuleMember -Function @('Invoke-PullAllGitRepos')
+Export-ModuleMember -Function @('Sync-AllGitRepos')
