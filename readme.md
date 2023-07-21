@@ -1,17 +1,31 @@
-# OCTO MESH getting started
+
+# Octo Mesh getting started
 
 Transforming data into value.
 
-OCTO MESH revolutionizes the way companies exchange data between software applications by providing both connectivity and intelligent data mapping and transformation capabilities. OCTO MESH solves the challenges of data incompatibility, connectivity and mapping, enabling seamless and efficient data exchange. OCTO MESH accompanies organizations on their digital transformation journey with optimized connections and couplings, strong security measures and an intuitive user interface. Companies are thus discovering the full potential of their data and promoting innovation, efficiency and well-founded decisions in today's data-driven world.
+Octo Mesh revolutionizes the way companies exchange data between software applications by providing both connectivity and intelligent data mapping and transformation capabilities. Octo Mesh solves the challenges of data incompatibility, connectivity and mapping, enabling seamless and efficient data exchange. Octo Mesh accompanies organizations on their digital transformation journey with optimized connections and couplings, strong security measures and an intuitive user interface. Companies are thus discovering the full potential of their data and promoting innovation, efficiency and well-founded decisions in today's data-driven world.
 
-## System requirements
 
-For the development environment, it must be ensured that all system requirements are met.<br>
-Details can be found in [here](./docs/systemRequirements.md).
+## Setting up development environment
 
-## OCTO MESH PowerShell 
+For the development environment, mainly .NET SDK and NodeJs needs to be installed. Please check the details [here](./docs/systemRequirements.md).
 
-OCTO MESH PowerShell enables to simplify the process of cloning, building and starting Octo Mesh including infrastructure.
+### Configuration
+
+In IDE's like Visual Studio or JetBrains Rider it is needed to configure some secrets
+- [Configure UserSecrets](./docs/configureUserSecrets.md)
+
+Here is a list of users that are needed for main services to connect to mongodb.
+
+| User                    | Default Password in dev environment | Comment                                                                                                    |
+|-------------------------|-------------------------------------|------------------------------------------------------------------------------------------------------------|
+| octo-system-admin       | OctoAdmin1                          | User for creating tenants and configuration tenant independent                                             |     
+| octo-system-ds-user-{0} | OctoUser1                           | User that access a mongodb database for a specific tenant, the placeholder {0} is the name of the database |     
+
+
+## Octo Mesh PowerShell 
+
+Octo Mesh PowerShell enables to simplify the process of cloning, building and starting Octo Mesh including infrastructure.
 
 To get started, clone repository https://github.com/meshmakers/octo-tools to a directory like ~/Development/meshmakers/octo-tools.
 ```
@@ -45,7 +59,7 @@ After loading Octo Profile, there are some powershell variables existing
 
 - Main Repositories: All repositories that are the "core" of Octo Mesh, currently all except Plugs and Sockets. They are connecting directly or indirectly to MongoDB directly.
 - Main Services: The services of the main repositories
-- 
+
 ### Commands
 
 | Command                      | Description                                                                                                                     |
@@ -66,21 +80,9 @@ After loading Octo Profile, there are some powershell variables existing
 | Sync-GitRepo                 | Pulls a repository from github using the current directory by default or defining by parameter repositoryPath                   |
 | Sync-Submodule               | Pulls all submodules of a repository from github using the current directory by default or defining by parameter repositoryPath |
 
+# Start Octo Mesh
 
-## Configurations
-
-In IDE's like Visual Studio or JetBrains Rider it is needed to configure some secrets
-- [Configure UserSecrets](./docs/configureUserSecrets.md)
-
-Here is a list of users that are needed for main services to connect to mongodb.
-
-| User                    | Default Password in dev environment | Comment                                                                                                    |
-|-------------------------|-------------------------------------|------------------------------------------------------------------------------------------------------------|
-| octo-system-admin       | OctoAdmin1                          | User for creating tenants and configuration tenant independent                                             |     
-| octo-system-ds-user-{0} | OctoUser1                           | User that access a mongodb database for a specific tenant, the placeholder {0} is the name of the database |     
-
-
-## Git and repositories
+## Clone repositories
 
 All git repositories are hosted on GitHub, all packages are hosted on nuget or npmjs.
 
@@ -97,7 +99,7 @@ After build, the infrastructure services needs to be started. To handle the step
 ```powershell
 Invoke-BuildAll
 Install-OctoInfrastructure # First time
-Start-OctoInfrastructure  # After install
+Start-OctoInfrastructure  # Second time+
 Start-Octo
 ``` 
 
@@ -113,19 +115,16 @@ After that, the following services should be available:
 ## Create the first user account
 
 Go to the [Identity service](https://localhost:5003) to create the first admin user.<br>
-After that, new data sources can be created in the [Admin Panel](https://localhost:5005).
+After that, new tenants can be created in the [Admin Panel](https://localhost:5005).
 
-## General
+# Further reading
 
-Additional useful information can be found in the following files:
+Additional useful information can be found in the documentation of Octo Mesh available at https://docs.meshmakers.cloud
 
-- [**Octo CLI**](../ospTool.md)
-- [**Graph QL samples** (graphQLSamples.md)](../graphQLSamples.md)
-- [**NPM** (npm.md)](../npm.md)
 
-## Troubleshooting
+# Troubleshooting
 
-### Issues with `.NET dev certificates` under Linux
+## Issues with `.NET dev certificates` under Linux
 
 To confirm a certificates issue, run the following command in PowerShell:
 
