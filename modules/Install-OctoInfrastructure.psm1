@@ -16,11 +16,12 @@ function Install-OctoInfrastructure
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
     }
+
+    $PSStyle.Progress.View = "Classic"
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Initializing infrastructure for octo mesh' -PercentComplete 0
     
     $basedir = $PWD
     Set-Location $infrastructurePath
-    
-    Write-Host "Initializing infrastructure for octo mesh";
     
     # create the key file
     if (!(Test-Path -Path "file.key")) {
@@ -36,26 +37,45 @@ function Install-OctoInfrastructure
             chmod 400 file.key
         }
     }
+
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Docker compose up' -PercentComplete 10
     
     # run ...
     docker compose up -d
     
-    Write-Host "Waiting for the containers to be started...";
+    Write-Progress -Activity 'Install Octo infrastructure' -Status  "Waiting for the containers to be started..." -PercentComplete 20
     Wait-DockerContainer mongo-0.mongo
     Start-Sleep -s 3
+
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Setting up mongodb replicaset' -PercentComplete 50
     
-    Write-Host "Initializing replica set...";
-    docker exec mongo-0.mongo sh -c "mongosh /scripts/init-database.js"
+    Write-Host "Initializing replica set and waiting for complete initialization";
+    while($true)
+    {
+        &{
+            docker exec mongo-0.mongo sh -c "mongosh admin /scripts/init-database.js"
+        } 2>stderr.txt
+        $err = get-content stderr.txt
+        Write-Host $err
+        if ((-not ([string]::IsNullOrWhiteSpace($err))) -And $err.Contains("MongoNetworkError")) {
+            Write-Progress -Activity 'Install Octo infrastructure' -Status  "Retrying to init replica set..." -PercentComplete 60
+            Start-Sleep -s 3
+            continue;
+        }
+        Remove-Item stderr.txt
+        break;
+    }
+
+    # init user.
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Creating admin user' -PercentComplete 80
+    docker exec mongo-0.mongo sh -c "mongosh admin /scripts/create-admin-user.js"
+
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Complete' -PercentComplete 100
     
-    Write-Host "Waiting for 10s until replicaset is initialized...";
-    Start-Sleep -s 10
-    
-    # init replica, set users.
-    Write-Host "create admin user...";
-    docker exec mongo-0.mongo sh -c "mongosh /scripts/create-admin-user.js"
-    
+    Clear-Host
     Write-Host "Initialization done. Containers are running."
     Write-Host "For the next start just 'Start-OctoInfrastructure'"
+  
     
     Set-Location $basedir
 }
