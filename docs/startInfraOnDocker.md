@@ -37,3 +37,10 @@ Stop-OctoInfrastructure
 ```powershell
  Uninstall-OctoInfrastructure.ps1
 ``` 
+
+
+## Get status of container
+
+```powershell
+ Get-OctoInfrastructureStatus.ps1
+``` 

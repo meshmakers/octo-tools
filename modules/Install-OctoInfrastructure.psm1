@@ -74,8 +74,8 @@ function Install-OctoInfrastructure
     
     Clear-Host
     Write-Host "Initialization done. Containers are running."
+    Write-Host "To stop the containers use 'Stop-OctoInfrastructure'"
     Write-Host "For the next start just 'Start-OctoInfrastructure'"
-  
     
     Set-Location $basedir
 }
