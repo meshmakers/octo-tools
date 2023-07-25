@@ -53,5 +53,6 @@ if (!(Test-SubPath $rootPath $startPath))
 }
 
 $Global:ROOTPATH = $rootPath
+$Global:INFRASTRUCTUREPATH = $infrastructurePath
 
 function  Global:prompt {"OCTO $PWD> "}
