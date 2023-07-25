@@ -4,4 +4,4 @@ function Invoke-BuildAndStartOcto
     Invoke-StartOcto
 }
 
-Export-ModuleMember -Function @('Invoke-BuildAndStartOct')
+Export-ModuleMember -Function @('Invoke-BuildAndStartOcto')
