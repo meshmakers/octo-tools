@@ -21,7 +21,6 @@ function Sync-Submodule {
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
     git submodule update --remote
-    git add .
     Set-Location $basedir
 }
 
