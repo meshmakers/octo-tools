@@ -1,7 +1,7 @@
 function Invoke-BuildAndStartOcto
 {
     Invoke-BuildAll
-    Invoke-StartOcto
+    Start-Octo
 }
 
 Export-ModuleMember -Function @('Invoke-BuildAndStartOcto')
