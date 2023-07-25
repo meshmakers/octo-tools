@@ -1,13 +1,51 @@
-function Start-Octo([Boolean]$botService=$true,
-                          [Boolean]$identityService=$true,
-                          [Boolean]$assetRepService=$true,
-                          [Boolean]$timeSeriesRepService=$true,
-                          [Boolean]$communicationControllerService=$true,
-                          [Boolean]$adminPanel=$true,
-                          [Boolean]$identityOnly=$false
-        
-)
+function Start-Octo()
 {
+<#
+.SYNOPSIS
+Starts all Octo Mesh services. 
+
+.DESCRIPTION
+The Start-Octo function starts all Octo Mesh services, but gives the user control to exclude certain services from being started by setting their corresponding parameter to $false. 
+
+.PARAMETER botService
+If set to $true, the Bot Service will be started. If set to $false, it will not be started.
+
+.PARAMETER identityService
+If set to $true, the Identity Service will be started. If set to $false, it will not be started.
+
+.PARAMETER assetRepService
+If set to $true, the Asset Rep Service will be started. If set to $false, it will not be started.
+
+.PARAMETER timeSeriesRepService
+If set to $true, the Time Series Rep Service will be started. If set to $false, it will not be started.
+
+.PARAMETER communicationControllerService
+If set to $true, the Communication Controller Service will be started. If set to $false, it will not be started.
+
+.PARAMETER adminPanel
+If set to $true, the Admin Panel will be started. If set to $false, it will not be started.
+
+.PARAMETER identityOnly
+If set to $true, only the Identity Service will be started. All other parameters will be ignored.
+
+.EXAMPLE
+Start-Octo -botService $false -identityService $true
+
+This example starts all services except for the Bot Service.
+
+.NOTES
+Use this function to selectively start Octo Mesh services based on your requirements.
+#>
+
+param(
+    [Parameter()] [Boolean]$botService=$true,
+    [Parameter()] [Boolean]$identityService=$true,
+    [Parameter()] [Boolean]$assetRepService=$true,
+    [Parameter()] [Boolean]$timeSeriesRepService=$true,
+    [Parameter()] [Boolean]$communicationControllerService=$true,
+    [Parameter()] [Boolean]$adminPanel=$true,
+    [Parameter()] [Boolean]$identityOnly=$false  
+)
     if ($identityOnly)
     {
         $botService = $false;
