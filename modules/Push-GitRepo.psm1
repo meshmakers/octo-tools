@@ -19,6 +19,7 @@ function Push-GitRepo() {
     $basedir = $PWD
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
+    git add .
     git commit -m $commitMessage
     git push origin
     Set-Location $basedir

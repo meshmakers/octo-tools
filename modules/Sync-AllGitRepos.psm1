@@ -17,6 +17,9 @@ function Sync-AllGitRepos {
             Sync-GitRepo $directory.FullName
         }
     }
+    
+    Write-Host "Done"
+    Write-Host "To sync all submodules use 'Sync-AllSubmodules'"
 }
 
 Export-ModuleMember -Function @('Sync-AllGitRepos')

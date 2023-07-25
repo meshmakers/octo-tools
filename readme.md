@@ -73,6 +73,7 @@ After loading Octo Profile, there are some powershell variables existing
 | Uninstall-OctoInfrastructure | Uninstalls the infrastructure dependencies by using docker compose file at  [infrastructure](./infrastructue)                   |
 | Start-OctoInfrastructure     | Starts the infrastructure dependencies by using docker compose file at [infrastructure](./infrastructue)                        |
 | Stop-OctoInfrastructure      | Stops the infrastructure dependencies by using docker compose file at [infrastructure](./infrastructue)                         |
+| Get-OctoInfrastructureStatus | Gets the status of containers by using docker compose file at [infrastructure](./infrastructue)                                 |
 | Push-GitRepo                 | Push a repository to github using the current directory by default or defining by parameter repositoryPath                      |
 | Push-AllGitRepos             | Push all repositories starting with octo-*                                                                                      |
 | Sync-AllGitRepos             | Pulls all repositories starting with octo-*                                                                                     |
