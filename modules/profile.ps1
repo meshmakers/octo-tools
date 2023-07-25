@@ -30,6 +30,7 @@ function Test-SubPath( [string]$directory, [string]$subpath ) {
     return $sPath.StartsWith( $dPath, [StringComparison]::OrdinalIgnoreCase )
   }
 
+Import-Module "$modulePath/Get-OctoInfrastructureStatus.psm1"
 Import-Module "$modulePath/Sync-AllGitRepos.psm1"
 Import-Module "$modulePath/Sync-AllSubmodules.psm1"
 Import-Module "$modulePath/Sync-GitRepo.psm1"

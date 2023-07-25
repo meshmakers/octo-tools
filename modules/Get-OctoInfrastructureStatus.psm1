@@ -9,7 +9,7 @@ function Get-OctoInfrastructureStatus
     $basedir = $PWD
     Set-Location $infrastructurePath
 
-    docker-compose down
+    docker-compose ps
 
     Set-Location $basedir
 }
