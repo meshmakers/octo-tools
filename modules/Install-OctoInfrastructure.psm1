@@ -1,6 +1,5 @@
 
-function Wait-DockerContainer([string]$containerId)
-{
+function Wait-DockerContainer([string]$containerId) {
     Write-Host "Waiting for docker container $containerId"
     
     # Loop until the container is running
@@ -10,8 +9,7 @@ function Wait-DockerContainer([string]$containerId)
     }
 }
 
-function Install-OctoInfrastructure
-{
+function Install-OctoInfrastructure {
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
@@ -32,27 +30,30 @@ function Install-OctoInfrastructure
         $randString > file.key
     
         # mongodb only allows readonly files as key
-        if ($IsLinux -or $IsMacOS)
-        {
+        if ($IsLinux -or $IsMacOS) {
             chmod 400 file.key
         }
     }
 
-    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Docker compose up' -PercentComplete 10
+    if ($IsWindows) {
+        Write-Progress -Activity 'Install Octo infrastructure' -Status 'Configuring WSL...' -PercentComplete 10
+        Set-WSLConfig
+    }
+
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Docker compose up' -PercentComplete 30
     
     # run ...
     docker compose up -d
     
-    Write-Progress -Activity 'Install Octo infrastructure' -Status  "Waiting for the containers to be started..." -PercentComplete 20
+    Write-Progress -Activity 'Install Octo infrastructure' -Status  "Waiting for the containers to be started..." -PercentComplete 40
     Wait-DockerContainer mongo-0.mongo
     Start-Sleep -s 3
 
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Setting up mongodb replicaset' -PercentComplete 50
     
     Write-Host "Initializing replica set and waiting for complete initialization";
-    while($true)
-    {
-        &{
+    while ($true) {
+        & {
             docker exec mongo-0.mongo sh -c "mongosh admin /scripts/init-database.js"
         } 2>stderr.txt
         $err = get-content stderr.txt
@@ -78,6 +79,109 @@ function Install-OctoInfrastructure
     Write-Host "For the next start just 'Start-OctoInfrastructure'"
     
     Set-Location $basedir
+}
+
+function Set-WSLConfig {
+    if (!$IsWindows) {
+        return;
+    }
+
+
+    # Determine the path to the .wslconfig file
+    $wslConfigPath = Join-Path $env:USERPROFILE ".wslconfig"
+
+    # VM Max Map Count value
+    $vmMaxMapCount = 262144
+
+    # Start with an empty config
+    $config = New-Object System.Collections.ArrayList
+
+    if (Test-Path $wslConfigPath) {
+        # Load the existing config
+        $existingConfig = (Get-Content -Raw $wslConfigPath) -split "`r`n"
+        if ($null -ne $existingConfig) {
+            $config.AddRange($existingConfig)
+        }
+    }
+
+    # Track the current section
+    $section = ""
+
+    # Whether we have found the wsl2 section
+    $wsl2Found = $false
+
+    # Whether we have added or found the setting
+    $added = $false
+
+    # Whether the config was modified
+    $modified = $false
+
+    # Iterate over the config and modify it in-place
+    for ($i = 0; $i -lt $config.Count; $i++) {
+        if ($config[$i] -match '^\[(.+)\]') {
+            if ($section -eq "wsl2" -and !$added) {
+                $config.Insert($i, "kernelCommandLine = ""sysctl.vm.max_map_count=$vmMaxMapCount""")
+                $added = $true
+                $modified = $true
+            }
+            $section = $matches[1]
+            if ($section -eq "wsl2") { $wsl2Found = $true }
+        }
+        elseif ($section -eq "wsl2" -and $config[$i] -match '(.+?)\s*=\s*(.+)') {
+            $key = $matches[1].Trim()
+            $value = $matches[2].Trim()
+
+            # Update the setting if it exists
+            if ($key -eq "kernelCommandLine") {
+                if ($value -notmatch "sysctl\.vm\.max_map_count\s*=\s*($vmMaxMapCount)" -or [int]$matches[1] -lt $vmMaxMapCount) {
+                    $config[$i] = "kernelCommandLine = ""sysctl.vm.max_map_count=$vmMaxMapCount"""
+                    $modified = $true
+                }
+                $added = $true
+            }
+        }
+    }
+
+    # If the setting wasn't added, add the section and setting at the end
+    if (!$added) {
+        if (!$wsl2Found) {
+            $config.Add("[wsl2]") | Out-Null
+        }
+        $config.Add("kernelCommandLine = ""sysctl.vm.max_map_count=$vmMaxMapCount""") | Out-Null
+        $modified = $true
+    }
+
+    # Write the updated config to the file
+    $config | Out-File $wslConfigPath -Encoding ascii
+
+    # If the config was modified, restart WSL2 and Docker
+    if ($modified) {
+        # Restart WSL2
+        Write-Host "Stoppwing WSL"
+        wsl --shutdown
+
+        Write-Host "Killing all Docker Processes"
+        # kill all docker processes
+        Get-Process *docker* | Stop-Process
+
+
+        Write-Host "Starting Docker Desktop"
+        # start docker destkop
+        Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+
+        # wait until docker desktop is responsive again
+        do {
+            Write-Host "Waiting for Docker Desktop to be responsive..."
+            Start-Sleep -Seconds 5
+            try {
+                docker ps | Out-Null
+                $dockerIsResponsive = $true
+            } 
+            catch {
+                $dockerIsResponsive = $false
+            }
+        } while (!$dockerIsResponsive)
+    }
 }
 
 Export-ModuleMember -Function @('Install-OctoInfrastructure')
