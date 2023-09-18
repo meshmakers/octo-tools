@@ -1,4 +1,4 @@
-version: '3.7'
+version: "3.7"
 networks:
   mongo-net:
   redis:
@@ -15,49 +15,48 @@ services:
     hostname: mongo-2.mongo
     container_name: mongo-2.mongo
     image: mongo:6.0
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --journal --bind_ip_all" 
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --journal --bind_ip_all"
     ports:
-    - "27018:27017"
+      - "27018:27017"
     restart: always
     networks:
       - mongo-net
     volumes:
-    - "./file.key:/data/file.key"
-    - "mongo-data2:/data/db"
+      - "./file.key:/data/file.key"
+      - "mongo-data2:/data/db"
 
   mongo-1.mongo:
     hostname: mongo-1.mongo
     container_name: mongo-1.mongo
     image: mongo:6.0
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --journal --bind_ip_all" 
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --journal --bind_ip_all"
     ports:
-    - "27019:27017"
+      - "27019:27017"
     restart: always
     networks:
       - mongo-net
     volumes:
-    - "./file.key:/data/file.key"
-    - "mongo-data1:/data/db"
-
+      - "./file.key:/data/file.key"
+      - "mongo-data1:/data/db"
 
   mongo-0.mongo:
     hostname: mongo-0.mongo
     container_name: mongo-0.mongo
     image: mongo:6.0
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --journal --bind_ip_all" 
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --journal --bind_ip_all"
     ports:
-    - "27017:27017"
+      - "27017:27017"
     links:
-    - mongo-1.mongo:mongo-1.mongo
-    - mongo-2.mongo:mongo-2.mongo
+      - mongo-1.mongo:mongo-1.mongo
+      - mongo-2.mongo:mongo-2.mongo
     restart: always
     networks:
       - mongo-net
     volumes:
-    - "./scripts/init-database.js:/scripts/init-database.js"
-    - "./scripts/create-admin-user.js:/scripts/create-admin-user.js"
-    - "./file.key:/data/file.key"
-    - "mongo-data0:/data/db"
+      - "./scripts/init-database.js:/scripts/init-database.js"
+      - "./scripts/create-admin-user.js:/scripts/create-admin-user.js"
+      - "./file.key:/data/file.key"
+      - "mongo-data0:/data/db"
 
   redis:
     hostname: redis
@@ -67,11 +66,11 @@ services:
       - redis
     ports:
       - "6379:6379"
-      
+
   rabbitmq:
     container_name: rabbitmq
-    image: rabbitmq:3.12-management   
-    
+    image: rabbitmq:3.12-management
+
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
@@ -84,23 +83,27 @@ services:
     image: crate:latest
     ports:
       - "4201:4200"
+      - "5432:5432"
     volumes:
       - crate-data1:/data
-    command: ["crate",
-              "-Ccluster.name=crate-docker-cluster",
-              "-Cnode.name=cratedb01",
-              "-Cnode.data=true",
-              "-Cnetwork.host=_site_",
-              "-Cdiscovery.seed_hosts=cratedb02,cratedb03",
-              "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
-              "-Cgateway.expected_data_nodes=3",
-              "-Cgateway.recover_after_data_nodes=2"]
+    command:
+      [
+        "crate",
+        "-Ccluster.name=crate-docker-cluster",
+        "-Cnode.name=cratedb01",
+        "-Cnode.data=true",
+        "-Cnetwork.host=_site_",
+        "-Cdiscovery.seed_hosts=cratedb02,cratedb03",
+        "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
+        "-Cgateway.expected_data_nodes=3",
+        "-Cgateway.recover_after_data_nodes=2",
+      ]
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
     environment:
-      - CRATE_HEAP_SIZE=1g
+      - CRATE_HEAP_SIZE=2g
 
   cratedb02:
     hostname: cratedb02
@@ -108,23 +111,27 @@ services:
     image: crate:latest
     ports:
       - "4202:4200"
+      - "5433:5432"
     volumes:
       - crate-data2:/data
-    command: ["crate",
-              "-Ccluster.name=crate-docker-cluster",
-              "-Cnode.name=cratedb02",
-              "-Cnode.data=true",
-              "-Cnetwork.host=_site_",
-              "-Cdiscovery.seed_hosts=cratedb01,cratedb03",
-              "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
-              "-Cgateway.expected_data_nodes=3",
-              "-Cgateway.recover_after_data_nodes=2"]
+    command:
+      [
+        "crate",
+        "-Ccluster.name=crate-docker-cluster",
+        "-Cnode.name=cratedb02",
+        "-Cnode.data=true",
+        "-Cnetwork.host=_site_",
+        "-Cdiscovery.seed_hosts=cratedb01,cratedb03",
+        "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
+        "-Cgateway.expected_data_nodes=3",
+        "-Cgateway.recover_after_data_nodes=2",
+      ]
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
     environment:
-      - CRATE_HEAP_SIZE=1g
+      - CRATE_HEAP_SIZE=2g
 
   cratedb03:
     hostname: cratedb03
@@ -132,20 +139,24 @@ services:
     image: crate:latest
     ports:
       - "4203:4200"
+      - "5434:5432"
     volumes:
       - crate-data3:/data
-    command: ["crate",
-              "-Ccluster.name=crate-docker-cluster",
-              "-Cnode.name=cratedb03",
-              "-Cnode.data=true",
-              "-Cnetwork.host=_site_",
-              "-Cdiscovery.seed_hosts=cratedb01,cratedb02",
-              "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
-              "-Cgateway.expected_data_nodes=3",
-              "-Cgateway.recover_after_data_nodes=2"]
+    command:
+      [
+        "crate",
+        "-Ccluster.name=crate-docker-cluster",
+        "-Cnode.name=cratedb03",
+        "-Cnode.data=true",
+        "-Cnetwork.host=_site_",
+        "-Cdiscovery.seed_hosts=cratedb01,cratedb02",
+        "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
+        "-Cgateway.expected_data_nodes=3",
+        "-Cgateway.recover_after_data_nodes=2",
+      ]
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
     environment:
-      - CRATE_HEAP_SIZE=1g
+      - CRATE_HEAP_SIZE=2g
