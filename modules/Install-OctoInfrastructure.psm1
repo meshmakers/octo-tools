@@ -28,11 +28,6 @@ function Install-OctoInfrastructure {
         [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($randBytes)
         $randString = [Convert]::ToBase64String($randBytes)
         $randString > file.key
-    
-        # mongodb only allows readonly files as key
-        if ($IsLinux -or $IsMacOS) {
-            chmod 400 file.key
-        }
     }
 
     if ($IsWindows) {

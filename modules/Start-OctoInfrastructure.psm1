@@ -10,7 +10,7 @@ function Start-OctoInfrastructure
     Set-Location $infrastructurePath
 
     Write-Host "Starting Octo infrastructure"
-    docker-compose up
+    docker-compose up -d
 
     Set-Location $basedir
 
