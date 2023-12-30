@@ -55,7 +55,7 @@ Use this function to selectively start Octo Mesh services based on your requirem
     
     $logDir = "logFiles"
     $jobs = New-Object System.Collections.ArrayList
-    $publishVersion = "net7.0"
+    $publishVersion = "net8.0"
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
