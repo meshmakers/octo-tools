@@ -3,7 +3,7 @@ function Invoke-Build
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param($repositoryPath = ".\")
     
-    dotnet publish $repositoryPath -f "net7.0"
+    dotnet publish $repositoryPath -f "net8.0"
 }
 
 
