@@ -1,10 +1,8 @@
 <#
 .Synopsis
-Updates submodules of git repositories including commit and push.
+Updates submodules of git repositories including submodules
 .Description
-This function changes to the directory provides by the argument repositoryPath,
-configures to use pull.rebase option, pulls from origin and updates the submodules
-from remote. After that the changes are commited and pushed.
+This function changes to the directory provides by the argument repositoryPath
 .Example
  Set-PsEnv
 .Example
@@ -20,7 +18,7 @@ function Sync-Submodule {
     $basedir = $PWD
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
-    git submodule update --remote
+    git submodule update --remote --merge --recursive
     Set-Location $basedir
 }
 
