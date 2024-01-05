@@ -15,7 +15,7 @@ function Invoke-BuildAll
 
         if ($solutionFiles.Count -gt 0) {
             
-            Write-Host "Building git repository $($directory.FullName)"
+            Write-Host "Building git repository $($directory.FullName)" -ForegroundColor Green
             Invoke-Build $directory.FullName
         }
     }

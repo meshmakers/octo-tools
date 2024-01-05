@@ -23,6 +23,8 @@ else
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
 $nugetPath = Resolve-Path (Join-Path $rootPath "nuget/")
+$usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+$globalNugetPackagesPath = Resolve-Path (Join-Path $usersFolderPath ".nuget/packages/")
 
 $env:PATH += ";$toolsPath"
 
@@ -49,6 +51,7 @@ Import-Module "$modulePath/Start-Octo.psm1"
 Import-Module "$modulePath/Start-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Stop-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Copy-AllNugetPackages.psm1"
+Import-Module "$modulePath/Remove-GlobalNugetPackages.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
@@ -62,6 +65,7 @@ if (!(Test-SubPath $rootPath $startPath))
 }
 
 $Global:ROOTPATH = $rootPath
+$Global:GLOBALNUGETPACKAGESPATH = $globalNugetPackagesPath
 $Global:INFRASTRUCTUREPATH = $infrastructurePath
 $Global:NUGETPATH = $nugetPath
 

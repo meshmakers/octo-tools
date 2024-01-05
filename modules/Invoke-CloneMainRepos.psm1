@@ -22,7 +22,9 @@ function Global:Invoke-CloneMainRepos {
 
     $basedir = $PWD
     Write-Host Root directory $rootPath
-    Clone-Repo "octo-core"
+    Clone-Repo "octo-distributedEventHub"
+    Clone-Repo "octo-construction-kit-engine"
+    Clone-Repo "octo-construction-kit-engine-mongodb"
     Clone-Repo "octo-sdk"
     Clone-Repo "octo-common-services"
     Clone-Repo "octo-construction-kit"
