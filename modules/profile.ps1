@@ -22,9 +22,9 @@ else
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
-$nugetPath = Resolve-Path (Join-Path $rootPath "nuget/")
+$nugetPath = Join-Path $rootPath "nuget/"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
-$globalNugetPackagesPath = Resolve-Path (Join-Path $usersFolderPath ".nuget/packages/")
+$globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
 
 $env:PATH += ";$toolsPath"
 
@@ -55,8 +55,8 @@ Import-Module "$modulePath/Remove-GlobalNugetPackages.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
-    Write-Error "Creating nuget packages path $nugetPath."
-    New-Item -Path $nugetPath -ItemType Directory    
+    Write-Host "Creating nuget packages path $nugetPath."
+    New-Item -Path $nugetPath -ItemType Directory | out-null
 }
 
 if (!(Test-SubPath $rootPath $startPath))
