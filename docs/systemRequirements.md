@@ -5,16 +5,14 @@ The development environment requires the packages and tools listed below.<br>
 Required packages and tools:
 
 - .NET IDE, Visual Studio 2022 (or newer) or JetBrains Rider
-- .NET SDK 7.0
-- PowerShell
-- Docker Desktop
-- Node 18
+- .NET SDK 8.0
+- PowerShell 7 (.NET Core variant)
+- Docker Desktop including docker compose
+- Node 20
 - Angular CLI 15
 
 ## Infrastructure Components
-- RabbitMQ, version mentioned in 
-- Redis Server 6
-- MongoDB 6.0
+Infrastructure components are installed by using Octo's powershell command ```Install-OctoInfrastructure```
 
 Optional tools:
 
@@ -23,7 +21,7 @@ Optional tools:
 
 Only SDKs needs to be installed locally, infrastructure components are setup by using Octo's powershell command ```Install-OctoInfrastructure```
 
-## Install .NET SDK 7
+## Install .NET SDK 8
 
 ### Debian bullseye
 
@@ -45,7 +43,7 @@ rm packages-microsoft-prod.deb
 Install the package.
 
 ```shell
-sudo apt update && sudo apt install dotnet-sdk-6.0
+sudo apt update && sudo apt install dotnet-sdk-8.0
 ```
 
 In addition, the .NET dev certificates must be activated, as there is a general problem here under Linux.
@@ -59,7 +57,7 @@ Download or clone the script from [GitHub]() and run it.
 ### Windows 
 
 ```powershell
-winget install Microsoft.DotNet.SDK.7
+winget install Microsoft.DotNet.SDK.8
 ```
 
 ## Install PowerShell

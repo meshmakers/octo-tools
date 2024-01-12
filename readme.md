@@ -54,6 +54,8 @@ After loading Octo Profile, there are some powershell variables existing
 - $ROOTPATH: The base directory of Octo Mesh. e. g. ~/Development/meshmakers/. This directory is called root directory
 - $TOOLSPATH: The directory of the tools repository.  e. g. ~/Development/meshmakers/octo-tools
 - $INFRASTRUCTUREPATH: The directory of infrastructure within the tools repository. e. g. ~/Development/meshmakers/octo-tools/infrastructure
+- $NUGETPATH: The directory of stored nuget packages of octo mesh. e. g. ~/Development/meshmakers/nuget
+- $GLOBALNUGETPACKAGESPATH: The global nuget package path of .NET. e. g. {use profile path}/.nuget/packages/
 
 ### Definitions
 
@@ -80,6 +82,8 @@ After loading Octo Profile, there are some powershell variables existing
 | Sync-AllGitSubmodules        | Pulls all submodules of all repositories starting with octo-*                                                                   |
 | Sync-GitRepo                 | Pulls a repository from github using the current directory by default or defining by parameter repositoryPath                   |
 | Sync-Submodule               | Pulls all submodules of a repository from github using the current directory by default or defining by parameter repositoryPath |
+| Copy-AllNugetPackages        | Scans all octo-* and mm-* directories for nuget packages for version 999.0.0 an copies them to $NUGETPATH                       |
+| Remove-GlobalNugetPackages   | Removes in global nuget package folder ($GLOBALNUGETPACKAGESPATH) all meshmaker nuget packages in version 999.0.0               |
 
 # Start Octo Mesh
 
