@@ -22,7 +22,7 @@ function Copy-AllNugetPackages
             Write-Host "Working on $binDirectory"
             if ((Test-Path $binDirectory)) {
                 
-                $nugetFiles = Get-ChildItem -Path $binDirectory -Filter $filter
+                $nugetFiles = Get-ChildItem -Path $binDirectory -Recurse -Filter $filter
                 
                 foreach ($file in $nugetFiles) {
                     Write-Host "Copy $file" -ForegroundColor Green
