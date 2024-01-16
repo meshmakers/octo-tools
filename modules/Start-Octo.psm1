@@ -110,22 +110,22 @@ Use this function to selectively start Octo Mesh services based on your requirem
     Delete-LogFile -file "AdminPanel.log"
     
     if ($identityService) {
-        Start-Service -workingDirectory "octo-identity-services/bin/Debug/IdentityServices/$publishVersion/publish/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003/") -jobName "IdentityServices"
+        Start-Service -workingDirectory "octo-identity-services/bin/Release/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003/") -jobName "IdentityServices"
     }
     if ($assetRepoService) {
-        Start-Service -workingDirectory "octo-asset-repo-services/bin/Debug/AssetRepositoryServices/$publishVersion/publish/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://localhost:5000;https://localhost:5001") -jobName "AssetRepositoryServices"
+        Start-Service -workingDirectory "octo-asset-repo-services/bin/Release/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://localhost:5000;https://localhost:5001") -jobName "AssetRepositoryServices"
     }
     if ($timeSeriesRepService) {
-        Start-Service -workingDirectory "octo-time-series-repo-services/bin/Debug/HistorianRepositoryServices/$publishVersion/publish/" -cmd "dotnet" -logname "TimeSeriesRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.HistorianRepositoryServices.dll", "--urls=https://localhost:5013") -jobName "TimeSeriesRepositoryServices"
+        Start-Service -workingDirectory "octo-time-series-repo-services/bin/Release/$publishVersion/" -cmd "dotnet" -logname "TimeSeriesRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.HistorianRepositoryServices.dll", "--urls=https://localhost:5013") -jobName "TimeSeriesRepositoryServices"
     }
     if ($botService) {
-        Start-Service -workingDirectory "octo-bot-services/bin/Debug/BotServices/$publishVersion/publish/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
+        Start-Service -workingDirectory "octo-bot-services/bin/Release/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
     }
     if ($communicationControllerService) {
-        Start-Service -workingDirectory "octo-communication-controller-services/bin/Debug/CommunicationControllerServices/$publishVersion/publish/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://localhost:5015") -jobName "CommunicationControllerServices"
+        Start-Service -workingDirectory "octo-communication-controller-services/bin/Release/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://localhost:5015") -jobName "CommunicationControllerServices"
     }
     if ($adminPanel) {
-        Start-Service -workingDirectory "octo-frontend-admin-panel/bin/Debug/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://localhost:5005") -jobName "AdminPanel" -aspnetEnvironment "Staging"
+        Start-Service -workingDirectory "octo-frontend-admin-panel/bin/Release/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://localhost:5005") -jobName "AdminPanel" -aspnetEnvironment "Staging"
     }
 
     Get-ServiceStatus

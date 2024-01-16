@@ -13,11 +13,18 @@ function Invoke-BuildAll
         # Check if a solution file exists
         $solutionFiles = Get-ChildItem -Path $directory.FullName -Filter "*.sln"
 
-        if ($solutionFiles.Count -gt 0) {
-            
+        # ensure there is a solution file and the directory name does not contain "octo-frontend-admin-panel"
+        Write-Host "Directory Fullname: $($directory.FullName)"
+        Write-Host "Directory Name: $($directory.Name)"
+        
+        if (($solutionFiles.Count -gt 0) -and ($directory.Name -ne "octo-frontend-admin-panel")) {
             Write-Host "Building git repository $($directory.FullName)" -ForegroundColor Green
             Invoke-Build $directory.FullName
-        }
+
+        }elseif ($directory.Name -eq "octo-frontend-admin-panel") { # admin panel has to be published to build the angular app
+            Write-Host "Publishing git repository $($directory.FullName)" -ForegroundColor Green
+            Invoke-Publish $directory.FullName
+        }        
     }
 }
 
