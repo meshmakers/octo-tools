@@ -21,6 +21,10 @@ function Sync-GitRepo {
     Set-Location $repositoryPath
     git config pull.rebase true
     git pull origin
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "Git update failed"
+    }
     Set-Location $basedir
 }
 
