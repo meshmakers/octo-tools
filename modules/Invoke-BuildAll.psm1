@@ -23,8 +23,8 @@ function Invoke-BuildAll
             Invoke-Build $directory.FullName
 
         }elseif ($directory.Name -eq "octo-frontend-admin-panel") { # admin panel has to be published to build the angular app
-            #Write-Host "Publishing git repository $($directory.FullName)" -ForegroundColor Green
-            #Invoke-Publish $directory.FullName
+            Write-Host "Publishing git repository $($directory.FullName)" -ForegroundColor Green
+            Invoke-Publish $directory.FullName
         }        
     }
 }
