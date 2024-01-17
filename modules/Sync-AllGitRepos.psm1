@@ -13,7 +13,7 @@ function Sync-AllGitRepos {
 
         # Check if the ".git" directory exists
         if (Test-Path -Path $gitDirectory -PathType Container) {
-            Write-Host "Pulling git repository $($directory.FullName)"
+            Write-Host "Pulling git repository $($directory.FullName)" -ForegroundColor Green
             Sync-GitRepo $directory.FullName
         }
     }
