@@ -5,10 +5,11 @@ function Invoke-BuildAll
         return;
     }
 
-    # Get all directories starting with "octo-"
-    $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-
-    foreach ($directory in $octoDirectories) {
+    # Get all directories starting with "octo-" and "mm-""
+    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
+    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    
+    foreach ($directory in $allDirectories) {
 
         # Check if a solution file exists
         $solutionFiles = Get-ChildItem -Path $directory.FullName -Filter "*.sln"

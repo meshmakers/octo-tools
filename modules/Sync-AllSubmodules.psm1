@@ -6,10 +6,11 @@ function Sync-AllSubmodules
         return;
     }
 
-     # Get all directories starting with "octo-"
-    $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
+    # Get all directories starting with "octo-" and "mm-""
+    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
+    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
 
-    foreach ($directory in $octoDirectories) {
+    foreach ($directory in $allDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"
         $modulesFile = Join-Path -Path $directory.FullName -ChildPath ".gitmodules"
         
