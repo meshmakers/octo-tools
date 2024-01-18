@@ -10,7 +10,7 @@ function Stop-OctoInfrastructure
     Set-Location $infrastructurePath
 
     Write-Host "Stopping Octo infrastructure"
-    docker-compose down
+    docker compose down
 
     Set-Location $basedir
 

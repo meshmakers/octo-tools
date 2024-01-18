@@ -17,7 +17,7 @@ function Uninstall-OctoInfrastructure
     }
 
     Write-Host "Stopping containers and cleaning up volumes";
-    docker-compose down -v
+    docker compose down -v
     
      Set-Location $basedir
 }
