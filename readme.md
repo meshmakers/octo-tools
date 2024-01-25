@@ -64,26 +64,27 @@ After loading Octo Profile, there are some powershell variables existing
 
 ### Commands
 
-| Command                      | Description                                                                                                                     |
-|------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| Invoke-CloneMainRepos        | Clones all main repositories to your root directory.                                                                            |
-| Invoke-BuildAll              | Builds all repositories starting with octo-* and a solution file (*.sln).                                                       |
-| Invoke-Build                 | Builds a repository for .NET using the current directory by default or defining by parameter repositoryPath                     |
-| Start-Octo                   | Starts the main services                                                                                                        |
-| Invoke-BuildAndStartOcto     | Builds all repositories and starts the main services                                                                            |
-| Install-OctoInfrastructure   | Uses the docker compose file located at [infrastructure](./infrastructue) to compose the infrastructure dependencies            |
-| Uninstall-OctoInfrastructure | Uninstalls the infrastructure dependencies by using docker compose file at  [infrastructure](./infrastructue)                   |
-| Start-OctoInfrastructure     | Starts the infrastructure dependencies by using docker compose file at [infrastructure](./infrastructue)                        |
-| Stop-OctoInfrastructure      | Stops the infrastructure dependencies by using docker compose file at [infrastructure](./infrastructue)                         |
-| Get-OctoInfrastructureStatus | Gets the status of containers by using docker compose file at [infrastructure](./infrastructue)                                 |
-| Push-GitRepo                 | Push a repository to github using the current directory by default or defining by parameter repositoryPath                      |
-| Push-AllGitRepos             | Push all repositories starting with octo-*                                                                                      |
-| Sync-AllGitRepos             | Pulls all repositories starting with octo-*                                                                                     |
-| Sync-AllGitSubmodules        | Pulls all submodules of all repositories starting with octo-*                                                                   |
-| Sync-GitRepo                 | Pulls a repository from github using the current directory by default or defining by parameter repositoryPath                   |
+| Command                      | Description                                                                                                         |
+|------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| Invoke-CloneMainRepos        | Clones all main repositories to your root directory.                                                                |
+| Invoke-BuildAll              | Builds all repositories starting with octo-* and a solution file (*.sln).                                           |
+| Invoke-Build                 | Builds a repository for .NET using the current directory by default or defining by parameter repositoryPath         |
+| Start-Octo                   | Starts the main services                                                                                            |
+| Invoke-BuildAndStartOcto     | Builds all repositories and starts the main services                                                                |
+| Install-OctoInfrastructure   | Uses the docker compose file located at [infrastructure](./infrastructue) to compose the infrastructure dependencies |
+| Uninstall-OctoInfrastructure | Uninstalls the infrastructure dependencies by using docker compose file at  [infrastructure](./infrastructue)       |
+| Start-OctoInfrastructure     | Starts the infrastructure dependencies by using docker compose file at [infrastructure](./infrastructue)            |
+| Stop-OctoInfrastructure      | Stops the infrastructure dependencies by using docker compose file at [infrastructure](./infrastructue)             |
+| Get-OctoInfrastructureStatus | Gets the status of containers by using docker compose file at [infrastructure](./infrastructue)                     |
+| Push-GitRepo                 | Push a repository to github using the current directory by default or defining by parameter repositoryPath          |
+| Push-AllGitRepos             | Push all repositories starting with octo-*                                                                          |
+| Sync-AllGitRepos             | Pulls all repositories starting with octo-*                                                                         |
+| Sync-AllGitSubmodules        | Pulls all submodules of all repositories starting with octo-*                                                       |
+| Sync-GitRepo                 | Pulls a repository from github using the current directory by default or defining by parameter repositoryPath       |
 | Sync-Submodule               | Pulls all submodules of a repository from github using the current directory by default or defining by parameter repositoryPath |
-| Copy-AllNugetPackages        | Scans all octo-* and mm-* directories for nuget packages for version 999.0.0 an copies them to $NUGETPATH                       |
-| Remove-GlobalNugetPackages   | Removes in global nuget package folder ($GLOBALNUGETPACKAGESPATH) all meshmaker nuget packages in version 999.0.0               |
+| Copy-AllNugetPackages        | Scans all octo-* and mm-* directories for nuget packages for version 999.0.0 an copies them to $NUGETPATH           |
+| Remove-GlobalNugetPackages   | Removes in global nuget package folder ($GLOBALNUGETPACKAGESPATH) all meshmaker nuget packages in version 999.0.0   |
+| Sync-NugetPackages     | Copies, removes globally and restores nuget packages                                                                |
 
 # Start Octo Mesh
 

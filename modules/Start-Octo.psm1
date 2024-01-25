@@ -43,11 +43,18 @@ Use this function to selectively start Octo Mesh services based on your requirem
         [Parameter()] [Boolean]$timeSeriesRepService = $true,
         [Parameter()] [Boolean]$communicationControllerService = $true,
         [Parameter()] [Boolean]$adminPanel = $true,
-        [Parameter()] [Boolean]$identityOnly = $false  
+        [Parameter()] [Boolean]$identityOnly = $false, 
+        [Parameter()] [Boolean]$identityAssetRepoOnly = $false  
     )
     if ($identityOnly) {
         $botService = $false;
         $assetRepoService = $false;
+        $timeSeriesRepService = $false;
+        $communicationControllerService = $false;
+        $adminPanel = $false;
+    }
+    if ($identityAssetRepoOnly) {
+        $botService = $false;
         $timeSeriesRepService = $false;
         $communicationControllerService = $false;
         $adminPanel = $false;
