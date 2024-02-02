@@ -72,10 +72,10 @@ After loading Octo Profile, there are some powershell variables existing
 | Start-Octo                   | Starts the main services                                                                                            |
 | Invoke-BuildAndStartOcto     | Builds all repositories and starts the main services                                                                |
 | Install-OctoInfrastructure   | Uses the docker compose file located at [infrastructure](https://github.com/meshmakers/octo-tools/blob/main/infrastructure/docker-compose.yml) to compose the infrastructure dependencies |
-| Uninstall-OctoInfrastructure | Uninstalls the infrastructure dependencies by using docker compose file at  [infrastructure](./infrastructue)       |
+| Uninstall-OctoInfrastructure | Uninstalls the infrastructure dependencies by using docker compose file at  [infrastructure](https://github.com/meshmakers/octo-tools/blob/main/infrastructure/docker-compose.yml)       |
 | Start-OctoInfrastructure     | Starts the infrastructure dependencies by using docker compose file at [infrastructure](https://github.com/meshmakers/octo-tools/blob/main/infrastructure/docker-compose.yml)            |
 | Stop-OctoInfrastructure      | Stops the infrastructure dependencies by using docker compose file at [infrastructure](https://github.com/meshmakers/octo-tools/blob/main/infrastructure/docker-compose.yml)             |
-| Get-OctoInfrastructureStatus | Gets the status of containers by using docker compose file at [infrastructure](./infrastructue)                     |
+| Get-OctoInfrastructureStatus | Gets the status of containers by using docker compose file at [infrastructure](https://github.com/meshmakers/octo-tools/blob/main/infrastructure/docker-compose.yml)                     |
 | Push-GitRepo                 | Push a repository to github using the current directory by default or defining by parameter repositoryPath          |
 | Push-AllGitRepos             | Push all repositories starting with octo-*                                                                          |
 | Sync-AllGitRepos             | Pulls all repositories starting with octo-*                                                                         |
