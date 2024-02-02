@@ -55,7 +55,7 @@ After loading Octo Profile, there are some powershell variables existing
 - $TOOLSPATH: The directory of the tools repository.  e. g. ~/Development/meshmakers/octo-tools
 - $INFRASTRUCTUREPATH: The directory of infrastructure within the tools repository. e. g. ~/Development/meshmakers/octo-tools/infrastructure
 - $NUGETPATH: The directory of stored nuget packages of OctoMesh. e. g. ~/Development/meshmakers/nuget
-- $GLOBALNUGETPACKAGESPATH: The global nuget package path of .NET. e. g. {use profile path}/.nuget/packages/
+- $GLOBALNUGETPACKAGESPATH: The global nuget package path of .NET. e. g. \{use profile path\}/.nuget/packages/
 
 ### Definitions
 
