@@ -1,9 +1,9 @@
 <#
 .Synopsis
-Clones all main Octo Mesh repositories
+Clones all main OctoMesh repositories
 .Description
 This function clones all major git repositories of
-Octo Mesh from GitHub
+OctoMesh from GitHub
 .Example
  Set-PsEnv
 .Example

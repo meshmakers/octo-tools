@@ -16,7 +16,7 @@ function Install-OctoInfrastructure {
     }
 
     $PSStyle.Progress.View = "Classic"
-    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Initializing infrastructure for octo mesh' -PercentComplete 0
+    Write-Progress -Activity 'Install Octo infrastructure' -Status 'Initializing infrastructure for OctoMesh' -PercentComplete 0
     
     $basedir = $PWD
     Set-Location $infrastructurePath

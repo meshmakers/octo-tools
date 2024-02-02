@@ -9,7 +9,7 @@ function Uninstall-OctoInfrastructure
     $basedir = $PWD
     Set-Location $infrastructurePath
     
-    Write-Host "Initializing infrastructure for octo mesh";
+    Write-Host "Initializing infrastructure for OctoMesh";
 
     if (Test-Path -Path "file.key") {
         Write-Host "Deleting key file";

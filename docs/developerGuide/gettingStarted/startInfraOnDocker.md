@@ -4,7 +4,7 @@ You can start the infrastructure locally with docker compose.
 
 ## Requirements
 
-We expect that you use the Octo Mesh Profile in PowerShell and your have Docker including Docker compose running.
+We expect that you use the OctoMesh Profile in PowerShell and your have Docker including Docker compose running.
 
 ### Default Admin credentials
 
