@@ -5,7 +5,7 @@ Details on cloning via SSH should be displayed there.
 
 ## Enable git clone via ssh
 
-To be able to clone via ssh from dev.azure.com, the configuration must be adapted.</br>
+To be able to clone via ssh from dev.azure.com, the configuration must be adapted.<br/>
 Add the following lines to `~/.ssh/conf`:
 
 ```

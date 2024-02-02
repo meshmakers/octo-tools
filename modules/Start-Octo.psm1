@@ -1,10 +1,10 @@
 function Start-Octo() {
     <#
 .SYNOPSIS
-Starts all Octo Mesh services. 
+Starts all OctoMesh services. 
 
 .DESCRIPTION
-The Start-Octo function starts all Octo Mesh services, but gives the user control to exclude certain services from being started by setting their corresponding parameter to $false. 
+The Start-Octo function starts all OctoMesh services, but gives the user control to exclude certain services from being started by setting their corresponding parameter to $false. 
 
 .PARAMETER botService
 If set to $true, the Bot Service will be started. If set to $false, it will not be started.
@@ -33,7 +33,7 @@ Start-Octo -botService $false -identityService $true
 This example starts all services except for the Bot Service.
 
 .NOTES
-Use this function to selectively start Octo Mesh services based on your requirements.
+Use this function to selectively start OctoMesh services based on your requirements.
 #>
 
     param(
