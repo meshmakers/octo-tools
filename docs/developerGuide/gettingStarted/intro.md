@@ -120,7 +120,7 @@ After that, the following services should be available:
 
 ## Create the first user account
 
-Go to the [Identity service](https://localhost:5003) to create the first admin user.<br>
+Go to the [Identity service](https://localhost:5003) to create the first admin user.</br>
 After that, new tenants can be created in the [Admin Panel](https://localhost:5005).
 
 # Further reading
@@ -140,6 +140,6 @@ http get https://localhost:5003/.well-known/openid-configuration
 
 It is confirmed if the console output contains the following error: `CERTIFICATE_VERIFY_FAILED`.
 
-**Solution:**<br>
+**Solution:**</br>
 Details on how to solve this issue can be found
 under [System Requirements](./systemRequirements.md).

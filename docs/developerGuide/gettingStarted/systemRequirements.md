@@ -1,6 +1,6 @@
 # System Requirements
 
-The development environment requires the packages and tools listed below.<br>
+The development environment requires the packages and tools listed below.</br>
 
 Required packages and tools:
 
@@ -47,7 +47,7 @@ sudo apt update && sudo apt install dotnet-sdk-8.0
 ```
 
 In addition, the .NET dev certificates must be activated, as there is a general problem here under Linux.
-Details can be found [here](https://blog.wille-zone.de/post/aspnetcore-devcert-for-ubuntu/).<br>
+Details can be found [here](https://blog.wille-zone.de/post/aspnetcore-devcert-for-ubuntu/).</br>
 Download or clone the script from [GitHub]() and run it.
 
 ```shell
