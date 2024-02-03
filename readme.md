@@ -3,7 +3,7 @@ OctoMesh is a powerful tool designed to seamlessly transform raw data into meani
 This repository contains tools to simplify the development and deployment of OctoMesh. It includes a PowerShell profile to simplify the development process and a set of scripts to manage the infrastructure with docker-compose.
 
 # Getting started
-Have a look to the [docs area](docs/developerGuide/gettingStarted/intro.md) to get started with OctoMesh.
+Have a look to the [docs](http://localhost:3000/docs/developerGuide/gettingStarted/intro) to get started with OctoMesh.
 
 The complete documentation of OctoMesh is available at https://docs.meshmakers.cloud.
 
