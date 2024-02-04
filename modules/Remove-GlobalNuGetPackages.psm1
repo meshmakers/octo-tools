@@ -1,5 +1,5 @@
 
-function Remove-GlobalNugetPackages
+function Remove-GlobalNuGetPackages
 {
     if (!(Test-Path $globalNugetPackagesPath)) {
         Write-Error "Path $globalNugetPackagesPath does not exist"
@@ -22,4 +22,4 @@ function Remove-GlobalNugetPackages
     }
 }
 
-Export-ModuleMember -Function @('Remove-GlobalNugetPackages')
+Export-ModuleMember -Function @('Remove-GlobalNuGetPackages')

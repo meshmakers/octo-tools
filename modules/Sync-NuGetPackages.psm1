@@ -11,15 +11,15 @@ Sync-NugetPackages
      Sync-NugetPackages
  }
 #>
-function Sync-NugetPackages {
+function Sync-NuGetPackages {
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
         return;
     }
     
-    Copy-AllNugetPackages
-    Remove-GlobalNugetPackages
+    Copy-AllNuGetPackages
+    Remove-GlobalNuGetPackages
 
     # Get all directories starting with "octo-" and "mm-""
     $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
@@ -38,4 +38,4 @@ function Sync-NugetPackages {
     }
 }
 
-Export-ModuleMember -Function @('Sync-NugetPackages')
+Export-ModuleMember -Function @('Sync-NuGetPackages')
