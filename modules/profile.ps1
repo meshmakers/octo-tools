@@ -7,17 +7,17 @@ $env:PSModulePath += ":$modulePath"
 $publishVersion = "net8.0"
 if ($IsMacOS)
 {
-    $octoCliPath = Join-Path $rootPath "octo-cli/bin/Debug/Tool/$publishVersion/osx-x64/publish"
+    $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
     $env:PATH += ";$octoCliPath"
 }
 elseif ($IsLinux)
 {
-    $octoCliPath = Join-Path $rootPath "octo-cli/bin/Debug/Tool/$publishVersion/linux-x64/publish"
+    $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/linux-x64"
     $env:PATH += ";$octoCliPath"
 }
 else
 {
-    $octoCliPath = Join-Path $rootPath "octo-cli/bin/Debug/Tool/$publishVersion/win-x64/publish"
+    $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/win-x64"
     $env:PATH += ";$octoCliPath"
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
