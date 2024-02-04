@@ -1,5 +1,5 @@
 
-function Copy-AllNugetPackages
+function Copy-AllNuGetPackages
 {
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
@@ -10,7 +10,7 @@ function Copy-AllNugetPackages
 
     $filter = "Meshmakers.*.999.0.0.nupkg"
      # Get all directories starting with "octo-" and "mm-"
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
+    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*" -exclude "*frontent*"
     $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
 
     foreach ($directory in $allDirectories) {     
@@ -33,4 +33,4 @@ function Copy-AllNugetPackages
     }
 }
 
-Export-ModuleMember -Function @('Copy-AllNugetPackages')
+Export-ModuleMember -Function @('Copy-AllNuGetPackages')

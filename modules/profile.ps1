@@ -50,10 +50,10 @@ Import-Module "$modulePath/Invoke-CloneMainRepos.psm1"
 Import-Module "$modulePath/Start-Octo.psm1"
 Import-Module "$modulePath/Start-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Stop-OctoInfrastructure.psm1"
-Import-Module "$modulePath/Copy-AllNugetPackages.psm1"
-Import-Module "$modulePath/Remove-GlobalNugetPackages.psm1"
+Import-Module "$modulePath/Copy-AllNuGetPackages.psm1"
+Import-Module "$modulePath/Remove-GlobalNuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-Publish.psm1"
-Import-Module "$modulePath/Sync-NugetPackages.psm1"
+Import-Module "$modulePath/Sync-NuGetPackages.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
