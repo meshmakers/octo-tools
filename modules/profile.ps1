@@ -54,6 +54,8 @@ Import-Module "$modulePath/Copy-AllNuGetPackages.psm1"
 Import-Module "$modulePath/Remove-GlobalNuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-Publish.psm1"
 Import-Module "$modulePath/Sync-NuGetPackages.psm1"
+Import-Module "$modulePath/Invoke-OctoCliLoginLocal.psm1"
+Import-Module "$modulePath/Invoke-SetDebugConfiguration.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
