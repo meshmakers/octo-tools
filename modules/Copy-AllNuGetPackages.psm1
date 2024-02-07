@@ -10,7 +10,7 @@ function Copy-AllNuGetPackages
 
     $filter = "Meshmakers.*.999.0.0.nupkg"
      # Get all directories starting with "octo-" and "mm-"
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*" -exclude "*frontent*"
+    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*" | Where-Object { $_.Name -notlike "*frontend*" }
     $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
 
     foreach ($directory in $allDirectories) {     
