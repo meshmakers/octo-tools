@@ -1,6 +1,11 @@
 function Invoke-BuildAll
 {
-    if (!(Test-Path $rootPath)) {
+    param(
+        [string]$configuration = "Release"
+    )
+
+    if (!(Test-Path $rootPath))
+    {
         Write-Error "Root path $rootPath does not exist"
         return;
     }
@@ -8,24 +13,26 @@ function Invoke-BuildAll
     # Get all directories starting with "octo-" and "mm-""
     $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
     $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
-    
-    foreach ($directory in $allDirectories) {
+
+    foreach ($directory in $allDirectories)
+    {
 
         # Check if a solution file exists
         $solutionFiles = Get-ChildItem -Path $directory.FullName -Filter "*.sln"
 
         # ensure there is a solution file and the directory name does not contain "octo-frontend-admin-panel"
-        Write-Host "Directory Fullname: $($directory.FullName)"
-        Write-Host "Directory Name: $($directory.Name)"
-        
-        if (($solutionFiles.Count -gt 0) -and ($directory.Name -ne "octo-frontend-admin-panel")) {
-            Write-Host "Building git repository $($directory.FullName)" -ForegroundColor Green
-            Invoke-Build $directory.FullName
+        Write-Host "Directory Fullname: $( $directory.FullName )"
+        Write-Host "Directory Name: $( $directory.Name )"
 
-        }elseif ($directory.Name -eq "octo-frontend-admin-panel") { # admin panel has to be published to build the angular app
-            Write-Host "Publishing git repository $($directory.FullName)" -ForegroundColor Green
-            Invoke-Publish $directory.FullName
-        }        
+        if ($directory.Name -like "*frontend*")
+        {
+            # frontends has to be published to build the angular app
+            Invoke-Publish -repositoryPath $directory.FullName -configuration $configuration
+        }
+        else
+        {
+            Invoke-Build -repositoryPath $directory.FullName -configuration $configuration
+        }
     }
 }
 

@@ -1,9 +1,12 @@
 function Invoke-Build
 {
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
-    param($repositoryPath = ".\")
+    param(
+        [string]$configuration = "Release",
+        [string]$repositoryPath = ".\"
+    )
     
-    dotnet build $repositoryPath -c Release
+    Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
+    dotnet build $repositoryPath -c $configuration
 }
 
 
