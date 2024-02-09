@@ -1,5 +1,4 @@
-function Invoke-Build
-{
+function Invoke-Build {
     param(
         [string]$configuration = "Release",
         [string]$repositoryPath = ".\"
@@ -7,6 +6,7 @@ function Invoke-Build
     
     Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
     dotnet build $repositoryPath -c $configuration
+    $global:LASTEXITCODE = $LASTEXITCODE
 }
 
 
