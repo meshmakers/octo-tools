@@ -24,7 +24,7 @@ function Invoke-BuildAll {
         # Check if a solution file exists
         $solutionFiles = Get-ChildItem -Path $directory.FullName -Filter "*.sln"
         if ($solutionFiles.Count -eq 0) {
-            Write-Host "No solution file found in directory $( $directory.FullName )" -ForegroundColor Red
+            Write-Host "No solution file found in directory $( $directory.FullName )" -ForegroundColor Yellow
             continue
         }
 
