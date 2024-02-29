@@ -5,18 +5,15 @@ $rootPath = Join-Path $modulePath "../../"
 $rootPath = Resolve-Path $rootPath
 $env:PSModulePath += ":$modulePath"
 $publishVersion = "net8.0"
-if ($IsMacOS)
-{
+if ($IsMacOS) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
     $env:PATH += ";$octoCliPath"
 }
-elseif ($IsLinux)
-{
+elseif ($IsLinux) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/linux-x64"
     $env:PATH += ";$octoCliPath"
 }
-else
-{
+else {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/win-x64"
     $env:PATH += ";$octoCliPath"
 }
@@ -32,7 +29,7 @@ function Test-SubPath( [string]$directory, [string]$subpath ) {
     $dPath = [IO.Path]::GetFullPath( $directory )
     $sPath = [IO.Path]::GetFullPath( $subpath )
     return $sPath.StartsWith( $dPath, [StringComparison]::OrdinalIgnoreCase )
-  }
+}
 
 Import-Module "$modulePath/Get-OctoInfrastructureStatus.psm1"
 Import-Module "$modulePath/Sync-AllGitRepos.psm1"
@@ -56,6 +53,7 @@ Import-Module "$modulePath/Invoke-Publish.psm1"
 Import-Module "$modulePath/Sync-NuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-OctoCliLoginLocal.psm1"
 Import-Module "$modulePath/Invoke-SetDebugConfiguration.psm1"
+Import-Module "$modulePath/Invoke-KillDotnet.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
@@ -63,8 +61,7 @@ if (!(Test-Path $nugetPath)) {
     New-Item -Path $nugetPath -ItemType Directory | out-null
 }
 
-if (!(Test-SubPath $rootPath $startPath))
-{
+if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
 }
 
@@ -73,4 +70,4 @@ $Global:GLOBALNUGETPACKAGESPATH = $globalNugetPackagesPath
 $Global:INFRASTRUCTUREPATH = $infrastructurePath
 $Global:NUGETPATH = $nugetPath
 
-function  Global:prompt {"OCTO $PWD> "}
+function  Global:prompt { "OCTO $PWD> " }

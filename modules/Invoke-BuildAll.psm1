@@ -8,6 +8,9 @@ function Invoke-BuildAll {
         return;
     }
 
+    # kill all dotnet processes. this is necessary to avoid file locks.
+    Invoke-KillDotnet
+
     # Get all directories starting with "octo-" and "mm-""
     $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
     $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"

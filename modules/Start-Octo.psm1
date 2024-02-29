@@ -112,7 +112,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -file "IdentityServices.log"
     Delete-LogFile -file "PolicyServices.log"
     Delete-LogFile -file "AssetRepositoryServices.log"
-    Delete-LogFile -file "TimeSeriesRepositoryServices.log"
+    Delete-LogFile -file "TimeSeriesServices.log"
     Delete-LogFile -file "CommunicationControllerServices.log"
     Delete-LogFile -file "BotServices.log"
     Delete-LogFile -file "AdminPanel.log"
@@ -124,7 +124,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://localhost:5000;https://localhost:5001") -jobName "AssetRepositoryServices"
     }
     if ($timeSeriesRepService) {
-        Start-Service -workingDirectory "octo-time-series-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "TimeSeriesRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.HistorianRepositoryServices.dll", "--urls=https://localhost:5013") -jobName "TimeSeriesRepositoryServices"
+        Start-Service -workingDirectory "octo-time-series-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "TimeSeriesServices.log" -cmdArguments @("Meshmakers.Octo.Backend.TimeSeriesServices.dll", "--urls=https://localhost:5013") -jobName "TimeSeriesServices"
     }
     if ($botService) {
         Start-Service -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
