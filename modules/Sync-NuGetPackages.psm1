@@ -1,6 +1,7 @@
 <#
 .Synopsis
 Syncs meshmaker DebugL nuget packages in git repos
+Attention: The $cleanBinFolder argument really cleans all bin folders.
 .Description
 Copies nuget packages to meshmaker nuget folder, deletes global nuget packages and syncs nuget packages in each repository
 .Example
@@ -12,12 +13,20 @@ Sync-NugetPackages
  }
 #>
 function Sync-NuGetPackages {
+    [CmdletBinding()]
+    param (
+        [boolean]$cleanBinFolder = $false
+    )
+
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
         return;
     }
     
+    # Kill all dotnet processes. This is necessary to avoid file locks.
+    Invoke-KillDotnet
+
     Copy-AllNuGetPackages
     Remove-GlobalNuGetPackages
 
@@ -32,6 +41,10 @@ function Sync-NuGetPackages {
         if (Test-Path -Path $gitDirectory -PathType Container) {
             Write-Host "Forcing restore at '$($directory.FullName)'" -ForegroundColor Green
             Push-Location $directory.FullName
+            if ($cleanBinFolder) {
+                Remove-Item -Path "bin" -Recurse -Force
+            }
+
             dotnet restore /p:Configuration="DebugL" -f
             Pop-Location
         }
