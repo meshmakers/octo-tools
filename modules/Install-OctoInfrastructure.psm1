@@ -3,9 +3,11 @@ function Wait-DockerContainer([string]$containerId) {
     Write-Host "Waiting for docker container $containerId"
     
     # Loop until the container is running
-    while ((docker inspect -f '{{.State.Status}}' $containerId) -ne "running") {
+    $containerState = docker inspect -f '{{.State.Status}}' $containerId;
+    while (-not ($containerState -like "running")) {
         Start-Sleep -Seconds 2
-        Write-Host Waiting more...
+        Write-Host "Waiting another 2 section for $containerId to get from '$containerState' to 'running'"
+        $containerState = docker inspect -f '{{.State.Status}}' $containerId;
     }
 }
 
