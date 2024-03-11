@@ -54,6 +54,7 @@ Import-Module "$modulePath/Sync-NuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-OctoCliLoginLocal.psm1"
 Import-Module "$modulePath/Invoke-SetDebugConfiguration.psm1"
 Import-Module "$modulePath/Invoke-KillDotnet.psm1"
+Import-Module "$modulePath/Remove-BinAndObjFolders.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
