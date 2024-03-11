@@ -18,21 +18,15 @@ function Sync-GitRepo {
 
     $basedir = $PWD
     Write-Host Pulling directory $repositoryPath
-    Set-Location $repositoryPath
+    Push-Location $repositoryPath
     git config pull.rebase true
-    git pull origin
+    git pull origin --recurse-submodules
     if ($LASTEXITCODE -ne 0)
     {
         throw "Git pull failed"
     }
-    
-    Write-Host Pulling submodules at $repositoryPath
-    git submodule update --init --recursive
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw "Git pull submodules failed"
-    }
-    Set-Location $basedir
+
+    Pop-Location
 }
 
 Export-ModuleMember -Function @('Sync-GitRepo')

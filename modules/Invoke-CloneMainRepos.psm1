@@ -52,11 +52,11 @@ function Clone-Repo
         Write-Warning "Repo already exists: $repositoryPath "
         return;
     }
-    Set-Location $rootPath
+    Push-Location $rootPath
 
-    git clone --recurse-submodules git@github.com:meshmakers/$repositoryName.git 
+    git clone --recurse-submodules git@github.com:meshmakers/$repositoryName.git
 
-    Set-Location $basedir
+    Pop-Location
 
 }
 
