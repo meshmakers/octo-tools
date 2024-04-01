@@ -33,7 +33,7 @@ function Global:Invoke-CloneMainRepos {
     Clone-Repo "octo-identity-services"
     Clone-Repo "octo-asset-repo-services"
     Clone-Repo "octo-bot-services"
-    Clone-Repo "octo-time-series-repo-services"
+    Clone-Repo "octo-mesh-adapter"
     Clone-Repo "octo-communication-controller-services"
     Clone-Repo "octo-communication-operator"
     Clone-Repo "octo-frontend-admin-panel"
