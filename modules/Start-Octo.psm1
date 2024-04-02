@@ -15,8 +15,8 @@ If set to $true, the Identity Service will be started. If set to $false, it will
 .PARAMETER assetRepoService
 If set to $true, the Asset Repo Service will be started. If set to $false, it will not be started.
 
-.PARAMETER timeSeriesRepService
-If set to $true, the Time Series Rep Service will be started. If set to $false, it will not be started.
+.PARAMETER meshAdapter
+If set to $true, the mesh adapter will be started. If set to $false, it will not be started.
 
 .PARAMETER communicationControllerService
 If set to $true, the Communication Controller Service will be started. If set to $false, it will not be started.
@@ -41,7 +41,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$botService = $true,
         [Parameter()] [Boolean]$identityService = $true,
         [Parameter()] [Boolean]$assetRepoService = $true,
-        [Parameter()] [Boolean]$timeSeriesRepService = $true,
+        [Parameter()] [Boolean]$meshAdapter = $true,
         [Parameter()] [Boolean]$communicationControllerService = $true,
         [Parameter()] [Boolean]$adminPanel = $true,
         [Parameter()] [Boolean]$identityOnly = $false, 
@@ -50,13 +50,13 @@ Use this function to selectively start OctoMesh services based on your requireme
     if ($identityOnly) {
         $botService = $false;
         $assetRepoService = $false;
-        $timeSeriesRepService = $false;
+        $meshAdapter = $false;
         $communicationControllerService = $false;
         $adminPanel = $false;
     }
     if ($identityAssetRepoOnly) {
         $botService = $false;
-        $timeSeriesRepService = $false;
+        $meshAdapter = $false;
         $communicationControllerService = $false;
         $adminPanel = $false;
     }
@@ -117,7 +117,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     if ($assetRepoService) {
         Start-Service -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://localhost:5000;https://localhost:5001") -jobName "AssetRepositoryServices"
     }
-    if ($timeSeriesRepService) {
+    if ($meshAdapter) {
         Start-Service -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://localhost:5013") -jobName "MeshAdapter"
     }
     if ($botService) {
