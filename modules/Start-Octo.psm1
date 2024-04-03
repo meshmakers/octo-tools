@@ -101,7 +101,9 @@ Use this function to selectively start OctoMesh services based on your requireme
 
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
-
+    $env:OCTO_ADAPTER__ADAPTERRTID="66004fda527ac79a03ecedd7"
+    $env:OCTO_ADAPTER__ADAPTERCKTYPEID="System.Communication/MeshAdapter"
+    
     Create-LogDirectory
     Delete-LogFile -file "IdentityServices.log"
     Delete-LogFile -file "PolicyServices.log"
