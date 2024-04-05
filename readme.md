@@ -11,7 +11,9 @@ The complete documentation of OctoMesh is available at https://docs.meshmakers.c
 # Customizing Windows Terminal Profile
 
 1. Create Environment Variable MESHMAKERS with path to the OctoMesh repository.
-2. In Windows add a new Profile and set the following settings in json.
+2. In Windows add a new Profile and set the following settings in json:
+
+**Terminal Profile:**
 
 ```json
 {
@@ -34,6 +36,34 @@ The complete documentation of OctoMesh is available at https://docs.meshmakers.c
   "snapOnInput": true,
   "startingDirectory": "%MESHMAKERS%",
   "useAcrylic": true
+}
+```
+
+**Color Scheme:**
+
+```json
+{
+  "background": "#3A695C",
+  "black": "#0C0C0C",
+  "blue": "#0037DA",
+  "brightBlack": "#767676",
+  "brightBlue": "#3B78FF",
+  "brightCyan": "#61D6D6",
+  "brightGreen": "#16C60C",
+  "brightPurple": "#B4009E",
+  "brightRed": "#E74856",
+  "brightWhite": "#F2F2F2",
+  "brightYellow": "#F9F1A5",
+  "cursorColor": "#FFFFFF",
+  "cyan": "#3A96DD",
+  "foreground": "#FFFFFF",
+  "green": "#13A10E",
+  "name": "Meshmakers",
+  "purple": "#881798",
+  "red": "#C50F1F",
+  "selectionBackground": "#FFFFFF",
+  "white": "#CCCCCC",
+  "yellow": "#C19C00"
 }
 ```
 
