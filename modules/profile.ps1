@@ -22,6 +22,8 @@ $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
 $nugetPath = Join-Path $rootPath "nuget/"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
+$privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
+$Global:WantPromt = $true
 
 $env:PATH += ";$toolsPath"
 
@@ -66,9 +68,16 @@ if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
 }
 
+if (Test-Path $privateProfilePath) {
+    Write-Host "Loading private profile '$privateProfilePath'"
+    . $privateProfilePath
+}
+
 $Global:ROOTPATH = $rootPath
 $Global:GLOBALNUGETPACKAGESPATH = $globalNugetPackagesPath
 $Global:INFRASTRUCTUREPATH = $infrastructurePath
 $Global:NUGETPATH = $nugetPath
 
-function  Global:prompt { "OCTO $PWD> " }
+if ($Global:WantPromt) {
+    function  Global:prompt { "OCTO $PWD> " }
+}
