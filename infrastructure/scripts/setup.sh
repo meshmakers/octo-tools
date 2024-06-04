@@ -28,17 +28,17 @@ mongo <<EOF
     //rs.reconfig(cfg, { force: true });
     rs.status();
 EOF
-sleep 20
+sleep 10
 
 mongo <<EOF
    use admin;
    admin = db.getSiblingDB("admin");
    admin.createUser(
      {
-	      user: "osp-system-admin",
-        pwd: "OspAdmin1",
+	      user: "octo-system-admin",
+        pwd: "OctoAdmin1",
         roles: [ { role: "root", db: "admin" } ]
      });
-     db.getSiblingDB("admin").auth("osp-system-admin", "OspAdmin1");
+     db.getSiblingDB("admin").auth("octo-system-admin", "OctoAdmin1");
      rs.status();
 EOF

@@ -13,7 +13,7 @@ services:
   mongo-2.mongo:
     hostname: mongo-2.mongo
     container_name: mongo-2.mongo
-    image: mongo:7.0.5
+    image: mongo:4.4.18
     command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
     ports:
       - "27018:27017"
@@ -27,7 +27,7 @@ services:
   mongo-1.mongo:
     hostname: mongo-1.mongo
     container_name: mongo-1.mongo
-    image: mongo:7.0.5
+    image: mongo:4.4.18
     command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
     ports:
       - "27019:27017"
@@ -41,8 +41,8 @@ services:
   mongo-0.mongo:
     hostname: mongo-0.mongo
     container_name: mongo-0.mongo
-    image: mongo:7.0.5
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
+    image: mongo:4.4.18
+    command: bash -c "chmod 400 /data/file.key && chmod +x /scripts/setup.sh && chmod +x /scripts/setup2.sh && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
     ports:
       - "27017:27017"
     links:
@@ -53,6 +53,8 @@ services:
       - mongo-net
     volumes:
       - "./scripts/init-database.js:/scripts/init-database.js"
+      - "./scripts/setup.sh:/scripts/setup.sh"
+      - "./scripts/setup2.sh:/scripts/setup2.sh"
       - "./scripts/create-admin-user.js:/scripts/create-admin-user.js"
       - "./file.key:/data/file.key"
       - "mongo-data0:/data/db"

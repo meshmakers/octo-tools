@@ -49,28 +49,29 @@ function Install-OctoInfrastructure {
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Setting up mongodb replicaset' -PercentComplete 50
     
     Write-Host "Initializing replica set and waiting for complete initialization";
-    while ($true) {
-        & {
-            docker exec mongo-0.mongo sh -c "mongosh admin /scripts/init-database.js"
-        } 2>stderr.txt
-        $err = get-content stderr.txt
-        Write-Host $err
-        if ((-not ([string]::IsNullOrWhiteSpace($err))) -And $err.Contains("MongoNetworkError")) {
-            Write-Progress -Activity 'Install Octo infrastructure' -Status  "Retrying to init replica set..." -PercentComplete 60
-            Start-Sleep -s 3
-            continue;
-        }
-        Remove-Item stderr.txt
-        break;
-    }
+#    while ($true) {
+     #   & {
+      #  #    docker exec mongo-0.mongo sh -c "mongosh admin /scripts/init-database.js"
+      #      docker exec mongo-0.mongo ./scripts/setup.sh
+      #  } 2>stderr.txt
+ #       $err = get-content stderr.txt
+  #      Write-Host $err
+   #     if ((-not ([string]::IsNullOrWhiteSpace($err))) -And $err.Contains("MongoNetworkError")) {
+    #        Write-Progress -Activity 'Install Octo infrastructure' -Status  "Retrying to init replica set..." -PercentComplete 60
+     #       Start-Sleep -s 3
+      #      continue;
+       # }
+       # Remove-Item stderr.txt
+       # break;
+    #}
 
     # init user.
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Creating admin user' -PercentComplete 80
-    docker exec mongo-0.mongo sh -c "mongosh admin /scripts/create-admin-user.js"
+    #docker exec mongo-0.mongo sh -c "mongosh admin /scripts/create-admin-user.js"
 
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Complete' -PercentComplete 100
     
-    Clear-Host
+   # Clear-Host
     Write-Host "Initialization done. Containers are running."
     Write-Host "To stop the containers use 'Stop-OctoInfrastructure'"
     Write-Host "For the next start just 'Start-OctoInfrastructure'"
