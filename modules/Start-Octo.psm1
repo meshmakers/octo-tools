@@ -101,8 +101,8 @@ Use this function to selectively start OctoMesh services based on your requireme
 
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
-    $env:OCTO_ADAPTER__ADAPTERRTID="66004fda527ac79a03ecedd7"
-    $env:OCTO_ADAPTER__ADAPTERCKTYPEID="System.Communication/MeshAdapter"
+    $env:OCTO_ADAPTER__ADAPTERRTID = "66004fda527ac79a03ecedd7"
+    $env:OCTO_ADAPTER__ADAPTERCKTYPEID = "System.Communication/MeshAdapter"
     
     Create-LogDirectory
     Delete-LogFile -file "IdentityServices.log"
@@ -112,24 +112,24 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -file "CommunicationControllerServices.log"
     Delete-LogFile -file "BotServices.log"
     Delete-LogFile -file "AdminPanel.log"
-    
+
     if ($identityService) {
         Start-Service -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003/") -jobName "IdentityServices"
     }
     if ($assetRepoService) {
-        Start-Service -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://localhost:5000;https://localhost:5001") -jobName "AssetRepositoryServices"
+        Start-Service -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://*:5000;https://*:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://localhost:5013") -jobName "MeshAdapter"
+        Start-Service -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5013") -jobName "MeshAdapter"
     }
     if ($botService) {
-        Start-Service -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://localhost:5009") -jobName "BotServices"
+        Start-Service -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://*:5009") -jobName "BotServices"
     }
     if ($communicationControllerService) {
-        Start-Service -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://localhost:5015") -jobName "CommunicationControllerServices"
+        Start-Service -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://*:5015") -jobName "CommunicationControllerServices"
     }
     if ($adminPanel) {
-        Start-Service -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://localhost:5005") -jobName "AdminPanel" -aspnetEnvironment "Staging"
+        Start-Service -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://*:5005") -jobName "AdminPanel" -aspnetEnvironment "Staging"
     }
 
     Get-ServiceStatus
