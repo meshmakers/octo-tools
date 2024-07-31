@@ -1,3 +1,53 @@
+function Compile-Repo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$path,
+        [Parameter(Mandatory=$true)]
+        [string]$configuration
+    )
+    # Check if a solution file exists
+    $solutionFiles = Get-ChildItem -Path $path -Filter "*.sln"
+    if ($solutionFiles.Count -eq 0) {
+        Write-Host "No solution file found in directory $( $path )" -ForegroundColor Yellow
+        return $true;
+    }
+
+    [Boolean]$state = $false;
+    if ($directory.Name -like "*frontend*") {
+        # frontends has to be published to build the angular app
+        Invoke-Publish -repositoryPath $path -configuration $configuration
+        $state = $global:LASTEXITCODE -eq 0
+    }
+    else {
+        Invoke-Build -repositoryPath $path -configuration $configuration
+        $state = $global:LASTEXITCODE -eq 0
+    }
+
+    if ($configuration -ieq "DebugL"){
+        Copy-NuGetPackages -directory $path
+    }
+    
+    return $state;
+}
+
+function Compile-RepoIfExists
+{
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$name,
+        [Parameter(Mandatory=$true)]
+        [string]$configuration,
+        [Parameter(Mandatory=$true)]
+        [hashtable]$status
+    )
+
+    $repoDir = Get-ChildItem -Directory -Path $rootPath -Filter $name
+    if ($repoDir) {
+        [Boolean]$buildStatus = Compile-Repo -path $repoDir.FullName -configuration $configuration
+        $status.Add($name, $buildStatus)
+    }
+}
+
 function Invoke-BuildAll {
     param(
         [string]$configuration = "Release"
@@ -12,44 +62,54 @@ function Invoke-BuildAll {
     Invoke-KillDotnet
 
     # Get all directories starting with "octo-" and "mm-""
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
-
+    $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
+    $mmDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    
     # Create a dictionary that contains the directory name and a status weather the build was successful or not
     $allStatus = @{}
 
     # Start a timer
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    if ($configuration -ieq "DebugL"){
+        # Kill all dotnet processes. This is necessary to avoid file locks.
+        Invoke-KillDotnet
 
-    foreach ($directory in $allDirectories) {
+        # Delete all nuget packages in the octo mesh nuget folder
+        Get-ChildItem -Path $nugetPath -File | Remove-Item -Force
+        
+        Remove-GlobalNuGetPackages
+    }
 
-        # Check if a solution file exists
-        $solutionFiles = Get-ChildItem -Path $directory.FullName -Filter "*.sln"
-        if ($solutionFiles.Count -eq 0) {
-            Write-Host "No solution file found in directory $( $directory.FullName )" -ForegroundColor Yellow
+    # At commom libraries we do not have a build sequence
+    foreach ($directory in $mmDirectories) {
+        [Boolean]$buildStatus = Compile-Repo -path $directory.FullName -configuration $configuration
+        $allStatus.Add($directory.Name, $buildStatus)
+    }
+    
+    # Build octo repostories that first that are dependent on other repositories
+    Compile-RepoIfExists -name "octo-distributedEventHub" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -name "octo-construction-kit-engine" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -name "octo-sdk" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -name "octo-construction-kit-engine-mongodb" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -name "octo-common-services" -configuration $configuration -status $allStatus
+    
+    # Build the rest of the octo repositories
+    foreach ($directory in $octoDirectories) {
+        
+        # do not build already build repositories
+        if ($allStatus.ContainsKey($directory.Name)) {
             continue
         }
 
-        
-        if ($directory.Name -like "*frontend*") {
-            # frontends has to be published to build the angular app
-            Invoke-Publish -repositoryPath $directory.FullName -configuration $configuration
-        }
-        else {
-            Invoke-Build -repositoryPath $directory.FullName -configuration $configuration
-        }
-
-        $buildStatus = $global:LASTEXITCODE -eq 0
+        [Boolean]$buildStatus = Compile-Repo -path $directory.FullName -configuration $configuration
         $allStatus.Add($directory.Name, $buildStatus)
     }
-
-
 
     # Print the status of all builds
     
     # Store the count of all repositories in a variable
-    $repositoryCount = $allDirectories.Count
+    $repositoryCount = $octoDirectories.Count + $mmDirectories.Count
     
     # Calculate percentage of successful builds
     $successfulBuilds = $allStatus.Values | Where-Object { $_ -eq $true }
