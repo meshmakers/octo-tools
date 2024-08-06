@@ -16,14 +16,14 @@ function Compile-Repo {
     if ($directory.Name -like "*frontend*") {
         # frontends has to be published to build the angular app
         Invoke-Publish -repositoryPath $path -configuration $configuration
-        $state = $global:LASTEXITCODE -eq 0
+        $state = $Global:LASTEXITCODE -eq 0
     }
     else {
         Invoke-Build -repositoryPath $path -configuration $configuration
-        $state = $global:LASTEXITCODE -eq 0
+        $state = $Global:LASTEXITCODE -eq 0
     }
 
-    if ($configuration -ieq "DebugL"){
+    if ($configuration -ieq "DebugL" -And $state -eq $true) {
         Copy-NuGetPackages -directory $path
     }
     
@@ -50,7 +50,8 @@ function Compile-RepoIfExists
 
 function Invoke-BuildAll {
     param(
-        [string]$configuration = "Release"
+        [string]$configuration = "Release",
+        [Boolean]$excludeAdditional = $false
     )
 
     if (!(Test-Path $rootPath)) {
@@ -95,15 +96,17 @@ function Invoke-BuildAll {
     Compile-RepoIfExists -name "octo-common-services" -configuration $configuration -status $allStatus
     
     # Build the rest of the octo repositories
-    foreach ($directory in $octoDirectories) {
-        
-        # do not build already build repositories
-        if ($allStatus.ContainsKey($directory.Name)) {
-            continue
-        }
+    if ($excludeAdditional -eq $false) {
+        foreach ($directory in $octoDirectories) {
 
-        [Boolean]$buildStatus = Compile-Repo -path $directory.FullName -configuration $configuration
-        $allStatus.Add($directory.Name, $buildStatus)
+            # do not build already build repositories
+            if ($allStatus.ContainsKey($directory.Name)) {
+                continue
+            }
+
+            [Boolean]$buildStatus = Compile-Repo -path $directory.FullName -configuration $configuration
+            $allStatus.Add($directory.Name, $buildStatus)
+        }
     }
 
     # Print the status of all builds
