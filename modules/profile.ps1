@@ -60,6 +60,7 @@ Import-Module "$modulePath/Invoke-KillDotnet.psm1"
 Import-Module "$modulePath/Remove-BinAndObjFolders.psm1"
 Import-Module "$modulePath/Get-AllGitRepStatus.psm1"
 Import-Module "$modulePath/Join-KubeConfigs.psm1"
+Import-Module "$modulePath/Remove-KubeConfig.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
