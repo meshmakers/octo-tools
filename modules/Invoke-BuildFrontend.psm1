@@ -1,15 +1,14 @@
 function Invoke-BuildFrontend {
     
     # rm -rf node_modules in "octo-frontend-libraries" and "octo-frontend-admin-panel"
-    $frontendLibrariesPath = Join-Path $rootPath "octo-frontend-libraries"
-    $frontendAdminPanelPath = Join-Path $rootPath "octo-frontend-admin-panel"
+    $frontendLibrariesPath = Join-Path $rootPath "octo-frontend-libraries\src\FrontendLibraries\ClientApp"
+    $frontendAdminPanelPath = Join-Path $rootPath "octo-frontend-admin-panel\src\AdminPanel\ClientApp"
     
-    $frontendLibrariesPath = Join-Path $frontendLibrariesPath "src\FrontendLibraries\ClientApp"
-    $frontendAdminPanelPath = Join-Path $frontendAdminPanelPath "src\AdminPanel\ClientApp"
     
-    Write-Host "Delete node_modules in $frontendLibrariesPath"
-    if (Test-Path $frontendLibrariesPath) {
-        Remove-Item -Path $frontendLibrariesPath\node_modules -Recurse -Force
+    $frontendLibrariesNodeModulesPath =  Join-Path $frontendLibrariesPath "node_modules"
+    Write-Host "Delete node_modules in $frontendLibrariesNodeModulesPath"
+    if (Test-Path $frontendLibrariesNodeModulesPath) {
+        Remove-Item -Path $frontendLibrariesNodeModulesPath -Recurse -Force
     }
     
     # npm install in "octo-frontend-libraries"
@@ -29,10 +28,12 @@ function Invoke-BuildFrontend {
     }
     
     
+    
     # rm -rf node_modules in "octo-frontend-admin-panel"
-    Write-Host "Delete node_modules in $frontendAdminPanelPath"
-    if (Test-Path $frontendAdminPanelPath) {
-        Remove-Item -Path $frontendAdminPanelPath\node_modules -Recurse -Force
+    $frontendAdminPanelNodeModulesPath = Join-Path $frontendAdminPanelPath "node_modules"
+    Write-Host "Delete node_modules in $frontendAdminPanelNodeModulesPath"
+    if (Test-Path $frontendAdminPanelNodeModulesPath) {
+        Remove-Item -Path $frontendAdminPanelNodeModulesPath -Recurse -Force
     }
 
     # npm install in "octo-frontend-admin-panel"
