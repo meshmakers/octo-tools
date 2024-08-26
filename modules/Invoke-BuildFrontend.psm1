@@ -1,7 +1,7 @@
 function Invoke-BuildFrontend {
     
     # rm -rf node_modules in "octo-frontend-libraries" and "octo-frontend-admin-panel"
-    $frontendLibrariesPath = Join-Path $rootPath "octo-frontend-libraries\src\FrontendLibraries\ClientApp"
+    $frontendLibrariesPath = Join-Path $rootPath "octo-frontend-admin-panel\src\octo-frontend-libraries\FrontendLibraries\ClientApp"
     $frontendAdminPanelPath = Join-Path $rootPath "octo-frontend-admin-panel\src\AdminPanel\ClientApp"
     
     
