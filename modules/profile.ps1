@@ -50,6 +50,7 @@ Import-Module "$modulePath/Start-Octo.psm1"
 Import-Module "$modulePath/Start-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Stop-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Copy-AllNuGetPackages.psm1"
+Import-Module "$modulePath/Copy-NuGetPackages.psm1"
 Import-Module "$modulePath/Remove-GlobalNuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-Publish.psm1"
 Import-Module "$modulePath/Sync-NuGetPackages.psm1"
@@ -59,6 +60,8 @@ Import-Module "$modulePath/Invoke-KillDotnet.psm1"
 Import-Module "$modulePath/Remove-BinAndObjFolders.psm1"
 Import-Module "$modulePath/Get-AllGitRepStatus.psm1"
 Import-Module "$modulePath/Invoke-BuildFrontend.psm1"
+Import-Module "$modulePath/Join-KubeConfigs.psm1"
+Import-Module "$modulePath/Remove-KubeConfig.psm1"
 
 
 if (!(Test-Path $nugetPath)) {
