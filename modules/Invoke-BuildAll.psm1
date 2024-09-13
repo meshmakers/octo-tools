@@ -51,7 +51,8 @@ function Compile-RepoIfExists
 function Invoke-BuildAll {
     param(
         [string]$configuration = "Release",
-        [Boolean]$excludeAdditional = $false
+        [Boolean]$excludeAdditional = $false,
+        [Boolean]$excludeFrontend = $false
     )
 
     if (!(Test-Path $rootPath)) {
@@ -65,6 +66,10 @@ function Invoke-BuildAll {
     # Get all directories starting with "octo-" and "mm-""
     $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
     $mmDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    
+    if ($excludeFrontend -eq $true){
+        $octoDirectories = $octoDirectories | Where-Object { $_.Name -notlike "octo-frontend-*" }
+    }
     
     # Create a dictionary that contains the directory name and a status weather the build was successful or not
     $allStatus = @{}
