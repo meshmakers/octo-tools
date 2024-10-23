@@ -33,7 +33,7 @@ function Invoke-BuildFrontend {
     
     Write-Host "Publishing adminpanel..."
     Push-Location -Path $frontendAdminPanelRootPath
-    Invoke-Publish 
+    Invoke-Publish
     Pop-Location
     
 }
