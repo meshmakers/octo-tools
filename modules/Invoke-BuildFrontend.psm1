@@ -1,4 +1,10 @@
 function Invoke-BuildFrontend {
+
+    $npmVersion = npm --version
+    $nodeVersion = node --version
+    
+    Write-Host "npm version: $npmVersion"
+    Write-Host "node version: $nodeVersion"
     
     $frontendAdminPanelRootPath = Join-Path $rootPath "octo-frontend-admin-panel"
     $frontendLibrariesPath = Join-Path $rootPath "octo-frontend-admin-panel\src\octo-frontend-libraries\src\FrontendLibraries\ClientApp"
