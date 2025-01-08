@@ -4,7 +4,7 @@ $modulePath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $rootPath = Join-Path $modulePath "../../"
 $rootPath = Resolve-Path $rootPath
 $env:PSModulePath += ":$modulePath"
-$publishVersion = "net8.0"
+$publishVersion = "net9.0"
 if ($IsMacOS) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
     $env:PATH += ";$octoCliPath"
