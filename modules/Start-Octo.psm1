@@ -63,7 +63,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     
     $logDir = "logFiles"
     $jobs = New-Object System.Collections.ArrayList
-    $publishVersion = "net8.0"
+    $publishVersion = "net9.0"
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"

@@ -11,7 +11,7 @@
     }
 
     Write-Host "[$configuration] Publishing git repository $repositoryPath" -ForegroundColor Green
-    dotnet publish $repositoryPath -f "net8.0" -c $configuration > $logFile
+    dotnet publish $repositoryPath -f "net9.0" -c $configuration > $logFile
     $state = $LASTEXITCODE -eq 0
     if ($state -eq $false) {
         Write-Host "[$configuration] Publish failed" -ForegroundColor Red
