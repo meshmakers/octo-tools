@@ -101,6 +101,7 @@ Use this function to selectively start OctoMesh services based on your requireme
 
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
+    $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
     $env:OCTO_ADAPTER__ADAPTERRTID = "66004fda527ac79a03ecedd7"
     $env:OCTO_ADAPTER__ADAPTERCKTYPEID = "System.Communication/MeshAdapter"
     
