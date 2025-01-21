@@ -105,6 +105,9 @@ Use this function to selectively start OctoMesh services based on your requireme
     $env:OCTO_ADAPTER__ADAPTERRTID = "66004fda527ac79a03ecedd7"
     $env:OCTO_ADAPTER__ADAPTERCKTYPEID = "System.Communication/MeshAdapter"
     
+    # Set environment to development, because so we get more information in the logs
+    $env:ASPNETCORE_ENVIRONMENT = "Development"
+    
     Create-LogDirectory
     Delete-LogFile -file "IdentityServices.log"
     Delete-LogFile -file "PolicyServices.log"
