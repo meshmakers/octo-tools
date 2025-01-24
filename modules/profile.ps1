@@ -64,6 +64,7 @@ Import-Module "$modulePath/Join-KubeConfigs.psm1"
 Import-Module "$modulePath/Remove-KubeConfig.psm1"
 Import-Module "$modulePath/Invoke-OctoCliReconfigureLogLevel.psm1"
 Import-Module "$modulePath/Invoke-CleanAllGitRepos.psm1"
+Import-Module "$modulePath/Invoke-BuildZenonPlug.psm1"
 
 
 if (!(Test-Path $nugetPath)) {

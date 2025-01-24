@@ -7,6 +7,8 @@ function Invoke-Build {
     if (Test-Path $logFile) {
         Remove-Item $logFile
     }
+
+    $repositoryPath = $(Resolve-Path -Path $repositoryPath).Path
     
     Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
     dotnet build $repositoryPath -c $configuration > $logFile

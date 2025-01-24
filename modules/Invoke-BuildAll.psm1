@@ -18,6 +18,10 @@ function Compile-Repo {
         Invoke-Publish -repositoryPath $path -configuration $configuration
         $state = $Global:LASTEXITCODE -eq 0
     }
+    elseif ($directory.Name -like "*octo-plug-zenon*") {
+        Invoke-BuildZenonPlug -repositoryPath $path -configuration $configuration
+        $state = $Global:LASTEXITCODE -eq 0
+    }
     else {
         Invoke-Build -repositoryPath $path -configuration $configuration
         $state = $Global:LASTEXITCODE -eq 0
