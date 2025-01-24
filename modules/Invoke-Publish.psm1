@@ -2,7 +2,11 @@
 {
     param(
         [string]$configuration = "Release",
-        [string]$repositoryPath = ".\"
+        [string]$repositoryPath = ".\",
+        # dotnet publish parameters
+        [Parameter(Mandatory=$false)]
+        [string]
+        $publishParamerters = ""
     )
 
     $logFile = Join-Path $repositoryPath "Invoke-Build.log"
@@ -10,8 +14,8 @@
         Remove-Item $logFile
     }
 
-    Write-Host "[$configuration] Publishing git repository $repositoryPath" -ForegroundColor Green
-    dotnet publish $repositoryPath -f "net9.0" -c $configuration > $logFile
+    Write-Host "[$configuration] Publishing git repository $repositoryPath $publishParamerters" -ForegroundColor Green
+    dotnet publish $repositoryPath -f "net9.0" -c $configuration $publishParameters > $logFile
     $state = $LASTEXITCODE -eq 0
     if ($state -eq $false) {
         Write-Host "[$configuration] Publish failed" -ForegroundColor Red
