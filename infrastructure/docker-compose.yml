@@ -13,7 +13,7 @@ services:
     hostname: mongo-2.mongo
     container_name: mongo-2.mongo
     image: mongo:8.0.0
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
     ports:
       - "27018:27017"
     restart: always
@@ -27,7 +27,7 @@ services:
     hostname: mongo-1.mongo
     container_name: mongo-1.mongo
     image: mongo:8.0.0
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
     ports:
       - "27019:27017"
     restart: always
@@ -41,7 +41,7 @@ services:
     hostname: mongo-0.mongo
     container_name: mongo-0.mongo
     image: mongo:8.0.0
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all" 
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
     ports:
       - "27017:27017"
     links:
@@ -70,7 +70,8 @@ services:
   cratedb01:
     hostname: cratedb01
     container_name: cratedb01
-    image: crate:5.8.3
+    image: crate:5.10.1
+    platform: linux/amd64
     ports:
       - "4201:4200"
       - "5432:5432"
@@ -98,7 +99,8 @@ services:
   cratedb02:
     hostname: cratedb02
     container_name: cratedb02
-    image: crate:5.8.3
+    image: crate:5.10.1
+    platform: linux/amd64
     ports:
       - "4202:4200"
       - "5433:5432"
@@ -126,7 +128,8 @@ services:
   cratedb03:
     hostname: cratedb03
     container_name: cratedb03
-    image: crate:5.8.3
+    image: crate:5.10.1
+    platform: linux/amd64
     ports:
       - "4203:4200"
       - "5434:5432"
