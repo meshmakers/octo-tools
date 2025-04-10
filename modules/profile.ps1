@@ -55,6 +55,8 @@ Import-Module "$modulePath/Remove-GlobalNuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-Publish.psm1"
 Import-Module "$modulePath/Sync-NuGetPackages.psm1"
 Import-Module "$modulePath/Invoke-OctoCliLoginLocal.psm1"
+Import-Module "$modulePath/Invoke-OctoCliLoginProduction.psm1"
+Import-Module "$modulePath/Invoke-OctoCliLoginStaging.psm1"
 Import-Module "$modulePath/Invoke-SetDebugConfiguration.psm1"
 Import-Module "$modulePath/Invoke-KillDotnet.psm1"
 Import-Module "$modulePath/Remove-BinAndObjFolders.psm1"
@@ -65,6 +67,7 @@ Import-Module "$modulePath/Remove-KubeConfig.psm1"
 Import-Module "$modulePath/Invoke-OctoCliReconfigureLogLevel.psm1"
 Import-Module "$modulePath/Invoke-CleanAllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-BuildZenonPlug.psm1"
+
 
 
 if (!(Test-Path $nugetPath)) {
