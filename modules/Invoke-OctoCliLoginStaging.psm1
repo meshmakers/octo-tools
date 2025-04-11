@@ -1,4 +1,4 @@
-function Invoke-OctoCliLoginLocal {
+function Invoke-OctoCliLoginStaging {
     param($tenantId = "meshtest", $includeReporting = $false)
 
     if ($includeReporting) {
@@ -13,5 +13,5 @@ function Invoke-OctoCliLoginLocal {
     octo-cli -c Login -i
 }
 
-Export-ModuleMember -Function @('Invoke-OctoCliLoginLocal')
+Export-ModuleMember -Function @('Invoke-OctoCliLoginStaging')
 
