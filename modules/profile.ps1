@@ -68,6 +68,10 @@ Import-Module "$modulePath/Remove-KubeConfig.psm1"
 Import-Module "$modulePath/Invoke-OctoCliReconfigureLogLevel.psm1"
 Import-Module "$modulePath/Invoke-CleanAllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-BuildZenonPlug.psm1"
+Import-Module "$modulePath/Invoke-MongoBackup.psm1"
+Import-Module "$modulePath/Invoke-MongoCompress.psm1"
+Import-Module "$modulePath/Invoke-MongoUncompress.psm1"
+Import-Module "$modulePath/Invoke-MongoRestore.psm1"
 
 
 
@@ -89,6 +93,11 @@ $Global:ROOTPATH = $rootPath
 $Global:GLOBALNUGETPACKAGESPATH = $globalNugetPackagesPath
 $Global:INFRASTRUCTUREPATH = $infrastructurePath
 $Global:NUGETPATH = $nugetPath
+
+write-host "ROOTPATH: $Global:ROOTPATH"
+write-host "GLOBALNUGETPACKAGESPATH: $Global:GLOBALNUGETPACKAGESPATH"
+write-host "INFRASTRUCTUREPATH: $Global:INFRASTRUCTUREPATH"
+write-host "NUGETPATH: $Global:NUGETPATH"
 
 if ($Global:WantPromt) {
     function  Global:prompt { "OCTO $PWD> " }
