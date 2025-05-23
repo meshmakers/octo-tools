@@ -27,6 +27,9 @@ If set to $true, the Admin Panel will be started. If set to $false, it will not 
 .PARAMETER identityOnly
 If set to $true, only the Identity Service will be started. All other parameters will be ignored.
 
+.PARAMETER reportingService
+If set to $true, the Reporting Service will be started. If set to $false, it will not be started.
+
 .EXAMPLE
 Start-Octo -botService $false -identityService $true
 
@@ -45,7 +48,8 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$communicationControllerService = $true,
         [Parameter()] [Boolean]$adminPanel = $true,
         [Parameter()] [Boolean]$identityOnly = $false, 
-        [Parameter()] [Boolean]$identityAssetRepoOnly = $false  
+        [Parameter()] [Boolean]$identityAssetRepoOnly = $false,
+        [Parameter()] [Boolean]$reportingService = $false
     )
     if ($identityOnly) {
         $botService = $false;
@@ -116,6 +120,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -file "CommunicationControllerServices.log"
     Delete-LogFile -file "BotServices.log"
     Delete-LogFile -file "AdminPanel.log"
+    Delete-LogFile -file "ReportingServices.log"
 
     if ($identityService) {
         Start-Service -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
@@ -134,6 +139,9 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
     if ($adminPanel) {
         Start-Service -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://*:5005;http://*:5004") -jobName "AdminPanel" -aspnetEnvironment "Staging"
+    }
+    if ($reportingService) {
+        Start-Service -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://*:5007;http://*:5006") -jobName "ReportingServices"
     }
 
     Get-ServiceStatus
