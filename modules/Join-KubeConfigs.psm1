@@ -14,7 +14,7 @@ function Join-KubeConfigs {
     }
     
     # make a backup
-    cd ~/.kube/
+    Push-Location ~/.kube/
     cp config config.bak
 
     $configFullPath = Resolve-Path "~/.kube/config"
@@ -43,6 +43,8 @@ function Join-KubeConfigs {
     mv config-merged config
     # remove (optional)
     rm config.bak
+
+    Pop-Location
 }
 
 
