@@ -77,6 +77,7 @@ services:
       - "5432:5432"
     volumes:
       - crate-data1:/data
+      - ./backup:/mnt/backup
     command:
       [
         "crate",
@@ -88,6 +89,7 @@ services:
         "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
         "-Cgateway.expected_data_nodes=3",
         "-Cgateway.recover_after_data_nodes=2",
+        "-Cpath.repo=/mnt/backup",
       ]
     deploy:
       replicas: 1
@@ -106,6 +108,7 @@ services:
       - "5433:5432"
     volumes:
       - crate-data2:/data
+      - ./backup:/mnt/backup
     command:
       [
         "crate",
@@ -117,6 +120,7 @@ services:
         "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
         "-Cgateway.expected_data_nodes=3",
         "-Cgateway.recover_after_data_nodes=2",
+        "-Cpath.repo=/mnt/backup",
       ]
     deploy:
       replicas: 1
@@ -135,6 +139,7 @@ services:
       - "5434:5432"
     volumes:
       - crate-data3:/data
+      - ./backup:/mnt/backup
     command:
       [
         "crate",
@@ -146,6 +151,7 @@ services:
         "-Ccluster.initial_master_nodes=cratedb01,cratedb02,cratedb03",
         "-Cgateway.expected_data_nodes=3",
         "-Cgateway.recover_after_data_nodes=2",
+        "-Cpath.repo=/mnt/backup",
       ]
     deploy:
       replicas: 1
