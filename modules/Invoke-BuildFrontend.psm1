@@ -1,5 +1,7 @@
-function Invoke-BuildFrontend {
+function Invoke-BuildFrontend  {
 
+    param(
+        [string]$configuration = "Release")
     $npmVersion = npm --version
     $nodeVersion = node --version
     
@@ -33,7 +35,7 @@ function Invoke-BuildFrontend {
     
     Write-Host "Publishing adminpanel..."
     Push-Location -Path $frontendAdminPanelRootPath
-    Invoke-Publish
+    Invoke-Publish -configuration $configuration
     Pop-Location
     
 }
