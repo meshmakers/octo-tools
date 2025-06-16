@@ -39,7 +39,7 @@ function Invoke-MongoRestore {
         [string]$BackupPath,
         
         [Parameter(Mandatory=$false)]
-        [string]$MongoUri = "mongodb://localhost:27017",
+        [string]$MongoUri = "mongodb://host.docker.internal:27017/?authSource=admin&directConnection=true",
         
         [Parameter(Mandatory=$false)]
         [string]$Username = "octo-system-admin",
@@ -60,27 +60,28 @@ function Invoke-MongoRestore {
     }
 
     # Get the actual backup directory (it might be nested)
-    $backupDir = Get-ChildItem -Path $BackupPath -Directory | Select-Object -First 1
+    $backupDir = Get-ChildItem -Path $BackupPath -Filter *.tar.gz | Select-Object -First 1
     if ($backupDir) {
         $BackupPath = $backupDir.FullName
-        Write-Host "Found backup directory: $BackupPath"
+        Write-Host "Found backup archive: $BackupPath"
     }
 
     Write-Host "Starting MongoDB restore from: $BackupPath"
-    
-    # Create a temporary script for mongorestore
-    $tempScript = Join-Path $env:TEMP "mongorestore_script.sh"
-    Write-Host "Creating temporary script at: $tempScript"
-    
-    # Construct MongoDB URI with authentication if credentials are provided
-    if ($Username -and $Password) {
-        $MongoUri = "mongodb://${Username}:${Password}@host.docker.internal:27017/?authSource=admin&directConnection=true"
+
+    # Check if file ending is .tar.gz
+    if ($BackupPath -notlike "*.tar.gz") {
+        Write-Error "Backup path must be a .tar.gz file or a directory containing a .tar.gz file."
+        return
     }
 
+    # Create a temporary script for mongorestore
+    $backupRootPath = Join-Path $Global:ROOTPATH "mongodb-backups"
+    $tempScript = Join-Path $backupRootPath "mongorestore_script.sh"
+    Write-Host "Creating temporary script at: $tempScript"
     @"
 #!/bin/bash
 echo "Running mongorestore..."
-mongorestore --uri='$MongoUri' --dir=/backup
+mongorestore -u '$Username' -p '$Password' --uri '$MongoUri' --archive=/backup.tar.gz --gzip
 "@ -replace "`r`n", "`n" | Out-File -FilePath $tempScript -Encoding utf8 -NoNewline
 
     # Run mongorestore in Docker container
@@ -91,7 +92,7 @@ mongorestore --uri='$MongoUri' --dir=/backup
         # Run the restore container
         docker run --rm `
             --name $containerName `
-            -v "${BackupPath}:/backup" `
+            -v "${BackupPath}:/backup.tar.gz" `
             -v "${tempScript}:/restore.sh" `
             mongo:latest `
             bash -c "chmod +x /restore.sh && /restore.sh"
