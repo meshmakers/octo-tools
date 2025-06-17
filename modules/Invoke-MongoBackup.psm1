@@ -82,7 +82,7 @@ function Invoke-MongoBackup {
             -e "database_list=$DatabaseNames" `
             -e "backup_path=/backup/out/" `
             -v "${backupPath}:/backup/out/" `
-            meshmakers/octo-mongodb-backup:1.0.1 `
+            meshmakers/octo-mongodb-backup:1.0.2.0 `
 
         if ($LASTEXITCODE -eq 0) {
             Write-Host "Successfully backed up databases"
