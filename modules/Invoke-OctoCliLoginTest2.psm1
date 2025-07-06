@@ -1,4 +1,4 @@
-function Invoke-OctoCliLoginLocal1 {
+function Invoke-OctoCliLoginTest2 {
     param($tenantId = "meshtest", $includeReporting = $false)
 
     if ($includeReporting) {
