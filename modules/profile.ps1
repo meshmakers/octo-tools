@@ -72,7 +72,9 @@ Import-Module "$modulePath/Invoke-MongoBackup.psm1"
 Import-Module "$modulePath/Invoke-MongoCompress.psm1"
 Import-Module "$modulePath/Invoke-MongoUncompress.psm1"
 Import-Module "$modulePath/Invoke-MongoRestore.psm1"
-Import-Module "$modulePath/Invoke-MongoDeleteOctomesh.psm1"
+Import-Module "$modulePath/Invoke-MongoDeleteOctoMesh.psm1"
+Import-Module "$modulePath/New-RootCertificate.psm1"
+Import-Module "$modulePath/New-ServerCertificate.psm1"
 
 
 
