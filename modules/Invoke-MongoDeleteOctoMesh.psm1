@@ -29,7 +29,7 @@
     Make sure to backup your data before running this command.
 #>
 
-function Invoke-MongoDeleteOctomesh {
+function Invoke-MongoDeleteOctoMesh {
     param (
         [Parameter(Mandatory = $false)]
         [string]$MongoUri = "mongodb://localhost:27017",
@@ -113,4 +113,4 @@ print('Database deletion completed.');
     }
 }
 
-Export-ModuleMember -Function @('Invoke-MongoDeleteOctomesh') 
+Export-ModuleMember -Function @('Invoke-MongoDeleteOctoMesh')
