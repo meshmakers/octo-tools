@@ -1,4 +1,27 @@
-function Invoke-BuildFrontend  {
+function Test-RimrafAvailable {
+    try {
+        $null = & rimraf -h 2>$null
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Remove-DirectoryForced {
+    param([string]$Path)
+    
+    if (Test-RimrafAvailable) {
+        Write-Host "Using rimraf to delete $Path"
+        & rimraf $Path --force
+    }
+    else {
+        Write-Host "Using Remove-Item to delete $Path"
+        Remove-Item -Path $Path -Recurse -Force
+    }
+}
+
+function Invoke-BuildFrontend {
 
     param(
         [string]$configuration = "Release")
@@ -14,10 +37,10 @@ function Invoke-BuildFrontend  {
     $frontendLibrariesPackageLockPath = Join-Path $frontendLibrariesPath "package-lock.json"
     $frontendAdminPanelPackagesLockPath = Join-Path $frontendAdminPanelPath "package-lock.json"
     
-    $frontendLibrariesNodeModulesPath =  Join-Path $frontendLibrariesPath "node_modules"
+    $frontendLibrariesNodeModulesPath = Join-Path $frontendLibrariesPath "node_modules"
     if (Test-Path $frontendLibrariesNodeModulesPath) {
-        Write-Host "Delete node_modules in $frontendLibrariesNodeModulesPath" 
-        Remove-Item -Path $frontendLibrariesNodeModulesPath -Recurse -Force
+        Write-Host "Delete node_modules in $frontendLibrariesNodeModulesPath"
+        Remove-DirectoryForced -Path $frontendLibrariesNodeModulesPath
         
         Write-Host "Delete $frontendLibrariesPackageLockPath"
         Remove-Item -Path $frontendLibrariesPackageLockPath -Force
@@ -27,7 +50,7 @@ function Invoke-BuildFrontend  {
     $frontendAdminPanelNodeModulesPath = Join-Path $frontendAdminPanelPath "node_modules"
     if (Test-Path $frontendAdminPanelNodeModulesPath) {
         Write-Host "Delete node_modules in $frontendAdminPanelNodeModulesPath"
-        Remove-Item -Path $frontendAdminPanelNodeModulesPath -Recurse -Force
+        Remove-DirectoryForced -Path $frontendAdminPanelNodeModulesPath
 
         Write-Host "Delete $frontendAdminPanelPackagesLockPath"
         Remove-Item -Path $frontendAdminPanelPackagesLockPath -Force
