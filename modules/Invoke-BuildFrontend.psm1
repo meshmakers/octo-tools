@@ -41,7 +41,9 @@ function Invoke-BuildFrontend {
     if (Test-Path $frontendLibrariesNodeModulesPath) {
         Write-Host "Delete node_modules in $frontendLibrariesNodeModulesPath"
         Remove-DirectoryForced -Path $frontendLibrariesNodeModulesPath
-        
+    }
+    
+    if (Test-Path $frontendLibrariesPackageLockPath) {
         Write-Host "Delete $frontendLibrariesPackageLockPath"
         Remove-Item -Path $frontendLibrariesPackageLockPath -Force
     }
@@ -51,7 +53,9 @@ function Invoke-BuildFrontend {
     if (Test-Path $frontendAdminPanelNodeModulesPath) {
         Write-Host "Delete node_modules in $frontendAdminPanelNodeModulesPath"
         Remove-DirectoryForced -Path $frontendAdminPanelNodeModulesPath
+    }
 
+    if (Test-Path $frontendAdminPanelPackagesLockPath) {
         Write-Host "Delete $frontendAdminPanelPackagesLockPath"
         Remove-Item -Path $frontendAdminPanelPackagesLockPath -Force
     }
