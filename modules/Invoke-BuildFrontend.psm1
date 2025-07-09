@@ -13,7 +13,7 @@ function Remove-DirectoryForced {
     
     if (Test-RimrafAvailable) {
         Write-Host "Using rimraf to delete $Path"
-        & rimraf $Path --force
+        & rimraf $Path -I
     }
     else {
         Write-Host "Using Remove-Item to delete $Path"
