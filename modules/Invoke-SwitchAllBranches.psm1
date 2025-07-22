@@ -43,9 +43,41 @@ function Invoke-SwitchAllBranches {
         try {
             Push-Location $repo
             
+            # Check if in detached HEAD state (common for submodules)
+            $symbolicRef = git symbolic-ref -q HEAD 2>&1
+            $isDetached = $LASTEXITCODE -ne 0
+            
+            if ($isDetached) {
+                Write-Verbose "Repository is in detached HEAD state, attempting to checkout default branch first..."
+                
+                # Try to find and checkout the default branch
+                $defaultBranch = git symbolic-ref refs/remotes/origin/HEAD 2>&1
+                if ($LASTEXITCODE -eq 0 -and $defaultBranch -match 'refs/remotes/origin/(.+)$') {
+                    $defaultBranchName = $Matches[1]
+                    Write-Verbose "Checking out default branch: $defaultBranchName"
+                    $checkoutResult = git checkout $defaultBranchName 2>&1
+                    if ($LASTEXITCODE -ne 0) {
+                        # If default branch doesn't exist locally, create it
+                        $checkoutResult = git checkout -b $defaultBranchName origin/$defaultBranchName 2>&1
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Verbose "Could not checkout default branch: $checkoutResult"
+                        }
+                    }
+                } else {
+                    # Fallback to main or master
+                    $checkoutResult = git checkout main 2>&1
+                    if ($LASTEXITCODE -ne 0) {
+                        $checkoutResult = git checkout master 2>&1
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Verbose "Could not checkout main or master branch"
+                        }
+                    }
+                }
+            }
+            
             # Check if we're already on the target branch
             $currentBranch = git branch --show-current 2>&1
-            if ($LASTEXITCODE -eq 0 -and $currentBranch.Trim() -eq $Name) {
+            if ($LASTEXITCODE -eq 0 -and $currentBranch -and $currentBranch.Trim() -eq $Name) {
                 Write-Host "  Already on branch '$Name', skipping..." -ForegroundColor Gray
                 $branchesSkipped += $repo
                 continue
