@@ -84,6 +84,19 @@ function Invoke-SwitchAllBranches {
                         throw "Failed to checkout branch: $checkoutResult"
                     }
                     
+                    # Ensure upstream tracking is configured for existing local branch
+                    try {
+                        Write-Verbose "Ensuring upstream tracking is configured for existing branch '$Name'..."
+                        $upstreamResult = git branch --set-upstream-to=origin/$Name 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Verbose "  Upstream tracking configured for '$Name'"
+                        } else {
+                            Write-Verbose "  Note: Could not set upstream tracking: $upstreamResult"
+                        }
+                    } catch {
+                        Write-Verbose "  Note: Could not set upstream tracking: $_"
+                    }
+                    
                     # Pull latest changes
                     $pullResult = git pull origin $Name 2>&1
                     if ($LASTEXITCODE -ne 0) {
@@ -112,6 +125,19 @@ function Invoke-SwitchAllBranches {
                     if ($LASTEXITCODE -ne 0) {
                         throw "Failed to create or switch to branch: $checkoutResult"
                     }
+                }
+                
+                # Set up upstream tracking for the branch (regardless of Push flag)
+                try {
+                    Write-Verbose "Setting up upstream tracking for branch '$Name'..."
+                    $upstreamResult = git branch --set-upstream-to=origin/$Name 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Verbose "  Upstream tracking configured for '$Name'"
+                    } else {
+                        Write-Verbose "  Note: Could not set upstream tracking (branch may not exist on origin yet): $upstreamResult"
+                    }
+                } catch {
+                    Write-Verbose "  Note: Could not set upstream tracking: $_"
                 }
                 
                 $branchesCreated += $repo

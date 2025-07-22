@@ -79,6 +79,7 @@ Import-Module "$modulePath/Find-AllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-SwitchAllBranches.psm1"
 Import-Module "$modulePath/Invoke-CommitSubmoduleUpdate.psm1"
 Import-Module "$modulePath/Invoke-CommitAllSubmoduleUpdates.psm1"
+Import-Module "$modulePath/Invoke-GitMergeMainIntoAllBranches.psm1"
 
 
 
