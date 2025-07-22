@@ -1,5 +1,6 @@
 function Compile-Repo {
     param(
+        [string]$branch = "",
         [Parameter(Mandatory=$true)]
         [string]$path,
         [Parameter(Mandatory=$true)]
@@ -28,7 +29,7 @@ function Compile-Repo {
     }
 
     if ($configuration -ieq "DebugL" -And $state -eq $true) {
-        Copy-NuGetPackages -directory $path
+        Copy-NuGetPackages -directory $path -branch $branch
     }
     
     return $state;
@@ -37,6 +38,7 @@ function Compile-Repo {
 function Compile-RepoIfExists
 {
     param(
+        [string]$branch = "",
         [Parameter(Mandatory=$true)]
         [string]$name,
         [Parameter(Mandatory=$true)]
@@ -45,9 +47,10 @@ function Compile-RepoIfExists
         [hashtable]$status
     )
 
-    $repoDir = Get-ChildItem -Directory -Path $rootPath -Filter $name
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    $repoDir = Get-ChildItem -Directory -Path $branchRootPath -Filter $name
     if ($repoDir) {
-        [Boolean]$buildStatus = Compile-Repo -path $repoDir.FullName -configuration $configuration
+        [Boolean]$buildStatus = Compile-Repo -branch $branch -path $repoDir.FullName -configuration $configuration
         $status.Add($name, $buildStatus)
     }
 }
@@ -55,6 +58,7 @@ function Compile-RepoIfExists
 function Invoke-BuildAll {
     param(
         [string]$configuration = "Release",
+        [string]$branch = "",
         [Boolean]$excludeAdditional = $false,
         [Boolean]$excludeFrontend = $false
     )
@@ -67,9 +71,11 @@ function Invoke-BuildAll {
     # kill all dotnet processes. this is necessary to avoid file locks.
     Invoke-KillDotnet
 
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+
     # Get all directories starting with "octo-" and "mm-""
-    $octoDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-    $mmDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    $octoDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    $mmDirectories += Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*"
     
     if ($excludeFrontend -eq $true){
         $octoDirectories = $octoDirectories | Where-Object { $_.Name -notlike "octo-frontend-*" }
@@ -86,24 +92,26 @@ function Invoke-BuildAll {
         Invoke-KillDotnet
 
         # Delete all nuget packages in the octo mesh nuget folder
-        Get-ChildItem -Path $nugetPath -File | Remove-Item -Force
+        $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
+        Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force
         
-        Remove-GlobalNuGetPackages
+        Remove-GlobalNuGetPackages -branch $branch
     }
 
     # At commom libraries we do not have a build sequence
     foreach ($directory in $mmDirectories) {
-        [Boolean]$buildStatus = Compile-Repo -path $directory.FullName -configuration $configuration
+        [Boolean]$buildStatus = Compile-Repo -branch $branch -path $directory.FullName -configuration $configuration
         $allStatus.Add($directory.Name, $buildStatus)
     }
     
     # Build octo repostories that first that are dependent on other repositories
-    Compile-RepoIfExists -name "octo-distributedEventHub" -configuration $configuration -status $allStatus
-    Compile-RepoIfExists -name "octo-construction-kit-engine" -configuration $configuration -status $allStatus
-    Compile-RepoIfExists -name "octo-sdk" -configuration $configuration -status $allStatus
-    Compile-RepoIfExists -name "octo-construction-kit-engine-mongodb" -configuration $configuration -status $allStatus
-    Compile-RepoIfExists -name "octo-common-services" -configuration $configuration -status $allStatus
-    
+    Compile-RepoIfExists -branch $branch -name "octo-distributedEventHub" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -branch $branch -name "octo-construction-kit-engine" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -branch $branch -name "octo-sdk" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -branch $branch -name "octo-construction-kit-engine-mongodb" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -branch $branch -name "octo-common-services" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -branch $branch -name "octo-mesh-adapter" -configuration $configuration -status $allStatus
+
     # Build the rest of the octo repositories
     if ($excludeAdditional -eq $false) {
         foreach ($directory in $octoDirectories) {
@@ -129,6 +137,7 @@ function Invoke-BuildAll {
 
     Write-Host "Summary:"
     Write-Host "---------------------------------"
+    Write-Host "Build branch $branch with configuration $configuration"
     Write-Host "Building of $repositoryCount repositories took $($stopWatch.Elapsed.TotalSeconds) seconds"
     Write-Host "Percentage of successful builds: $percentageSuccessful%"
     Write-Host " "

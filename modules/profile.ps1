@@ -33,7 +33,6 @@ function Test-SubPath( [string]$directory, [string]$subpath ) {
     return $sPath.StartsWith( $dPath, [StringComparison]::OrdinalIgnoreCase )
 }
 
-Import-Module "$modulePath/Convert-SubmodulesToSymlinks.psm1"
 Import-Module "$modulePath/Get-OctoInfrastructureStatus.psm1"
 Import-Module "$modulePath/Sync-AllGitRepos.psm1"
 Import-Module "$modulePath/Sync-AllSubmodules.psm1"
@@ -76,8 +75,6 @@ Import-Module "$modulePath/Invoke-MongoRestore.psm1"
 Import-Module "$modulePath/Invoke-MongoDeleteOctoMesh.psm1"
 Import-Module "$modulePath/New-RootCertificate.psm1"
 Import-Module "$modulePath/New-ServerCertificate.psm1"
-Import-Module "$modulePath/Update-OctoVersionAndBranches.psm1"
-Import-Module "$modulePath/Remove-OctoBranch.psm1"
 
 
 
