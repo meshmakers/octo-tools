@@ -8,17 +8,6 @@ function Invoke-CommitAllSubmoduleUpdates {
         [switch]$Push = $false
     )
 
-    # Import required modules
-    if (-not (Get-Command Find-AllGitRepos -ErrorAction SilentlyContinue)) {
-        $modulePath = Join-Path $PSScriptRoot "Find-AllGitRepos.psm1"
-        Import-Module $modulePath -Force
-    }
-    
-    if (-not (Get-Command Invoke-CommitSubmoduleUpdate -ErrorAction SilentlyContinue)) {
-        $modulePath = Join-Path $PSScriptRoot "Invoke-CommitSubmoduleUpdate.psm1"
-        Import-Module $modulePath -Force
-    }
-
     Write-Host "Committing submodule updates across all repositories" -ForegroundColor Cyan
     if ($DryRun) {
         Write-Host "DRY RUN MODE - No changes will be made" -ForegroundColor Yellow
