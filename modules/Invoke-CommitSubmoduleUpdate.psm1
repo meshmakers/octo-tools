@@ -53,9 +53,7 @@ function Invoke-CommitSubmoduleUpdate {
         Write-Host "  Found $($submoduleChanges.Count) submodule pointer change(s):" -ForegroundColor Green
         $submodulePaths = @()
         foreach ($change in $submoduleChanges) {
-            Write-Verbose "Raw git status line: '$change'"
             $submodulePath = ($change -replace '^\s*[M]\s+', '').Trim() -split '\s+' | Select-Object -First 1
-            Write-Verbose "Extracted path: '$submodulePath'"
             $submodulePaths += $submodulePath
             Write-Host "    - $submodulePath" -ForegroundColor Gray
             
