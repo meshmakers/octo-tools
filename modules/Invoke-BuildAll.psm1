@@ -121,7 +121,7 @@ function Invoke-BuildAll {
                 continue
             }
 
-            [Boolean]$buildStatus = Compile-Repo -path $directory.FullName -configuration $configuration
+            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $directory.FullName -configuration $configuration
             $allStatus.Add($directory.Name, $buildStatus)
         }
     }
