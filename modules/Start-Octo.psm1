@@ -6,6 +6,9 @@ Starts all OctoMesh services.
 .DESCRIPTION
 The Start-Octo function starts all OctoMesh services, but gives the user control to exclude certain services from being started by setting their corresponding parameter to $false. 
 
+.PARAMETER SystemDatabase
+The name of the system database to use. Defaults to "OctoSystem".
+
 .PARAMETER botService
 If set to $true, the Bot Service will be started. If set to $false, it will not be started.
 
@@ -35,6 +38,11 @@ Start-Octo -botService $false -identityService $true
 
 This example starts all services except for the Bot Service.
 
+.EXAMPLE
+Start-Octo -SystemDatabase "MyCustomSystem"
+
+This example starts all services using "MyCustomSystem" as the system database name.
+
 .NOTES
 Use this function to selectively start OctoMesh services based on your requirements.
 #>
@@ -42,6 +50,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     param(
         [string]$branch = "",
         [Parameter()] [string]$configuration = "Release",
+        [Parameter()] [string]$SystemDatabase = "OctoSystem",
         [Parameter()] [Boolean]$botService = $true,
         [Parameter()] [Boolean]$identityService = $true,
         [Parameter()] [Boolean]$assetRepoService = $true,
@@ -113,6 +122,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         }
     }
 
+    $env:OCTO_SYSTEM__SYSTEMDATABASENAME = $SystemDatabase
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
