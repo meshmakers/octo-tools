@@ -107,7 +107,7 @@ function Invoke-SwitchAllBranches {
                     throw "Failed to list local branches: $localBranches"
                 }
                 
-                $branchExistsLocally = $localBranches -match "^\*?\s+$Name$"
+                $branchExistsLocally = $localBranches -match "^\*?\s+$([regex]::Escape($Name))$"
                 
                 if ($branchExistsLocally) {
                     # Switch to existing local branch
