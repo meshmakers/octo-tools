@@ -1,14 +1,20 @@
 
 function Sync-AllSubmodules
 {
+    param(
+        [string]$branch = ""
+    )
+
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
         return;
     }
 
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+
     # Get all directories starting with "octo-" and "mm-""
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    $allDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    $allDirectories += Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*"
 
     foreach ($directory in $allDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"

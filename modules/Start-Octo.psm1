@@ -48,6 +48,7 @@ Use this function to selectively start OctoMesh services based on your requireme
 #>
 
     param(
+        [string]$branch = "",
         [Parameter()] [string]$configuration = "Release",
         [Parameter()] [string]$SystemDatabase = "OctoSystem",
         [Parameter()] [Boolean]$botService = $true,
@@ -83,9 +84,16 @@ Use this function to selectively start OctoMesh services based on your requireme
         return;
     }
 
-    function Start-Service($workingDirectory, $cmd, $logname, $cmdArguments, $jobName, $aspnetEnvironment = "Development") {
-        Write-Host "Starting $( $jobName ) -> $cmdArguments"
-        $arguments = @([System.IO.Path]::Combine($rootPath, $workingDirectory), [System.IO.Path]::Combine($rootPath, $logDir, $logname), $aspnetEnvironment)
+    function Start-Service($workingDirectory, [string]$branch, $cmd, $logname, $cmdArguments, $jobName, $aspnetEnvironment = "Development") {
+
+        # Check if branch is empty, if not use the branch name in log
+        $branchString = $branch
+        if ([string]::IsNullOrEmpty($branch)) {
+            $branchString = "default"
+        }
+        Write-Host "Starting $( $jobName ) (branch $branchString) -> $cmdArguments" -ForegroundColor Green
+        $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+        $arguments = @([System.IO.Path]::Combine($branchRootPath, $workingDirectory), [System.IO.Path]::Combine($branchRootPath, $logDir, $logname), $aspnetEnvironment)
         $arguments += $cmdArguments
         $job = Start-Job -ScriptBlock { Set-Location $args[0]; $env:ASPNETCORE_ENVIRONMENT = $args[2]; $localArgs = $args | Select-Object -Skip 3; & "$input" $localArgs 2>&1 >> $args[1] } -InputObject $cmd -ArgumentList $arguments -Name $jobName
         $jobs.Add($job) | OUT-NULL;
@@ -98,15 +106,17 @@ Use this function to selectively start OctoMesh services based on your requireme
         }
     }
 
-    function Delete-LogFile([string]$file) {
-        $file = [System.IO.Path]::Combine($rootPath, $logDir, $file)
+    function Delete-LogFile([string]$branch, [string]$file) {
+        $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+        $file = [System.IO.Path]::Combine($branchRootPath, $logDir, $file)
         if (Test-Path $file) {
             Remove-Item -Force $file
         }
     }
 
-    function Create-LogDirectory() {
-        $path = [System.IO.Path]::Combine($rootPath, $logDir);
+    function Create-LogDirectory([string]$branch) {
+        $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+        $path = [System.IO.Path]::Combine($branchRootPath, $logDir);
         If (!(test-path $path)) {
             New-Item -ItemType Directory -Force -Path $path | Out-Null
         }
@@ -122,36 +132,36 @@ Use this function to selectively start OctoMesh services based on your requireme
     # Set environment to development, because so we get more information in the logs
     $env:ASPNETCORE_ENVIRONMENT = "Development"
     
-    Create-LogDirectory
-    Delete-LogFile -file "IdentityServices.log"
-    Delete-LogFile -file "PolicyServices.log"
-    Delete-LogFile -file "AssetRepositoryServices.log"
-    Delete-LogFile -file "MeshAdapter.log"
-    Delete-LogFile -file "CommunicationControllerServices.log"
-    Delete-LogFile -file "BotServices.log"
-    Delete-LogFile -file "AdminPanel.log"
-    Delete-LogFile -file "ReportingServices.log"
+    Create-LogDirectory -branch $branch
+    Delete-LogFile -branch $branch -file "IdentityServices.log"
+    Delete-LogFile -branch $branch -file "PolicyServices.log"
+    Delete-LogFile -branch $branch -file "AssetRepositoryServices.log"
+    Delete-LogFile -branch $branch -file "MeshAdapter.log"
+    Delete-LogFile -branch $branch -file "CommunicationControllerServices.log"
+    Delete-LogFile -branch $branch -file "BotServices.log"
+    Delete-LogFile -branch $branch -file "AdminPanel.log"
+    Delete-LogFile -branch $branch -file "ReportingServices.log"
 
     if ($identityService) {
-        Start-Service -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
+        Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
     }
     if ($assetRepoService) {
-        Start-Service -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://*:5000;https://*:5001") -jobName "AssetRepositoryServices"
+        Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://*:5000;https://*:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021") -jobName "MeshAdapter"
+        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021") -jobName "MeshAdapter"
     }
     if ($botService) {
-        Start-Service -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://*:5009;http://*:5008") -jobName "BotServices"
+        Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://*:5009;http://*:5008") -jobName "BotServices"
     }
     if ($communicationControllerService) {
-        Start-Service -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://*:5015;http://*:5014") -jobName "CommunicationControllerServices"
+        Start-Service -branch $branch -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://*:5015;http://*:5014") -jobName "CommunicationControllerServices"
     }
     if ($adminPanel) {
-        Start-Service -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://*:5005;http://*:5004") -jobName "AdminPanel" -aspnetEnvironment "Staging"
+        Start-Service -branch $branch -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://*:5005;http://*:5004") -jobName "AdminPanel" -aspnetEnvironment "Staging"
     }
     if ($reportingService) {
-        Start-Service -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://*:5007;http://*:5006") -jobName "ReportingServices"
+        Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://*:5007;http://*:5006") -jobName "ReportingServices"
     }
 
     Get-ServiceStatus

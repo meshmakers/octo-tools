@@ -70,8 +70,7 @@ services:
   cratedb01:
     hostname: cratedb01
     container_name: cratedb01
-    image: crate:5.10.1
-    platform: linux/amd64
+    image: crate:5.10.10
     ports:
       - "4201:4200"
       - "5432:5432"
@@ -101,8 +100,7 @@ services:
   cratedb02:
     hostname: cratedb02
     container_name: cratedb02
-    image: crate:5.10.1
-    platform: linux/amd64
+    image: crate:5.10.10
     ports:
       - "4202:4200"
       - "5433:5432"
@@ -132,8 +130,7 @@ services:
   cratedb03:
     hostname: cratedb03
     container_name: cratedb03
-    image: crate:5.10.1
-    platform: linux/amd64
+    image: crate:5.10.10
     ports:
       - "4203:4200"
       - "5434:5432"

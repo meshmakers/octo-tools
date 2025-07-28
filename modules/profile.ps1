@@ -19,7 +19,6 @@ else {
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
-$nugetPath = Join-Path $rootPath "nuget/"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
 $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
@@ -75,6 +74,8 @@ Import-Module "$modulePath/Invoke-MongoRestore.psm1"
 Import-Module "$modulePath/Invoke-MongoDeleteOctoMesh.psm1"
 Import-Module "$modulePath/New-RootCertificate.psm1"
 Import-Module "$modulePath/New-ServerCertificate.psm1"
+Import-Module "$modulePath/Sync-YamlTemplates.psm1"
+Import-Module "$modulePath/Update-MeshmakerVersion.psm1"
 Import-Module "$modulePath/Find-AllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-SwitchAllBranches.psm1"
 Import-Module "$modulePath/Invoke-CommitSubmoduleUpdate.psm1"
@@ -82,11 +83,6 @@ Import-Module "$modulePath/Invoke-CommitAllSubmoduleUpdates.psm1"
 Import-Module "$modulePath/Invoke-GitMergeMainIntoAllBranches.psm1"
 
 
-
-if (!(Test-Path $nugetPath)) {
-    Write-Host "Creating nuget packages path $nugetPath."
-    New-Item -Path $nugetPath -ItemType Directory | out-null
-}
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
@@ -98,14 +94,13 @@ if (Test-Path $privateProfilePath) {
 }
 
 $Global:ROOTPATH = $rootPath
+$env:ROOTPATH = $rootPath
 $Global:GLOBALNUGETPACKAGESPATH = $globalNugetPackagesPath
 $Global:INFRASTRUCTUREPATH = $infrastructurePath
-$Global:NUGETPATH = $nugetPath
 
 write-host "ROOTPATH: $Global:ROOTPATH"
 write-host "GLOBALNUGETPACKAGESPATH: $Global:GLOBALNUGETPACKAGESPATH"
 write-host "INFRASTRUCTUREPATH: $Global:INFRASTRUCTUREPATH"
-write-host "NUGETPATH: $Global:NUGETPATH"
 
 if ($Global:WantPromt) {
     function  Global:prompt { "OCTO $PWD> " }
