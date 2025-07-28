@@ -36,7 +36,7 @@ function Update-MeshmakerVersion {
             try {
                 $content = Get-Content $buildPropsPath -Raw
                 
-                # Pattern für MeshmakerVersion Property
+                # Pattern for MeshmakerVersion Property
                 $pattern = '(<MeshmakerVersion>)[^<]*(</MeshmakerVersion>)'
                 
                 if ($content -match $pattern) {
