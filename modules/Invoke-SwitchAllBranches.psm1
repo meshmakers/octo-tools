@@ -51,7 +51,7 @@ function Invoke-SwitchAllBranches {
                 Write-Verbose "Repository is in detached HEAD state, attempting to checkout default branch first..."
                 
                 # Try to find and checkout the default branch
-                $defaultBranch = git symbolic-ref refs/remotes/origin/HEAD 2>&1
+                $defaultBranch = git symbolic-ref refs/remotes/origin/HEAD
                 if ($LASTEXITCODE -eq 0 -and $defaultBranch -match 'refs/remotes/origin/(.+)$') {
                     $defaultBranchName = $Matches[1]
                     Write-Verbose "Checking out default branch: $defaultBranchName"
