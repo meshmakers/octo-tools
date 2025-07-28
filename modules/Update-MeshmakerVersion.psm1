@@ -16,7 +16,7 @@ function Update-MeshmakerVersion {
 
     $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
     
-    # Finde alle octo-* Verzeichnisse
+    # Find all octo-* directories
     $octoDirectories = Get-ChildItem -Path $branchRootPath -Directory -Name "octo-*"
     
     if ($octoDirectories.Count -eq 0) {
