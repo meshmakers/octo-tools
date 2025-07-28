@@ -76,7 +76,8 @@ Import-Module "$modulePath/New-RootCertificate.psm1"
 Import-Module "$modulePath/New-ServerCertificate.psm1"
 Import-Module "$modulePath/Sync-YamlTemplates.psm1"
 Import-Module "$modulePath/Update-MeshmakerVersion.psm1"
-
+Import-Module "$modulePath/Find-AllGitRepos.psm1"
+Import-Module "$modulePath/Invoke-SwitchAllBranches.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
