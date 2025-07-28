@@ -13,6 +13,8 @@ The version number (2-999) to use in branch name and version update
 The description text to append to branch name
 .Parameter NoPush
 Skip pushing the branch to remote origin
+.Parameter NugetServer
+Optional NuGet server URL to use in Octo.User.props
 #>
 function New-TestBranch {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
@@ -25,7 +27,10 @@ function New-TestBranch {
         [string]$Description,
 
         [Parameter(Mandatory = $false)]
-        [switch]$NoPush
+        [switch]$NoPush,
+
+        [Parameter(Mandatory = $false)]
+        [string]$NugetServer = "https://nuget.mm.cloud/v3/index.json"
     )
 
     if (!(Test-Path $rootPath)) {
@@ -58,27 +63,24 @@ function New-TestBranch {
                     throw "Failed to create branch $branchName"
                 }
 
-                # Update Directory.Build.props if it exists
-                $buildPropsPath = Join-Path -Path $directory.FullName -ChildPath "Directory.Build.props"
-                if (Test-Path $buildPropsPath) {
-                    $content = Get-Content $buildPropsPath -Raw
-                    $pattern = "(<OctoVersion Condition=`"'\`$\(OctoNugetPrivateServer\)'!=''.+?>)0\.1\.\*(<\/OctoVersion>)"
-                    $replacement = "`${1}$newVersionPattern`${2}"
+                # Create Octo.User.props file
+                $octoUserPropsPath = Join-Path -Path $directory.FullName -ChildPath "Octo.User.props"
+                $octoUserPropsContent = @"
+<Project>
+    <PropertyGroup>
+        <OctoNugetPrivateServer>$NugetServer</OctoNugetPrivateServer>
+        <OctoVersion Condition="'`$(OctoNugetPrivateServer)'!='' And '`$(OctoVersion)'==''">$newVersionPattern</OctoVersion>
+    </PropertyGroup>
+</Project>
+"@
+                Set-Content -Path $octoUserPropsPath -Value $octoUserPropsContent -Encoding UTF8
+                Write-Host "  Created Octo.User.props with version $newVersionPattern" -ForegroundColor Blue
 
-                    if ($content -match $pattern) {
-                        $updatedContent = $content -replace $pattern, $replacement
-                        Set-Content -Path $buildPropsPath -Value $updatedContent -NoNewline
-
-                        # Commit the changes
-                        git add Directory.Build.props
-                        git commit -m "Update version to $newVersionPattern for test branch"
-
-                        Write-Host "  Updated version in Directory.Build.props to $newVersionPattern" -ForegroundColor Yellow
-                    } else {
-                        Write-Host "  No version pattern found to update in Directory.Build.props" -ForegroundColor Yellow
-                    }
-                } else {
-                    Write-Host "  No Directory.Build.props found" -ForegroundColor Yellow
+                # Add and commit the Octo.User.props file
+                git add "Octo.User.props"
+                git commit -m "Add Octo.User.props for test branch with version $newVersionPattern"
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to commit Octo.User.props"
                 }
 
                 # Push branch to remote origin
