@@ -1,4 +1,8 @@
 function Get-AllGitRepStatus {
+    param(
+        [string]$branch = ""
+    )
+
     function Check-GitStatusRecursively($path, $indentLevel = 0) {
         Push-Location $path
 
@@ -73,8 +77,9 @@ function Get-AllGitRepStatus {
     }
 
     # Get all directories starting with "octo-" and "mm-"
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    $allDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    $allDirectories += Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*"
 
     foreach ($directory in $allDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"
