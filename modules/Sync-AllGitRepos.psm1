@@ -1,4 +1,7 @@
 function Sync-AllGitRepos {
+    param(
+        [string]$branch = ""
+    )
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
@@ -6,8 +9,9 @@ function Sync-AllGitRepos {
     }
 
     # Get all directories starting with "octo-" and "mm-""
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+    $allDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    $allDirectories += Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*"
     $status = @{}
     foreach ($directory in $allDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"
