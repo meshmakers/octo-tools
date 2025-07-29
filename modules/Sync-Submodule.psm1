@@ -18,7 +18,7 @@ function Sync-Submodule {
     $basedir = $PWD
     Write-Host Handling directory $repositoryPath
     Set-Location $repositoryPath
-    git submodule update --init  --remote --merge --recursive
+    git submodule update --init --remote --merge --recursive
     Set-Location $basedir
 }
 
