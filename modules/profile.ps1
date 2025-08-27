@@ -67,19 +67,14 @@ Import-Module "$modulePath/Remove-KubeConfig.psm1"
 Import-Module "$modulePath/Invoke-OctoCliReconfigureLogLevel.psm1"
 Import-Module "$modulePath/Invoke-CleanAllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-BuildZenonPlug.psm1"
-Import-Module "$modulePath/Invoke-MongoBackup.psm1"
-Import-Module "$modulePath/Invoke-MongoCompress.psm1"
-Import-Module "$modulePath/Invoke-MongoUncompress.psm1"
-Import-Module "$modulePath/Invoke-MongoRestore.psm1"
-Import-Module "$modulePath/Invoke-MongoDeleteOctoMesh.psm1"
 Import-Module "$modulePath/New-RootCertificate.psm1"
 Import-Module "$modulePath/New-ServerCertificate.psm1"
 Import-Module "$modulePath/Sync-YamlTemplates.psm1"
 Import-Module "$modulePath/Update-MeshmakerVersion.psm1"
 Import-Module "$modulePath/Find-AllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-SwitchAllBranches.psm1"
-
 Import-Module "$modulePath/Compare-BranchStatus.psm1"
+Import-Module "$modulePath/Invoke-MongoPortForward.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
