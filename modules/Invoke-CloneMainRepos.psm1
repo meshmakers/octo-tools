@@ -38,6 +38,7 @@ function Global:Invoke-CloneMainRepos {
     Clone-Repo "octo-communication-operator"
     Clone-Repo "octo-frontend-admin-panel"
     Clone-Repo "octo-frontend-libraries"
+    Clone-Repo "octo-frontend-refinery-studio"
 }
 
 function Clone-Repo
