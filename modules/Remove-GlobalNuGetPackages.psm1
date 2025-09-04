@@ -16,7 +16,7 @@ function Remove-GlobalNuGetPackages {
         if ((Test-Path $packageDirectories)) {
 
             Write-Host "Deleting $packageDirectories" -ForegroundColor Blue
-            Remove-Item -Path $packageDirectories -Recurse -Force
+            Remove-Item -Path $packageDirectories -Recurse -Force -ProgressAction SilentlyContinue
         }
     }
 }
