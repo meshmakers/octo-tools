@@ -5,9 +5,13 @@ $rootPath = Join-Path $modulePath "../../"
 $rootPath = Resolve-Path $rootPath
 $env:PSModulePath += ":$modulePath"
 $publishVersion = "net9.0"
+$usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+$privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
+
 if ($IsMacOS) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
     $env:PATH += ";$octoCliPath"
+    $privateProfilePath = Join-Path $usersFolderPath ".config/powershell/Microsoft.PowerShell_profile.ps1";
 }
 elseif ($IsLinux) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/linux-x64"
@@ -19,9 +23,9 @@ else {
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
-$usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+
 $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
-$privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
+
 $Global:WantPromt = $true
 
 $env:PATH += ";$toolsPath"
@@ -93,6 +97,8 @@ $Global:INFRASTRUCTUREPATH = $infrastructurePath
 write-host "ROOTPATH: $Global:ROOTPATH"
 write-host "GLOBALNUGETPACKAGESPATH: $Global:GLOBALNUGETPACKAGESPATH"
 write-host "INFRASTRUCTUREPATH: $Global:INFRASTRUCTUREPATH"
+write-host "WANT PROMT: $Global:WantPromt"
+
 
 if ($Global:WantPromt) {
     function  Global:prompt { "OCTO $PWD> " }
