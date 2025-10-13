@@ -57,9 +57,11 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$meshAdapter = $true,
         [Parameter()] [Boolean]$communicationControllerService = $true,
         [Parameter()] [Boolean]$adminPanel = $true,
-        [Parameter()] [Boolean]$identityOnly = $false, 
+        [Parameter()] [Boolean]$identityOnly = $false,
         [Parameter()] [Boolean]$identityAssetRepoOnly = $false,
-        [Parameter()] [Boolean]$reportingService = $false
+        [Parameter()] [Boolean]$reportingService = $false,
+        [Parameter()] [string]$adapterTenantId = "meshtest",
+        [Parameter()] [string]$adapterId = "66004fda527ac79a03ecedd7"
     )
     if ($identityOnly) {
         $botService = $false;
@@ -126,7 +128,8 @@ Use this function to selectively start OctoMesh services based on your requireme
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
-    $env:OCTO_ADAPTER__ADAPTERRTID = "66004fda527ac79a03ecedd7"
+    $env:OCTO_ADAPTER__TENANTID = $adapterTenantId
+    $env:OCTO_ADAPTER__ADAPTERRTID = $adapterId
     $env:OCTO_ADAPTER__ADAPTERCKTYPEID = "System.Communication/MeshAdapter"
     $env:OCTO_IDENTITY__IdentityServerLicenseKey = "eyJhbGciOiJQUzI1NiIsImtpZCI6IklkZW50aXR5U2VydmVyTGljZW5zZWtleS83Y2VhZGJiNzgxMzA0NjllODgwNjg5MTAyNTQxNGYxNiIsInR5cCI6ImxpY2Vuc2Urand0In0.eyJpc3MiOiJodHRwczovL2R1ZW5kZXNvZnR3YXJlLmNvbSIsImF1ZCI6IklkZW50aXR5U2VydmVyIiwiaWF0IjoxNzI0Mzk1MTUyLCJleHAiOjE3NTU5MzExNTIsImNvbXBhbnlfbmFtZSI6ImdlcmFsZC5sb2NobmVyQHNhbHpidXJnZGV2LmF0IiwiY29udGFjdF9pbmZvIjoiZ2VyYWxkLmxvY2huZXJAc2FsemJ1cmdkZXYuYXQiLCJlZGl0aW9uIjoiQ29tbXVuaXR5In0.FAmDK4UWFuh83RpqFtVR4lSktDfGVGsow1qjTNyhlkZqUJwFtO7z_d9wmGle1lUbxbB0JtKD6BHxhPlnqMvaj1jOQlSkLoz9T9IV3FrZgvK-09nPJUyt0__fdCbIQPrTE3Wri0OsxNOnOz8be0KWeyuLCZxCPZPLRzpDamjITiiG3mBHS-EFxZnNhLsn7VJwKMsi7efVZ1JOwggqqZbZ49phKQSe7dWFHMs8w3F-lhNURnJIRjZ6JuRSOiYClFFA1rO23dtfGatjQdKwYkSvsPJTDMwBdGip7FcAtiTNi_SBjI2GtOao7VD1rSUOxI5o9-VPzC9wi_V2v7ZGYc7hxQ"
     $env:OCTO_IDENTITY__AutoMapperLicenseKey = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ikx1Y2t5UGVubnlTb2Z0d2FyZUxpY2Vuc2VLZXkvYmJiMTNhY2I1OTkwNGQ4OWI0Y2IxYzg1ZjA4OGNjZjkiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2x1Y2t5cGVubnlzb2Z0d2FyZS5jb20iLCJhdWQiOiJMdWNreVBlbm55U29mdHdhcmUiLCJleHAiOiIxNzg1MTk2ODAwIiwiaWF0IjoiMTc1MzcxMzU3MSIsImFjY291bnRfaWQiOiIwMTk4NTE3OTFmNzY3ZDEwOGMwYjNiYzhjODNlMmY5NSIsImN1c3RvbWVyX2lkIjoiY3RtXzAxazE4cWp4NTJtemtlbW1wcWszZmF5Mnl3Iiwic3ViX2lkIjoiLSIsImVkaXRpb24iOiIwIiwidHlwZSI6IjIifQ.qlbbn1_eEpLhfUIIaVMGHhiKT_FTgR7b9niUJAfZE6MA5jPLAdpzQFKhvAsMTAl8fB2tCXsrsN7lT_OSFSSsmZKY1nLwvQs5GgfyGfG0vGbWQBbQbml27ofnZcTbMVideLqOJ1uZtWkilFjQ5utvt2id4n7zegDSgXbL2uA8Fe7iE1uZdm7rMjx5nFBXSt3694FlljVQ0YcJwIhGM1J-JxoGPfsfhbpSMP3YHbWlRDv2Gt53mir5tSpYLb6ZelFkjz7a4j7Fp0kctbWMI2nPH-XIz3KbExGxRIQ3G4XJ-lHnf9mWrrgoOXmGWQihQPStfpsLIpDy7zqyLJmPbB1M4g"

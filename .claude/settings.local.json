@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(powershell.exe:*)"
+      "Bash(Sort-Object LastWriteTime -Descending)",
+      "Bash(Select-Object -First 1)",
+      "Bash(ForEach-Object { $_ullName })",
+      "mcp__serena",
+      "Bash(dotnet build:*)",
+      "Bash(git add:*)",
+      "Bash(dotnet test:*)",
+      "Bash(Get-ChildItem \"C:\\dev\\meshmakers\\octo-construction-kit-engine-mongodb\\tests\\Persistence.SystemTests\\Comparison\" -Name)"
     ],
     "deny": []
   }
