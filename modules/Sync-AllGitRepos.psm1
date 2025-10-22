@@ -32,7 +32,7 @@ function Sync-AllGitRepos {
     
     foreach($key in $status.Keys) {
         if($status[$key] -eq $true) {
-            Write-Host "Pulling repository ${key} was successful.)" -ForegroundColor Green
+            Write-Host "Pulling repository ${key} was successful." -ForegroundColor Green
         }else {
             Write-Host "Pulling repository ${key} failed." -ForegroundColor Red
         }
