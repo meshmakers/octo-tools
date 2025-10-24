@@ -79,6 +79,7 @@ Import-Module "$modulePath/Find-AllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-SwitchAllBranches.psm1"
 Import-Module "$modulePath/Compare-BranchStatus.psm1"
 Import-Module "$modulePath/Invoke-MongoPortForward.psm1"
+Import-Module "$modulePath/New-TestBranch.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
