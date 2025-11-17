@@ -11,7 +11,7 @@ $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
 if ($IsMacOS) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
     $env:PATH += ";$octoCliPath"
-    $privateProfilePath = Join-Path $usersFolderPath ".config/powershell/Microsoft.PowerShell_profile.ps1";
+    $privateProfilePath = Join-Path $usersFolderPath ".config/powershell/Microsoft.PowerShell_profile_private.ps1";
 }
 elseif ($IsLinux) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/linux-x64"
