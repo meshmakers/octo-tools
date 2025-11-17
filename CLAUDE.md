@@ -9,7 +9,7 @@ OctoMesh is a data transformation platform that converts raw data into meaningfu
 ## Key Technologies
 
 - **Primary Language**: PowerShell scripting
-- **Platform**: .NET 9.0 microservices
+- **Platform**: .NET 10.0 microservices
 - **Infrastructure**: Docker Compose with MongoDB replica set, CrateDB cluster, and RabbitMQ
 - **Frontend**: Angular-based admin panel
 

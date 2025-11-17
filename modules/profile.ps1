@@ -4,7 +4,7 @@ $modulePath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $rootPath = Join-Path $modulePath "../../"
 $rootPath = Resolve-Path $rootPath
 $env:PSModulePath += ":$modulePath"
-$publishVersion = "net9.0"
+$publishVersion = "net10.0"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
 
