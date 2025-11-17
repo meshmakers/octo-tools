@@ -12,7 +12,7 @@ services:
   mongo-2.mongo:
     hostname: mongo-2.mongo
     container_name: mongo-2.mongo
-    image: mongo:8.0.4
+    image: mongo:8.0.12
     command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
     ports:
       - "27018:27017"
@@ -26,7 +26,7 @@ services:
   mongo-1.mongo:
     hostname: mongo-1.mongo
     container_name: mongo-1.mongo
-    image: mongo:8.0.4
+    image: mongo:8.0.12
     command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
     ports:
       - "27019:27017"
@@ -40,7 +40,7 @@ services:
   mongo-0.mongo:
     hostname: mongo-0.mongo
     container_name: mongo-0.mongo
-    image: mongo:8.0.4
+    image: mongo:8.0.12
     command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
     ports:
       - "27017:27017"
