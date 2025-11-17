@@ -1,7 +1,8 @@
 function Get-RepositoryPaths {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$branchPath
+        [string]$branchPath,
+        [string]$excludeRepo = ""
     )
     
     $repositories = @()
@@ -11,6 +12,11 @@ function Get-RepositoryPaths {
     $mmDirectories = Get-ChildItem -Directory -Path $branchPath -Filter "mm-*"
     
     foreach ($dir in ($octoDirectories + $mmDirectories)) {
+        # Skip the source repository
+        if ($excludeRepo -and $dir.Name -eq $excludeRepo) {
+            continue
+        }
+        
         $devopsBuildPath = Join-Path -Path $dir.FullName -ChildPath "devops-build"
         if (Test-Path $devopsBuildPath) {
             $repositories += $devopsBuildPath
@@ -26,7 +32,8 @@ function Sync-YamlFiles {
         [string]$sourceDirectory,
         [Parameter(Mandatory=$true)]
         [string]$branchPath,
-        [string[]]$excludeFiles = @("azure-pipelines.yml")
+        [string[]]$excludeFiles = @("azure-pipelines.yml"),
+        [string]$excludeRepo = ""
     )
     
     if (!(Test-Path $sourceDirectory)) {
@@ -49,7 +56,7 @@ function Sync-YamlFiles {
     }
     
     # Get all repository paths that have devops-build directories
-    $repositoryPaths = Get-RepositoryPaths -branchPath $branchPath
+    $repositoryPaths = Get-RepositoryPaths -branchPath $branchPath -excludeRepo $excludeRepo
     
     if ($repositoryPaths.Count -eq 0) {
         Write-Host "No repositories with devops-build directories found" -ForegroundColor Yellow
@@ -99,7 +106,7 @@ function Sync-YamlFiles {
     Write-Host "  Files per repository: $($sourceFiles.Count)" -ForegroundColor Gray
 }
 
-function Invoke-SyncYamlTasks {
+function Sync-YamlTemplates {
     param(
         [string]$branch = "",
         [Parameter(Mandatory=$true)]
@@ -109,7 +116,7 @@ function Invoke-SyncYamlTasks {
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
     $sourceDirectory = Join-Path -Path $branchRootPath -ChildPath "$sourceRepo/devops-build"
     
-    Sync-YamlFiles -sourceDirectory $sourceDirectory -branchPath $branchRootPath
+    Sync-YamlFiles -sourceDirectory $sourceDirectory -branchPath $branchRootPath -excludeRepo $sourceRepo
 }
 
-Export-ModuleMember -Function @('Invoke-SyncYamlTasks')
+Export-ModuleMember -Function @('Sync-YamlTemplates')
