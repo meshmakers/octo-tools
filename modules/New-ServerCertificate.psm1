@@ -156,8 +156,8 @@ prompt = no
 
 [req_distinguished_name]
 C=AT
-ST=Vienna
-L=Vienna
+ST=Salzburg
+L=Salzburg
 O=meshmakers.io
 OU=IT
 CN=$($DnsNames[0])
