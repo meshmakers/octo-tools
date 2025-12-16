@@ -72,7 +72,7 @@ services:
     container_name: cratedb01
     image: crate:5.10.10
     ports:
-      - "4201:4200"
+      - "4301:4200"
       - "5432:5432"
     volumes:
       - crate-data1:/data
@@ -102,7 +102,7 @@ services:
     container_name: cratedb02
     image: crate:5.10.10
     ports:
-      - "4202:4200"
+      - "4302:4200"
       - "5433:5432"
     volumes:
       - crate-data2:/data
@@ -132,7 +132,7 @@ services:
     container_name: cratedb03
     image: crate:5.10.10
     ports:
-      - "4203:4200"
+      - "4303:4200"
       - "5434:5432"
     volumes:
       - crate-data3:/data
