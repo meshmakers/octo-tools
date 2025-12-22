@@ -6,6 +6,7 @@ function Copy-AllNuGetPackages
         return;
     }
 
+    Write-Host "Copying nuget packages to $nugetPath"
     Write-Host "Searching in $rootPath..."
 
     $filter = "Meshmakers.*.999.0.0.nupkg"

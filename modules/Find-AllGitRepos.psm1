@@ -2,6 +2,9 @@ function Find-AllGitRepos {
     [CmdletBinding()]
     param(
         [Parameter()]
+        [string]$branch = "",
+
+        [Parameter()]
         [switch]$IncludeSubmodules = $false
     )
 
@@ -11,7 +14,9 @@ function Find-AllGitRepos {
         return
     }
 
-    Write-Verbose "Searching for Git repositories in: $rootPath"
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+
+    Write-Verbose "Searching for Git repositories in: $branchRootPath"
     Write-Verbose "Include submodules: $IncludeSubmodules"
     
     $script:gitRepos = @()
@@ -79,7 +84,7 @@ function Find-AllGitRepos {
     }
     
     # Start the search
-    Search-GitRepos -SearchPath $rootPath
+    Search-GitRepos -SearchPath $branchRootPath
     
     # Sort the results
     $script:gitRepos = $script:gitRepos | Sort-Object
