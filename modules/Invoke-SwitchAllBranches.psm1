@@ -3,10 +3,13 @@ function Invoke-SwitchAllBranches {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
-        
+
+        [Parameter()]
+        [string]$branch = "",
+
         [Parameter()]
         [switch]$Push = $false,
-        
+
         [Parameter()]
         [switch]$IncludeSubmodules = $false
     )
@@ -17,13 +20,14 @@ function Invoke-SwitchAllBranches {
         Import-Module $modulePath -Force
     }
 
-    Write-Host "Switching all repositories to branch: $Name" -ForegroundColor Cyan
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    Write-Host "Switching all repositories in '$branchRootPath' to branch: $Name" -ForegroundColor Cyan
     if ($IncludeSubmodules) {
         Write-Host "Including submodules in branch switching" -ForegroundColor Cyan
     }
-    
+
     # Get all git repositories
-    $repos = Find-AllGitRepos -IncludeSubmodules:$IncludeSubmodules
+    $repos = Find-AllGitRepos -branch $branch -IncludeSubmodules:$IncludeSubmodules
     
     if ($repos.Count -eq 0) {
         Write-Warning "No Git repositories found"

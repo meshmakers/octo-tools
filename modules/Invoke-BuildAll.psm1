@@ -68,6 +68,8 @@ function Invoke-BuildAll {
         return;
     }
 
+    Write-Host "Building all repositories in branch $branch with configuration $configuration" -ForegroundColor Green
+
     # kill all dotnet processes. this is necessary to avoid file locks.
     Invoke-KillDotnet
 
@@ -80,7 +82,15 @@ function Invoke-BuildAll {
     if ($excludeFrontend -eq $true){
         $octoDirectories = $octoDirectories | Where-Object { $_.Name -notlike "octo-frontend-*" }
     }
-    
+
+    # Check if any repositories were found
+    $octoCount = if ($octoDirectories) { @($octoDirectories).Count } else { 0 }
+    $mmCount = if ($mmDirectories) { @($mmDirectories).Count } else { 0 }
+    if ($octoCount -eq 0 -and $mmCount -eq 0) {
+        Write-Warning "No octo-* or mm-* directories found in '$branchRootPath'"
+        return
+    }
+
     # Create a dictionary that contains the directory name and a status weather the build was successful or not
     $allStatus = @{}
 
@@ -93,10 +103,16 @@ function Invoke-BuildAll {
 
         # Delete all nuget packages in the octo mesh nuget folder
         $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
+        # Ensure the nuget directory exists
+        if (!(Test-Path $branchNugetPath)) {
+            Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow
+            New-Item -ItemType Directory -Path $branchNugetPath | Out-Null
+        }
         Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force
-        
+
         Remove-GlobalNuGetPackages -branch $branch
     }
+
 
     # At commom libraries we do not have a build sequence
     foreach ($directory in $mmDirectories) {
