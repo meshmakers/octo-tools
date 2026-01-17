@@ -1,32 +1,51 @@
 function Compare-BranchStatus {
     <#
     .SYNOPSIS
-    Compares branch status for all octo-* and mm-* directories against origin/main
-    
+    Compares branch status for all octo-* and mm-* directories against a target origin branch
+
     .DESCRIPTION
-    Scans current directory for subdirectories starting with 'octo-' or 'mm-',
-    checks if they are git repositories, and compares current branch with origin/main
-    to show if there are new commits.
-    
+    Scans a branch subdirectory for subdirectories starting with 'octo-' or 'mm-',
+    checks if they are git repositories, and compares current branch with the specified
+    target origin branch to show if there are new commits.
+
+    .PARAMETER branch
+    The branch subdirectory to scan (e.g., "" for root, "feature-x" for $rootPath/feature-x)
+
+    .PARAMETER targetBranch
+    The origin branch to compare against (default: main)
+
     .PARAMETER Details
     Shows detailed commit information for each repository
-    
+
     .EXAMPLE
     Compare-BranchStatus
-    
+
     .EXAMPLE
-    Compare-BranchStatus -Details
+    Compare-BranchStatus -branch "feature-x"
+
+    .EXAMPLE
+    Compare-BranchStatus -branch "feature-x" -targetBranch develop
+
+    .EXAMPLE
+    Compare-BranchStatus -branch "feature-x" -Details
     #>
-    
+
     [CmdletBinding()]
     param(
+        [string]$branch = "",
+        [string]$targetBranch = "main",
         [switch]$Details
     )
-    
-    Write-Host "Checking branch status for octo-* and mm-* directories..." -ForegroundColor Yellow
-    
-    $currentDir = Get-Location
-    $directories = Get-ChildItem -Directory | Where-Object { $_.Name -match '^(octo-|mm-)' }
+
+    if (!(Test-Path $rootPath)) {
+        Write-Error "Root path $rootPath does not exist"
+        return
+    }
+
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    Write-Host "Checking branch status for octo-* and mm-* directories in $branchRootPath against origin/$targetBranch..." -ForegroundColor Yellow
+
+    $directories = Get-ChildItem -Directory -Path $branchRootPath | Where-Object { $_.Name -match '^(octo-|mm-)' }
     
     if ($directories.Count -eq 0) {
         Write-Host "✓ No octo-* or mm-* directories found" -ForegroundColor Green
@@ -50,18 +69,18 @@ function Compare-BranchStatus {
             }
             
             # Fetch latest from origin
-            git fetch origin main 2>$null | Out-Null
-            
-            # Check for commits ahead of origin/main
-            $commitsAhead = git rev-list --count origin/main..$currentBranch 2>$null
+            git fetch origin $targetBranch 2>$null | Out-Null
+
+            # Check for commits ahead of origin/$targetBranch
+            $commitsAhead = git rev-list --count origin/$targetBranch..$currentBranch 2>$null
             if ($LASTEXITCODE -ne 0) {
-                Write-Host "  $($dir.Name): Cannot compare with origin/main" -ForegroundColor Red
+                Write-Host "  $($dir.Name): Cannot compare with origin/$targetBranch" -ForegroundColor Red
                 continue
             }
             
             if ([int]$commitsAhead -gt 0) {
                 # Analyze the nature of the commits
-                $commitInfo = git log --oneline --pretty=format:"%h|%s" origin/main..$currentBranch 2>$null
+                $commitInfo = git log --oneline --pretty=format:"%h|%s" origin/$targetBranch..$currentBranch 2>$null
                 $commits = $commitInfo -split "`n" | Where-Object { $_ -ne "" }
                 
                 $submoduleCommits = 0
@@ -133,7 +152,7 @@ function Compare-BranchStatus {
                 }
                 
             } else {
-                Write-Host "  $($dir.Name) [$currentBranch]: ✓ No changes vs main" -ForegroundColor Green
+                Write-Host "  $($dir.Name) [$currentBranch]: ✓ No changes vs $targetBranch" -ForegroundColor Green
             }
         }
         catch {
