@@ -334,11 +334,21 @@ function Sync-TestBranch {
     }
 
     # Return status for programmatic use
-    return @{
+    # Convert status hashtable to array of PSCustomObjects for better display
+    $statusArray = foreach ($key in $status.Keys) {
+        [PSCustomObject]@{
+            Repository = $key
+            Status = $status[$key].Status
+            Success = $status[$key].Success
+            Message = $status[$key].Message
+        }
+    }
+
+    return [PSCustomObject]@{
         BranchName = $branchName
-        Status = $status
+        Status = $statusArray
         ManualActionRequired = $manualActionRequired
-        Summary = @{
+        Summary = [PSCustomObject]@{
             Synced = $syncedCount
             UpToDate = $upToDateCount
             NotFound = $notFoundCount
