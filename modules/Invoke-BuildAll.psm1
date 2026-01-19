@@ -6,6 +6,15 @@ function Compile-Repo {
         [Parameter(Mandatory=$true)]
         [string]$configuration
     )
+
+    # Check if a custom build script exists in the repository
+    $buildScript = Join-Path -Path $path -ChildPath "build.ps1"
+    if (Test-Path $buildScript) {
+        Write-Host "Found custom build script in $path" -ForegroundColor Cyan
+        & $buildScript -configuration $configuration
+        return $LASTEXITCODE -eq 0
+    }
+
     # Check if a solution file exists
     $solutionFiles = Get-ChildItem -Path $path -Filter "*.sln"
     if ($solutionFiles.Count -eq 0) {
@@ -31,7 +40,7 @@ function Compile-Repo {
     if ($configuration -ieq "DebugL" -And $state -eq $true) {
         Copy-NuGetPackages -directory $path -branch $branch
     }
-    
+
     return $state;
 }
 

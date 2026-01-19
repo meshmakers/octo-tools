@@ -169,6 +169,25 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://*:5007;http://*:5006") -jobName "ReportingServices"
     }
 
+    # Start custom octo-start.ps1 scripts from repositories
+    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    $octoDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    foreach ($directory in $octoDirectories) {
+        $startScript = Join-Path -Path $directory.FullName -ChildPath "octo-start.ps1"
+        if (Test-Path $startScript) {
+            $repoName = $directory.Name
+            Write-Host "Found custom start script in $repoName" -ForegroundColor Cyan
+            Delete-LogFile -branch $branch -file "$repoName.log"
+
+            $logFile = [System.IO.Path]::Combine($branchRootPath, $logDir, "$repoName.log")
+            $job = Start-Job -ScriptBlock {
+                param($scriptPath, $config, $logPath)
+                & $scriptPath -configuration $config 2>&1 >> $logPath
+            } -ArgumentList $startScript, $configuration, $logFile -Name $repoName
+            $jobs.Add($job) | Out-Null
+        }
+    }
+
     Get-ServiceStatus
 
     Write-Host "Started. Press key to exit"
