@@ -136,6 +136,7 @@ function Invoke-BuildAll {
     Compile-RepoIfExists -branch $branch -name "octo-construction-kit-engine-mongodb" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-common-services" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-mesh-adapter" -configuration $configuration -status $allStatus
+    Compile-RepoIfExists -branch $branch -name "octo-bot-services" -configuration $configuration -status $allStatus
 
     # Build the rest of the octo repositories
     if ($excludeAdditional -eq $false) {
