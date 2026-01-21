@@ -33,6 +33,21 @@ If set to $true, only the Identity Service will be started. All other parameters
 .PARAMETER reportingService
 If set to $true, the Reporting Service will be started. If set to $false, it will not be started.
 
+.PARAMETER simulationAdapter
+If set to $true, the Simulation Adapter will be started. If set to $false, it will not be started. Defaults to $false.
+
+.PARAMETER meshAdapterTenantId
+The tenant ID to use for the Mesh Adapter. Defaults to "meshtest".
+
+.PARAMETER meshAdapterId
+The adapter runtime ID to use for the Mesh Adapter. Defaults to "66004fda527ac79a03ecedd7".
+
+.PARAMETER simulationAdapterTenantId
+The tenant ID to use for the Simulation Adapter. Defaults to "meshtest".
+
+.PARAMETER simulationAdapterId
+The adapter runtime ID to use for the Simulation Adapter. Defaults to "65d5c447b420da3fb12381bc".
+
 .EXAMPLE
 Start-Octo -botService $false -identityService $true
 
@@ -60,8 +75,11 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$identityOnly = $false,
         [Parameter()] [Boolean]$identityAssetRepoOnly = $false,
         [Parameter()] [Boolean]$reportingService = $false,
-        [Parameter()] [string]$adapterTenantId = "meshtest",
-        [Parameter()] [string]$adapterId = "66004fda527ac79a03ecedd7"
+        [Parameter()] [string]$meshAdapterTenantId = "meshtest",
+        [Parameter()] [string]$meshAdapterId = "66004fda527ac79a03ecedd7",
+        [Parameter()] [Boolean]$simulationAdapter = $false,
+        [Parameter()] [string]$simulationAdapterTenantId = "meshtest",
+        [Parameter()] [string]$simulationAdapterId = "65d5c447b420da3fb12381bc"
     )
     if ($identityOnly) {
         $botService = $false;
@@ -128,9 +146,6 @@ Use this function to selectively start OctoMesh services based on your requireme
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
-    $env:OCTO_ADAPTER__TENANTID = $adapterTenantId
-    $env:OCTO_ADAPTER__ADAPTERRTID = $adapterId
-    $env:OCTO_ADAPTER__ADAPTERCKTYPEID = "System.Communication/MeshAdapter"
     $env:OCTO_IDENTITY__IdentityServerLicenseKey = "eyJhbGciOiJQUzI1NiIsImtpZCI6IklkZW50aXR5U2VydmVyTGljZW5zZWtleS83Y2VhZGJiNzgxMzA0NjllODgwNjg5MTAyNTQxNGYxNiIsInR5cCI6ImxpY2Vuc2Urand0In0.eyJpc3MiOiJodHRwczovL2R1ZW5kZXNvZnR3YXJlLmNvbSIsImF1ZCI6IklkZW50aXR5U2VydmVyIiwiaWF0IjoxNzI0Mzk1MTUyLCJleHAiOjE3NTU5MzExNTIsImNvbXBhbnlfbmFtZSI6ImdlcmFsZC5sb2NobmVyQHNhbHpidXJnZGV2LmF0IiwiY29udGFjdF9pbmZvIjoiZ2VyYWxkLmxvY2huZXJAc2FsemJ1cmdkZXYuYXQiLCJlZGl0aW9uIjoiQ29tbXVuaXR5In0.FAmDK4UWFuh83RpqFtVR4lSktDfGVGsow1qjTNyhlkZqUJwFtO7z_d9wmGle1lUbxbB0JtKD6BHxhPlnqMvaj1jOQlSkLoz9T9IV3FrZgvK-09nPJUyt0__fdCbIQPrTE3Wri0OsxNOnOz8be0KWeyuLCZxCPZPLRzpDamjITiiG3mBHS-EFxZnNhLsn7VJwKMsi7efVZ1JOwggqqZbZ49phKQSe7dWFHMs8w3F-lhNURnJIRjZ6JuRSOiYClFFA1rO23dtfGatjQdKwYkSvsPJTDMwBdGip7FcAtiTNi_SBjI2GtOao7VD1rSUOxI5o9-VPzC9wi_V2v7ZGYc7hxQ"
     $env:OCTO_IDENTITY__AutoMapperLicenseKey = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ikx1Y2t5UGVubnlTb2Z0d2FyZUxpY2Vuc2VLZXkvYmJiMTNhY2I1OTkwNGQ4OWI0Y2IxYzg1ZjA4OGNjZjkiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2x1Y2t5cGVubnlzb2Z0d2FyZS5jb20iLCJhdWQiOiJMdWNreVBlbm55U29mdHdhcmUiLCJleHAiOiIxNzg1MTk2ODAwIiwiaWF0IjoiMTc1MzcxMzU3MSIsImFjY291bnRfaWQiOiIwMTk4NTE3OTFmNzY3ZDEwOGMwYjNiYzhjODNlMmY5NSIsImN1c3RvbWVyX2lkIjoiY3RtXzAxazE4cWp4NTJtemtlbW1wcWszZmF5Mnl3Iiwic3ViX2lkIjoiLSIsImVkaXRpb24iOiIwIiwidHlwZSI6IjIifQ.qlbbn1_eEpLhfUIIaVMGHhiKT_FTgR7b9niUJAfZE6MA5jPLAdpzQFKhvAsMTAl8fB2tCXsrsN7lT_OSFSSsmZKY1nLwvQs5GgfyGfG0vGbWQBbQbml27ofnZcTbMVideLqOJ1uZtWkilFjQ5utvt2id4n7zegDSgXbL2uA8Fe7iE1uZdm7rMjx5nFBXSt3694FlljVQ0YcJwIhGM1J-JxoGPfsfhbpSMP3YHbWlRDv2Gt53mir5tSpYLb6ZelFkjz7a4j7Fp0kctbWMI2nPH-XIz3KbExGxRIQ3G4XJ-lHnf9mWrrgoOXmGWQihQPStfpsLIpDy7zqyLJmPbB1M4g"
 
@@ -146,6 +161,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "BotServices.log"
     Delete-LogFile -branch $branch -file "AdminPanel.log"
     Delete-LogFile -branch $branch -file "ReportingServices.log"
+    Delete-LogFile -branch $branch -file "SimulationAdapter.log"
 
     if ($identityService) {
         Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
@@ -154,7 +170,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://*:5000;https://*:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021") -jobName "MeshAdapter"
+        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/MeshAdapter") -jobName "MeshAdapter"
     }
     if ($botService) {
         Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://*:5009;http://*:5008") -jobName "BotServices"
@@ -167,6 +183,19 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
     if ($reportingService) {
         Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://*:5007;http://*:5006") -jobName "ReportingServices"
+    }
+    if ($simulationAdapter) {
+        Write-Host "Starting SimulationAdapter (branch $( if ([string]::IsNullOrEmpty($branch)) { 'default' } else { $branch } )) -> TenantId=$simulationAdapterTenantId, AdapterId=$simulationAdapterId" -ForegroundColor Green
+        $simBranchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+        $simWorkingDirectory = [System.IO.Path]::Combine($simBranchRootPath, "octo-sdk/src/Sdk.Plug.Simulation/bin/$configuration/$publishVersion/")
+        $simLogFile = [System.IO.Path]::Combine($simBranchRootPath, $logDir, "SimulationAdapter.log")
+        $job = Start-Job -ScriptBlock {
+            param($workDir, $logPath, $tenantId, $adapterId)
+            Set-Location $workDir
+            $env:ASPNETCORE_ENVIRONMENT = "Development"
+            & dotnet "Sdk.Plug.Simulation.dll" "--Adapter:TenantId=$tenantId" "--Adapter:AdapterRtId=$adapterId" 2>&1 >> $logPath
+        } -ArgumentList $simWorkingDirectory, $simLogFile, $simulationAdapterTenantId, $simulationAdapterId -Name "SimulationAdapter"
+        $jobs.Add($job) | Out-Null
     }
 
     # Start custom octo-start.ps1 scripts from repositories
