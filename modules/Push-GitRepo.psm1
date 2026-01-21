@@ -1,26 +1,25 @@
 <#
 .Synopsis
-Pushs a git repo
+Pushes a git repo
 .Description
-This function changes to the directory provides by the argument repositoryPath,
-configures pushs to origin
+This function changes to the directory provided by the argument repositoryPath
+and pushes existing local commits to origin.
+.Parameter repositoryPath
+The path to the git repository to push.
 .Example
 Push-GitRepo
 .Example
- # This is function is called by convention in PowerShell
- function prompt {
-     Push-GitRepo
- }
+Push-GitRepo -repositoryPath ".\my-repo"
 #>
 function Push-GitRepo() {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
-    param([string]$repositoryPath = ".\", [string]$commitMessage = "Updated")
+    param(
+        [string]$repositoryPath = ".\"
+    )
 
     $basedir = $PWD
-    Write-Host Handling directory $repositoryPath
+    Write-Host "Pushing repository $repositoryPath"
     Set-Location $repositoryPath
-    git add .
-    git commit -m $commitMessage
     git push origin
     Set-Location $basedir
 }
