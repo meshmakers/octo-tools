@@ -27,6 +27,9 @@ If set to $true, the Communication Controller Service will be started. If set to
 .PARAMETER adminPanel
 If set to $true, the Admin Panel will be started. If set to $false, it will not be started.
 
+.PARAMETER dataRefineryStudio
+If set to $true, the Data Refinery Studio will be started. If set to $false, it will not be started.
+
 .PARAMETER identityOnly
 If set to $true, only the Identity Service will be started. All other parameters will be ignored.
 
@@ -72,6 +75,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$meshAdapter = $true,
         [Parameter()] [Boolean]$communicationControllerService = $true,
         [Parameter()] [Boolean]$adminPanel = $true,
+        [Parameter()] [Boolean]$dataRefineryStudio = $true,
         [Parameter()] [Boolean]$identityOnly = $false,
         [Parameter()] [Boolean]$identityAssetRepoOnly = $false,
         [Parameter()] [Boolean]$reportingService = $false,
@@ -87,12 +91,14 @@ Use this function to selectively start OctoMesh services based on your requireme
         $meshAdapter = $false;
         $communicationControllerService = $false;
         $adminPanel = $false;
+        $dataRefineryStudio = $false;
     }
     if ($identityAssetRepoOnly) {
         $botService = $false;
         $meshAdapter = $false;
         $communicationControllerService = $false;
         $adminPanel = $false;
+        $dataRefineryStudio = $false;
     }
     
     $logDir = "logFiles"
@@ -205,6 +211,13 @@ Use this function to selectively start OctoMesh services based on your requireme
         $startScript = Join-Path -Path $directory.FullName -ChildPath "octo-start.ps1"
         if (Test-Path $startScript) {
             $repoName = $directory.Name
+
+            # Skip Data Refinery Studio if disabled
+            if ($repoName -eq "octo-frontend-refinery-studio" -and -not $dataRefineryStudio) {
+                Write-Host "Skipping $repoName (disabled)" -ForegroundColor Yellow
+                continue
+            }
+
             Write-Host "Found custom start script in $repoName" -ForegroundColor Cyan
             Delete-LogFile -branch $branch -file "$repoName.log"
 
