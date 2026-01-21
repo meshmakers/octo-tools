@@ -11,7 +11,7 @@ function Invoke-Build {
     $repositoryPath = $(Resolve-Path -Path $repositoryPath).Path
 
     Write-Host "[$configuration] Restore nuget packages $repositoryPath" -ForegroundColor Green
-    dotnet restore $repositoryPath -f > $logFile
+    dotnet restore $repositoryPath -p:Configuration=$configuration -f > $logFile
     
     Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
     dotnet build $repositoryPath -c $configuration >> $logFile
