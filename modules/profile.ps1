@@ -8,6 +8,8 @@ $publishVersion = "net10.0"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
 
+$env:TELERIK_LICENSE = "***REMOVED-TELERIK-LICENSE***"
+
 if ($IsMacOS) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
     $env:PATH += ";$octoCliPath"
