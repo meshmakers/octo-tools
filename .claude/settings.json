@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__serena",
+      "Bash(dotnet build:*)",
+      "Bash(git add:*)",
+      "Bash(dotnet test:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)"
+    ],
+    "deny": []
+  }
+}
