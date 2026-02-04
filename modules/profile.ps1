@@ -87,6 +87,7 @@ Import-Module "$modulePath/Remove-TestBranch.psm1"
 Import-Module "$modulePath/Sync-TestBranch.psm1"
 Import-Module "$modulePath/Get-BranchAvailability.psm1"
 Import-Module "$modulePath/Invoke-CleanupInfraContainerDisks.psm1"
+Import-Module "$modulePath/Compare-Pipelines.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
