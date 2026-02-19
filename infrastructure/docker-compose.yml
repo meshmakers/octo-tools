@@ -13,7 +13,7 @@ services:
     hostname: mongo-2.mongo
     container_name: mongo-2.mongo
     image: mongo:8.0.12
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all --wiredTigerCacheSizeGB 2"
     ports:
       - "27018:27017"
     restart: always
@@ -27,7 +27,7 @@ services:
     hostname: mongo-1.mongo
     container_name: mongo-1.mongo
     image: mongo:8.0.12
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all --wiredTigerCacheSizeGB 2"
     ports:
       - "27019:27017"
     restart: always
@@ -41,7 +41,7 @@ services:
     hostname: mongo-0.mongo
     container_name: mongo-0.mongo
     image: mongo:8.0.12
-    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all"
+    command: bash -c "chmod 400 /data/file.key && /usr/bin/mongod --keyFile /data/file.key --replSet rs --bind_ip_all --wiredTigerCacheSizeGB 2"
     ports:
       - "27017:27017"
     links:
