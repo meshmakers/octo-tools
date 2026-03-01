@@ -30,6 +30,9 @@ If set to $true, the Admin Panel will be started. If set to $false, it will not 
 .PARAMETER dataRefineryStudio
 If set to $true, the Data Refinery Studio will be started. If set to $false, it will not be started.
 
+.PARAMETER frontendLibraries
+If set to $true, the Frontend Libraries dev servers will be started. If set to $false, they will not be started.
+
 .PARAMETER identityOnly
 If set to $true, only the Identity Service will be started. All other parameters will be ignored.
 
@@ -76,6 +79,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$communicationControllerService = $true,
         [Parameter()] [Boolean]$adminPanel = $true,
         [Parameter()] [Boolean]$dataRefineryStudio = $true,
+        [Parameter()] [Boolean]$frontendLibraries = $true,
         [Parameter()] [Boolean]$identityOnly = $false,
         [Parameter()] [Boolean]$identityAssetRepoOnly = $false,
         [Parameter()] [Boolean]$reportingService = $false,
@@ -92,6 +96,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         $communicationControllerService = $false;
         $adminPanel = $false;
         $dataRefineryStudio = $false;
+        $frontendLibraries = $false;
     }
     if ($identityAssetRepoOnly) {
         $botService = $false;
@@ -99,6 +104,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         $communicationControllerService = $false;
         $adminPanel = $false;
         $dataRefineryStudio = $false;
+        $frontendLibraries = $false;
     }
     
     $logDir = "logFiles"
@@ -214,6 +220,12 @@ Use this function to selectively start OctoMesh services based on your requireme
 
             # Skip Data Refinery Studio if disabled
             if ($repoName -eq "octo-frontend-refinery-studio" -and -not $dataRefineryStudio) {
+                Write-Host "Skipping $repoName (disabled)" -ForegroundColor Yellow
+                continue
+            }
+
+            # Skip Frontend Libraries if disabled
+            if ($repoName -eq "octo-frontend-libraries" -and -not $frontendLibraries) {
                 Write-Host "Skipping $repoName (disabled)" -ForegroundColor Yellow
                 continue
             }
