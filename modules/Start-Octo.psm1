@@ -259,8 +259,13 @@ Use this function to selectively start OctoMesh services based on your requireme
 
         foreach ($job in $jobs) {
             if ($job.State -ne "Running") {
+                Write-Host ""
+                Write-Host "========================================" -ForegroundColor Red
                 Write-Warning "Service $( $job.Name ) is in status $( $job.State )"
+                Write-Host "--- Last output from $( $job.Name ): ---" -ForegroundColor Yellow
                 Receive-Job $job | Write-Output
+                Write-Host "========================================" -ForegroundColor Red
+                Write-Host ""
                 $wait = $false
                 break;
             }
