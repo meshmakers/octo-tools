@@ -54,6 +54,11 @@ The tenant ID to use for the Simulation Adapter. Defaults to "meshtest".
 .PARAMETER simulationAdapterId
 The adapter runtime ID to use for the Simulation Adapter. Defaults to "65d5c447b420da3fb12381bc".
 
+.PARAMETER nonInteractive
+If set to $true, the function will not wait for a keypress to exit. Instead it blocks until a job fails
+or a stop signal file is created. Use Stop-Octo to gracefully stop services in non-interactive mode.
+This is useful for running services from background agents or CI/CD pipelines.
+
 .EXAMPLE
 Start-Octo -botService $false -identityService $true
 
@@ -63,6 +68,12 @@ This example starts all services except for the Bot Service.
 Start-Octo -SystemDatabase "MyCustomSystem"
 
 This example starts all services using "MyCustomSystem" as the system database name.
+
+.EXAMPLE
+Start-Octo -nonInteractive $true -configuration DebugL -identityAssetRepoOnly $true
+
+This example starts only Identity and Asset Repo services in non-interactive mode with DebugL configuration.
+Use Stop-Octo to stop the services.
 
 .NOTES
 Use this function to selectively start OctoMesh services based on your requirements.
@@ -87,7 +98,8 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [string]$meshAdapterId = "66004fda527ac79a03ecedd7",
         [Parameter()] [Boolean]$simulationAdapter = $false,
         [Parameter()] [string]$simulationAdapterTenantId = "meshtest",
-        [Parameter()] [string]$simulationAdapterId = "65d5c447b420da3fb12381bc"
+        [Parameter()] [string]$simulationAdapterId = "65d5c447b420da3fb12381bc",
+        [Parameter()] [Boolean]$nonInteractive = $false
     )
     if ($identityOnly) {
         $botService = $false;
@@ -244,37 +256,75 @@ Use this function to selectively start OctoMesh services based on your requireme
 
     Get-ServiceStatus
 
-    Write-Host "Started. Press key to exit"
+    if ($nonInteractive) {
+        $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+        $stopFile = Join-Path -Path $branchRootPath -ChildPath ".octo-stop"
 
-    $wait = $true;
-    do {
-        # wait for a key to be available:
-        if ([Console]::KeyAvailable) {
-            # read the key, and consume it so it won't
-            # be echoed to the console:
-            [Console]::ReadKey($true) | Out-Null
-            # exit loop
-            break
+        # Clean up any leftover stop signal
+        if (Test-Path $stopFile) {
+            Remove-Item -Force $stopFile
         }
 
-        foreach ($job in $jobs) {
-            if ($job.State -ne "Running") {
-                Write-Host ""
-                Write-Host "========================================" -ForegroundColor Red
-                Write-Warning "Service $( $job.Name ) is in status $( $job.State )"
-                Write-Host "--- Last output from $( $job.Name ): ---" -ForegroundColor Yellow
-                Receive-Job $job | Write-Output
-                Write-Host "========================================" -ForegroundColor Red
-                Write-Host ""
-                $wait = $false
-                break;
+        Write-Host "Started in non-interactive mode. Create '$stopFile' or send SIGTERM to stop."
+
+        $wait = $true
+        do {
+            # Check for stop signal file
+            if (Test-Path $stopFile) {
+                Write-Host "Stop signal received."
+                Remove-Item -Force $stopFile
+                break
             }
-        }
 
-        Start-Sleep -Seconds 2
+            foreach ($job in $jobs) {
+                if ($job.State -ne "Running") {
+                    Write-Host ""
+                    Write-Host "========================================" -ForegroundColor Red
+                    Write-Warning "Service $( $job.Name ) is in status $( $job.State )"
+                    Write-Host "--- Last output from $( $job.Name ): ---" -ForegroundColor Yellow
+                    Receive-Job $job | Write-Output
+                    Write-Host "========================================" -ForegroundColor Red
+                    Write-Host ""
+                    $wait = $false
+                    break
+                }
+            }
 
-    } while ($wait)
+            Start-Sleep -Seconds 2
+        } while ($wait)
+    }
+    else {
+        Write-Host "Started. Press key to exit"
 
+        $wait = $true;
+        do {
+            # wait for a key to be available:
+            if ([Console]::KeyAvailable) {
+                # read the key, and consume it so it won't
+                # be echoed to the console:
+                [Console]::ReadKey($true) | Out-Null
+                # exit loop
+                break
+            }
+
+            foreach ($job in $jobs) {
+                if ($job.State -ne "Running") {
+                    Write-Host ""
+                    Write-Host "========================================" -ForegroundColor Red
+                    Write-Warning "Service $( $job.Name ) is in status $( $job.State )"
+                    Write-Host "--- Last output from $( $job.Name ): ---" -ForegroundColor Yellow
+                    Receive-Job $job | Write-Output
+                    Write-Host "========================================" -ForegroundColor Red
+                    Write-Host ""
+                    $wait = $false
+                    break;
+                }
+            }
+
+            Start-Sleep -Seconds 2
+
+        } while ($wait)
+    }
 
     Write-Host "Exiting jobs"
     foreach ($job in $jobs) {
