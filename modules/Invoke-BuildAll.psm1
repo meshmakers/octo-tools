@@ -53,14 +53,16 @@ function Compile-RepoIfExists
         [Parameter(Mandatory=$true)]
         [string]$configuration,
         [Parameter(Mandatory=$true)]
-        [hashtable]$status
+        [System.Collections.Specialized.OrderedDictionary]$status
     )
 
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
     $repoDir = Get-ChildItem -Directory -Path $branchRootPath -Filter $name
     if ($repoDir) {
+        $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
         [Boolean]$buildStatus = Compile-Repo -branch $branch -path $repoDir.FullName -configuration $configuration
-        $status.Add($name, $buildStatus)
+        $repoStopWatch.Stop()
+        $status.Add($name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
     }
 }
 
@@ -101,7 +103,7 @@ function Invoke-BuildAll {
     }
 
     # Create a dictionary that contains the directory name and a status weather the build was successful or not
-    $allStatus = @{}
+    $allStatus = [ordered]@{}
 
     # Start a timer
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -125,8 +127,10 @@ function Invoke-BuildAll {
 
     # At commom libraries we do not have a build sequence
     foreach ($directory in $mmDirectories) {
+        $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
         [Boolean]$buildStatus = Compile-Repo -branch $branch -path $directory.FullName -configuration $configuration
-        $allStatus.Add($directory.Name, $buildStatus)
+        $repoStopWatch.Stop()
+        $allStatus.Add($directory.Name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
     }
     
     # Build octo repostories that first that are dependent on other repositories
@@ -143,12 +147,14 @@ function Invoke-BuildAll {
         foreach ($directory in $octoDirectories) {
 
             # do not build already build repositories
-            if ($allStatus.ContainsKey($directory.Name)) {
+            if ($allStatus.Contains($directory.Name)) {
                 continue
             }
 
+            $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
             [Boolean]$buildStatus = Compile-Repo -branch $branch -path $directory.FullName -configuration $configuration
-            $allStatus.Add($directory.Name, $buildStatus)
+            $repoStopWatch.Stop()
+            $allStatus.Add($directory.Name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
         }
     }
 
@@ -158,7 +164,7 @@ function Invoke-BuildAll {
     $repositoryCount = $octoDirectories.Count + $mmDirectories.Count
     
     # Calculate percentage of successful builds
-    $successfulBuilds = $allStatus.Values | Where-Object { $_ -eq $true }
+    $successfulBuilds = $allStatus.Values | Where-Object { $_.Success -eq $true }
     $percentageSuccessful = ($successfulBuilds.Count / $repositoryCount) * 100
 
     Write-Host "Summary:"
@@ -171,12 +177,20 @@ function Invoke-BuildAll {
     Write-Host " "
 
     foreach ($key in $allStatus.Keys) {
-        $wasSuccessful = $allStatus[$key]
-        if ($wasSuccessful) {
-            Write-Host "Build of ${key} was successful" -ForegroundColor Green
+        $entry = $allStatus[$key]
+        $duration = $entry.Duration
+        $timeStr = ""
+        if ($duration.TotalMinutes -ge 1) {
+            $timeStr = "{0:N0}m {1:N0}s" -f [math]::Floor($duration.TotalMinutes), $duration.Seconds
         }
         else {
-            Write-Host "Build of ${key} failed" -ForegroundColor Red
+            $timeStr = "{0:N1}s" -f $duration.TotalSeconds
+        }
+        if ($entry.Success) {
+            Write-Host "Build of ${key} was successful ($timeStr)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Build of ${key} failed ($timeStr)" -ForegroundColor Red
         }
     }
 }
