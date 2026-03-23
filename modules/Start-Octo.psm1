@@ -59,6 +59,9 @@ If set to $true, the function will not wait for a keypress to exit. Instead it b
 or a stop signal file is created. Use Stop-Octo to gracefully stop services in non-interactive mode.
 This is useful for running services from background agents or CI/CD pipelines.
 
+.PARAMETER mcpService
+If set to $true, the MCP Service will be started if the octo-mcp-service directory exists locally. If set to $false, it will not be started. Defaults to $true.
+
 .EXAMPLE
 Start-Octo -botService $false -identityService $true
 
@@ -99,7 +102,8 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$simulationAdapter = $false,
         [Parameter()] [string]$simulationAdapterTenantId = "meshtest",
         [Parameter()] [string]$simulationAdapterId = "65d5c447b420da3fb12381bc",
-        [Parameter()] [Boolean]$nonInteractive = $false
+        [Parameter()] [Boolean]$nonInteractive = $false,
+        [Parameter()] [Boolean]$mcpService = $true
     )
     if ($identityOnly) {
         $botService = $false;
@@ -109,6 +113,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         $adminPanel = $false;
         $dataRefineryStudio = $false;
         $frontendLibraries = $false;
+        $mcpService = $false;
     }
     if ($identityAssetRepoOnly) {
         $botService = $false;
@@ -117,6 +122,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         $adminPanel = $false;
         $dataRefineryStudio = $false;
         $frontendLibraries = $false;
+        $mcpService = $false;
     }
     
     $logDir = "logFiles"
@@ -186,6 +192,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "AdminPanel.log"
     Delete-LogFile -branch $branch -file "ReportingServices.log"
     Delete-LogFile -branch $branch -file "SimulationAdapter.log"
+    Delete-LogFile -branch $branch -file "McpServices.log"
 
     if ($identityService) {
         Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
@@ -220,6 +227,15 @@ Use this function to selectively start OctoMesh services based on your requireme
             & dotnet "Sdk.Plug.Simulation.dll" "--Adapter:TenantId=$tenantId" "--Adapter:AdapterRtId=$adapterId" 2>&1 >> $logPath
         } -ArgumentList $simWorkingDirectory, $simLogFile, $simulationAdapterTenantId, $simulationAdapterId -Name "SimulationAdapter"
         $jobs.Add($job) | Out-Null
+    }
+
+    if ($mcpService) {
+        $mcpServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-mcp-service/bin/$configuration/$publishVersion/")
+        if (Test-Path $mcpServicePath) {
+            Start-Service -branch $branch -workingDirectory "octo-mcp-service/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "McpServices.log" -cmdArguments @("Meshmakers.Octo.Backend.McpServices.dll", "--urls=https://*:5017;http://*:5016") -jobName "McpServices"
+        } else {
+            Write-Host "Skipping McpServices (directory not found: $mcpServicePath)" -ForegroundColor Yellow
+        }
     }
 
     # Start custom octo-start.ps1 scripts from repositories
