@@ -201,7 +201,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://*:5000;https://*:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/MeshAdapter") -jobName "MeshAdapter"
+        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
     }
     if ($botService) {
         Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://*:5009;http://*:5008") -jobName "BotServices"
