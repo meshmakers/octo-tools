@@ -1,15 +1,18 @@
 function Invoke-OctoCliLoginLocal {
     param($tenantId = "meshtest", $includeReporting = $false)
 
+    $contextName = "local_$tenantId"
+
     if ($includeReporting) {
         Write-Host "Including reporting"
-        octo-cli -c Config -asu "https://localhost:5001/" -isu "https://localhost:5003/" -bsu "https://localhost:5009/" -csu "https://localhost:5015/" -rsu "https://localhost:5007/" -tid $tenantId
+        octo-cli -c AddContext -n $contextName -asu "https://localhost:5001/" -isu "https://localhost:5003/" -bsu "https://localhost:5009/" -csu "https://localhost:5015/" -rsu "https://localhost:5007/" -tid $tenantId
     }
     else {
         Write-Host "Excluding reporting"
-        octo-cli -c Config -asu "https://localhost:5001/" -isu "https://localhost:5003/" -bsu "https://localhost:5009/" -csu "https://localhost:5015/" -tid $tenantId
+        octo-cli -c AddContext -n $contextName -asu "https://localhost:5001/" -isu "https://localhost:5003/" -bsu "https://localhost:5009/" -csu "https://localhost:5015/" -tid $tenantId
     }
 
+    octo-cli -c UseContext -n $contextName
     octo-cli -c Login -i
 }
 
