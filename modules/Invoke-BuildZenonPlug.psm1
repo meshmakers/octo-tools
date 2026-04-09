@@ -18,7 +18,11 @@ function Invoke-BuildZenonPlug {
     $repositoryPath = $(Resolve-Path -Path $repositoryPath).Path
     
     $windowsServiceProjectPath = Join-Path $repositoryPath "src\Octo.Edge.Adapter.Zenon.WindowsService"
-    Invoke-Publish -repositoryPath $windowsServiceProjectPath -configuration $configuration -publishParamerters "--sc"
+    # Framework-dependent publish with explicit win-x64 RID so output lands in
+    # net10.0\win-x64\publish\ (where the WiX Setup project's createFileList.ps1
+    # looks). Matches the Azure Release pipeline layout without bloating the MSI
+    # with a self-contained .NET runtime.
+    Invoke-Publish -repositoryPath $windowsServiceProjectPath -configuration $configuration -publishParameters @("-r", "win-x64", "--self-contained", "false")
     
     $msbuildApp = &"${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
 
