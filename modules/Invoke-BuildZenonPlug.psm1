@@ -5,7 +5,8 @@ function Invoke-BuildZenonPlug {
     )
     
     if(!$IsWindows) {
-        Write-Host "Zenon plug must be built under windows"
+        Write-Host "Skipping Zenon plug (Windows-only)" -ForegroundColor Yellow
+        return
     }
     
     
