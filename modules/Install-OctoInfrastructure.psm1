@@ -198,6 +198,11 @@ This function does NOT switch the current kubectl context if it already points
 elsewhere — it only ensures the target cluster exists and prints the context
 in use at the end. Run it once per workstation; re-running is safe.
 
+.PARAMETER branch
+Branch sub-folder under `$rootPath` containing the repository checkouts.
+Matches the convention of Start-Octo / Invoke-BuildAll. Defaults to "" (the
+plain `$rootPath`).
+
 .PARAMETER ClusterName
 Name of the kind cluster to create or use. Defaults to "kind".
 
@@ -215,12 +220,16 @@ and broker secrets. Defaults to "octo".
 .EXAMPLE
 Install-OctoKubernetes
 
+.EXAMPLE
+Install-OctoKubernetes -branch dev/feature-x
+
 .NOTES
 Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
-"$rootPath/octo-helm-core/src/octo-mesh-crds".
+"$rootPath/<branch>/octo-helm-core/src/octo-mesh-crds".
 #>
 
     param(
+        [Parameter()] [string]$branch = "",
         [Parameter()] [string]$ClusterName = "kind",
         [Parameter()] [string]$CrdReleaseName = "octo-mesh-crds",
         [Parameter()] [string]$CrdNamespace = "octo-operator-system",
@@ -232,6 +241,12 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         return
     }
 
+    $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+    if (!(Test-Path $branchRootPath)) {
+        Write-Error "Branch root path $branchRootPath does not exist"
+        return
+    }
+
     foreach ($tool in @("kind", "helm", "kubectl")) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
             Write-Error "$tool is not on PATH. Install it before running Install-OctoKubernetes."
@@ -239,7 +254,7 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         }
     }
 
-    $crdChartPath = Join-Path $rootPath "octo-helm-core/src/octo-mesh-crds"
+    $crdChartPath = Join-Path $branchRootPath "octo-helm-core/src/octo-mesh-crds"
     if (!(Test-Path $crdChartPath)) {
         Write-Error "CRDs chart not found at $crdChartPath. Make sure octo-helm-core is checked out next to the other repositories."
         return
