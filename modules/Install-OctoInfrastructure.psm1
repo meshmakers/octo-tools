@@ -181,5 +181,128 @@ function Set-WSLConfig {
     }
 }
 
+function Install-OctoKubernetes {
+    <#
+.SYNOPSIS
+Sets up the local Kubernetes prerequisites for OctoMesh: a kind cluster, the
+octo-mesh-crds Helm chart, and the default 'octo' pool namespace.
+
+.DESCRIPTION
+The Install-OctoKubernetes function ensures that the local Kubernetes
+environment expected by the Communication Operator (and the E2E smoke test) is
+in place. Each step is idempotent: a missing kind cluster is created, an
+existing one is left alone; the CRDs chart is installed via 'helm upgrade
+--install'; the 'octo' namespace is created only if absent.
+
+This function does NOT switch the current kubectl context if it already points
+elsewhere — it only ensures the target cluster exists and prints the context
+in use at the end. Run it once per workstation; re-running is safe.
+
+.PARAMETER ClusterName
+Name of the kind cluster to create or use. Defaults to "kind".
+
+.PARAMETER CrdReleaseName
+Helm release name for the CRDs chart. Defaults to "octo-mesh-crds".
+
+.PARAMETER CrdNamespace
+Namespace into which the CRDs Helm release is installed. Defaults to
+"octo-operator-system".
+
+.PARAMETER PoolNamespace
+Namespace into which the operator places auto-created CommunicationPool CRs
+and broker secrets. Defaults to "octo".
+
+.EXAMPLE
+Install-OctoKubernetes
+
+.NOTES
+Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
+"$rootPath/octo-helm-core/src/octo-mesh-crds".
+#>
+
+    param(
+        [Parameter()] [string]$ClusterName = "kind",
+        [Parameter()] [string]$CrdReleaseName = "octo-mesh-crds",
+        [Parameter()] [string]$CrdNamespace = "octo-operator-system",
+        [Parameter()] [string]$PoolNamespace = "octo"
+    )
+
+    if (!(Test-Path $rootPath)) {
+        Write-Error "Root path $rootPath does not exist"
+        return
+    }
+
+    foreach ($tool in @("kind", "helm", "kubectl")) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            Write-Error "$tool is not on PATH. Install it before running Install-OctoKubernetes."
+            return
+        }
+    }
+
+    $crdChartPath = Join-Path $rootPath "octo-helm-core/src/octo-mesh-crds"
+    if (!(Test-Path $crdChartPath)) {
+        Write-Error "CRDs chart not found at $crdChartPath. Make sure octo-helm-core is checked out next to the other repositories."
+        return
+    }
+
+    $PSStyle.Progress.View = "Classic"
+    Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Checking kind cluster' -PercentComplete 0
+
+    $existingClusters = (& kind get clusters 2>$null) -split "`n" | Where-Object { $_ -ne "" }
+    if ($existingClusters -contains $ClusterName) {
+        Write-Host "kind cluster '$ClusterName' already exists, leaving it untouched" -ForegroundColor Yellow
+    }
+    else {
+        Write-Progress -Activity 'Install Octo Kubernetes' -Status "Creating kind cluster '$ClusterName'" -PercentComplete 25
+        Write-Host "Creating kind cluster '$ClusterName'" -ForegroundColor Green
+        & kind create cluster --name $ClusterName
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "kind create cluster failed with exit code $LASTEXITCODE"
+            return
+        }
+    }
+
+    Write-Progress -Activity 'Install Octo Kubernetes' -Status "Installing $CrdReleaseName Helm chart" -PercentComplete 60
+    Write-Host "Installing/upgrading Helm release '$CrdReleaseName' in namespace '$CrdNamespace' from $crdChartPath" -ForegroundColor Green
+    & helm upgrade --install $CrdReleaseName $crdChartPath `
+        --kube-context "kind-$ClusterName" `
+        --namespace $CrdNamespace `
+        --create-namespace
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "helm upgrade --install failed with exit code $LASTEXITCODE"
+        return
+    }
+
+    Write-Progress -Activity 'Install Octo Kubernetes' -Status "Ensuring '$PoolNamespace' namespace exists" -PercentComplete 85
+    & kubectl --context "kind-$ClusterName" get namespace $PoolNamespace 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Creating namespace '$PoolNamespace' for auto-managed CommunicationPool resources" -ForegroundColor Green
+        & kubectl --context "kind-$ClusterName" create namespace $PoolNamespace
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "kubectl create namespace failed with exit code $LASTEXITCODE"
+            return
+        }
+    }
+    else {
+        Write-Host "Namespace '$PoolNamespace' already exists, leaving it untouched" -ForegroundColor Yellow
+    }
+
+    Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Complete' -PercentComplete 100
+
+    $currentContext = (& kubectl config current-context).Trim()
+    Write-Host ""
+    Write-Host "Octo Kubernetes setup complete." -ForegroundColor Green
+    Write-Host "  kind cluster:      $ClusterName" -ForegroundColor Cyan
+    Write-Host "  CRDs release:      $CrdReleaseName in namespace $CrdNamespace" -ForegroundColor Cyan
+    Write-Host "  Pool namespace:    $PoolNamespace" -ForegroundColor Cyan
+    Write-Host "  Current context:   $currentContext" -ForegroundColor Cyan
+    if ($currentContext -ne "kind-$ClusterName") {
+        Write-Host ""
+        Write-Host "Note: current kubectl context is not 'kind-$ClusterName'." -ForegroundColor Yellow
+        Write-Host "Run 'kubectl config use-context kind-$ClusterName' before running the operator." -ForegroundColor Yellow
+    }
+}
+
 Export-ModuleMember -Function @('Install-OctoInfrastructure')
+Export-ModuleMember -Function @('Install-OctoKubernetes')
 Export-ModuleMember -Function @('Wait-DockerContainer')
