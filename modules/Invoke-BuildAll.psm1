@@ -79,6 +79,18 @@ function Invoke-BuildAll {
         return;
     }
 
+    # `$rootPath` is set in profile.ps1 to point at the branch checkout itself
+    # (`.../meshmakers/<branch>/`), so a `-branch <name>` argument that matches the leaf segment
+    # would build a non-existent `.../<branch>/<branch>/` path. Normalise that here so callers can
+    # pass `-branch main` from inside the `main` checkout without breaking.
+    if ($branch -ne "") {
+        $rootLeaf = Split-Path -Leaf ([IO.Path]::GetFullPath($rootPath))
+        if ($rootLeaf -ieq $branch) {
+            Write-Host "Branch '$branch' already matches root leaf — using root path directly" -ForegroundColor DarkGray
+            $branch = ""
+        }
+    }
+
     Write-Host "Building all repositories in branch $branch with configuration $configuration" -ForegroundColor Green
 
     # kill all dotnet processes. this is necessary to avoid file locks.
