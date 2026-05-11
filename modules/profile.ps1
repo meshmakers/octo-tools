@@ -10,18 +10,20 @@ $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
 
 $env:TELERIK_LICENSE = "***REMOVED-TELERIK-LICENSE***"
 
+$pathSep = [System.IO.Path]::PathSeparator
+
 if ($IsMacOS) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/osx-x64"
-    $env:PATH += ";$octoCliPath"
+    $env:PATH += "$pathSep$octoCliPath"
     $privateProfilePath = Join-Path $usersFolderPath ".config/powershell/Microsoft.PowerShell_profile_private.ps1";
 }
 elseif ($IsLinux) {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/linux-x64"
-    $env:PATH += ";$octoCliPath"
+    $env:PATH += "$pathSep$octoCliPath"
 }
 else {
     $octoCliPath = Join-Path $rootPath "octo-cli/bin/Release/$publishVersion/win-x64"
-    $env:PATH += ";$octoCliPath"
+    $env:PATH += "$pathSep$octoCliPath"
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
@@ -30,7 +32,7 @@ $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
 
 $Global:WantPromt = $true
 
-$env:PATH += ";$toolsPath"
+$env:PATH += "$pathSep$toolsPath"
 
 function Test-SubPath( [string]$directory, [string]$subpath ) {
     $dPath = [IO.Path]::GetFullPath( $directory )
