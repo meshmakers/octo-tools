@@ -297,9 +297,9 @@ function Compare-CkVersions {
     # Column widths over all rows for aligned output.
     $fmtVer = {
         param($info)
-        if ($null -eq $info) { '(fehlt)' }
+        if ($null -eq $info) { '(missing)' }
         elseif ($info.HasVersion) { $info.Version }
-        else { '(keine Version)' }
+        else { '(no version)' }
     }
     $nameWidth = ($rows | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
     $verWidth = ($rows | ForEach-Object {
@@ -338,7 +338,7 @@ function Compare-CkVersions {
     }
 
     & $writeGroup 'System Construction Kits' @($rows | Where-Object { $_.IsSystem })
-    & $writeGroup 'Andere Construction Kits' @($rows | Where-Object { -not $_.IsSystem })
+    & $writeGroup 'Other Construction Kits' @($rows | Where-Object { -not $_.IsSystem })
 
     # Summary.
     $equal = @($rows | Where-Object { $_.State -eq 'Equal' }).Count
@@ -348,11 +348,11 @@ function Compare-CkVersions {
 
     Write-Host 'Summary' -ForegroundColor Cyan
     Write-Host '=======' -ForegroundColor Cyan
-    Write-Host ("  Modelle gesamt:  {0}" -f $rows.Count)
-    Write-Host ("  gleich:          {0}" -f $equal) -ForegroundColor Green
-    if ($minor -gt 0) { Write-Host ("  minor/patch:     {0}" -f $minor) -ForegroundColor Yellow }
-    if ($major -gt 0) { Write-Host ("  major:           {0}" -f $major) -ForegroundColor Red }
-    if ($only -gt 0) { Write-Host ("  nur in einem:    {0}" -f $only) -ForegroundColor Cyan }
+    Write-Host ("  {0,-14}{1}" -f 'models total:', $rows.Count)
+    Write-Host ("  {0,-14}{1}" -f 'equal:', $equal) -ForegroundColor Green
+    if ($minor -gt 0) { Write-Host ("  {0,-14}{1}" -f 'minor/patch:', $minor) -ForegroundColor Yellow }
+    if ($major -gt 0) { Write-Host ("  {0,-14}{1}" -f 'major:', $major) -ForegroundColor Red }
+    if ($only -gt 0) { Write-Host ("  {0,-14}{1}" -f 'only in one:', $only) -ForegroundColor Cyan }
     Write-Host ''
 
     $global:LASTEXITCODE = $minor + $major + $only
