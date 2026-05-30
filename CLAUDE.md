@@ -46,6 +46,7 @@ All commands require PowerShell and are available after loading the profile:
 - `Push-AllGitRepos` - Push all repositories
 - `Get-AllGitRepStatus` - Check status of all repositories
 - `Invoke-CleanAllGitRepos` - Clean all repositories (use `-force` to ignore pending changes)
+- `Compare-CkVersions <otherBranch>` - Compare Construction Kit model versions (`ckModel.yaml`) between the current checkout and another branch, grouped System-first and color coded (green=equal, yellow=minor/patch, red=major, cyan=only in one). Resolves the path relative to `$Global:ROOTPATH`, e.g. `Compare-CkVersions ../main` or `Compare-CkVersions branches/test`
 
 ### Cleanup
 - `Remove-BinAndObjFolders` - Remove all bin/obj folders
