@@ -1,0 +1,178 @@
+# OctoMesh Local Kubernetes Dev Environment
+
+A local [kind](https://kind.sigs.k8s.io/) cluster that runs the OctoMesh **infrastructure**
+(MongoDB / RabbitMQ / CrateDB, single-node) plus the **CRDs** and the **Communication
+Operator**, so you can exercise the Helm-/operator-driven per-tenant deployment of
+mesh-adapters and arbitrary applications locally. The core .NET services stay host
+processes (`Start-Octo`); only what's needed to deploy adapters/apps runs in the cluster.
+
+Design spec: `../docs/superpowers/specs/2026-05-30-octomesh-local-k8s-infra-design.md`
+Implementation plan: `../docs/superpowers/plans/2026-05-30-local-k8s-dev-env.md`
+
+## Architecture
+
+```
+HOST (macOS)                                 kind cluster "kind" (Docker)
+─────────────────────────────────           ─────────────────────────────────────────────
+Start-Octo host processes (HTTPS):           ns octo-infra:
+  identity 5003 · asset-repo 5001              mongodb (1-member RS "rs", keyFile)
+  communication-controller 5015 · bot 5009     rabbitmq · cratedb (single-node)
+Refinery Studio (ng serve 4200)              ns octo-operator-system:
+octo-cli                                       CRDs + communication-operator (central)
+                                             ns octo:
+  ── localhost:27017/5672/5432/4301 ─────▶     adapter / application pods
+     (NodePort + kind extraPortMappings)       (helm-deployed per tenant by the operator)
+  operator/adapters ── https://<host-LAN-IP>:5015 ──▶ host controller
+```
+
+- **Host → in-cluster infra:** NodePort Services + kind `extraPortMappings` pin the infra to
+  the *same* localhost ports used today, so `Start-Octo` services connect with **no config
+  change** (they already run with `OCTO_SYSTEM__USEDIRECTCONNECTION=true`).
+- **Cluster → host controller:** the operator and adapter pods reach the host-process
+  Communication Controller via the host's **LAN IP** (auto-detected), with TLS validation
+  bypassed (`adapterIgnoreCertificateValidation: true`) because the host serves a `localhost`
+  dev cert.
+
+### In-cluster DNS + host-port contract
+
+| Component | In-cluster DNS | Host port |
+|---|---|---|
+| MongoDB | `mongodb-0.mongodb.octo-infra.svc.cluster.local:27017` (RS `rs`) | `localhost:27017` |
+| RabbitMQ | `rabbitmq.octo-infra.svc.cluster.local:5672` | `localhost:5672` (AMQP) / `15672` (mgmt) |
+| CrateDB | `cratedb.octo-infra.svc.cluster.local` (psql 5432 / http 4200) | `localhost:5432` (psql) / `4301` (http UI) |
+
+## Prerequisites
+
+On PATH: `kind` (v0.31+), `kubectl`, `helm` (v3), `docker` (daemon running), `openssl`,
+and `mongosh` (optional, for host verification). Install kind on macOS with `brew install kind`.
+`octo-helm-core` must be checked out next to the other repos (it ships the CRDs + operator chart).
+
+> **Port collision with docker-compose infra.** The kind infra binds the *same* host ports
+> (27017/5672/15672/5432/4301) as the legacy `Start-OctoInfrastructure` docker-compose stack.
+> They **cannot run at the same time.** `Install-OctoKubernetes` refuses to run while the
+> docker-compose containers (`mongo-0.mongo`, `rabbitmq`, `cratedb01`) are up — stop them first
+> with `Stop-OctoInfrastructure`.
+
+Load the cmdlets:
+```powershell
+. ./octo-tools/modules/profile.ps1
+```
+
+## One-time / cluster bring-up
+
+```powershell
+# 1) kind cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init.
+#    Idempotent; refuses if the docker-compose infra is running.
+Install-OctoKubernetes
+
+# 2) Deploy the Communication Operator (central mode). Generates webhook certs with openssl,
+#    pulls the published image, and points the operator at your host controller (auto-detected LAN IP).
+Deploy-OctoOperator
+```
+
+`Deploy-OctoOperator` options:
+- `-ImageTag <tag>` — operator image tag (default `3.3.108.0`, the newest published; there is no `latest`).
+- `-ControllerHost <ip>` — override the host address the operator/adapters use to reach the
+  controller (needed on multi-NIC / VPN hosts where the auto-detected IP is wrong).
+- `-BuildLocal` — build the operator image from `octo-communication-operator` source and load
+  it into kind instead of pulling the published image. Use this when you've changed operator
+  code and need it version-matched to your locally-built controller.
+
+## Daily development
+
+```powershell
+# Build the backend (host processes), then start them. They connect to the kind infra
+# on the same localhost ports as before — no config change needed.
+Invoke-BuildAll -configuration DebugL -excludeFrontend $true
+Start-Octo -configuration DebugL
+
+# Authenticate the CLI
+Invoke-OctoCliLoginLocal
+
+# Frontends keep running as host dev servers (hot reload), pointed at the host backends:
+#   cd octo-frontend-refinery-studio/src/octo-mesh-refinery-studio ; npm start   (https://localhost:4200)
+```
+
+Status at any time:
+```powershell
+Get-OctoKubernetesStatus
+```
+
+## Deploying adapters and applications
+
+This is the capability the local cluster unlocks — the same operator/Helm path used in the cloud.
+
+**Per-tenant adapter (operator-driven):** in Refinery Studio, create a tenant, create a
+**Cloud** pool and **Deploy** it. The host controller fans the event to the in-cluster operator,
+which creates the `CommunicationPool` CR + broker secret in `ns octo` and runs
+`helm upgrade --install {tenantId}-{workload}` for each managed Adapter/Application. Verify:
+```bash
+kubectl --context kind-kind -n octo get communicationpool
+kubectl --context kind-kind -n octo get pods
+helm --kube-context kind-kind list -n octo
+```
+
+**Arbitrary application (demo-app) directly:**
+```bash
+helm --kube-context kind-kind upgrade --install demoapp \
+  octo-helm-core/src/octo-mesh-demo-app -n octo \
+  --values octo-helm-core/src/examples/demo-app-sample.yaml
+kubectl --context kind-kind -n octo port-forward deploy/demoapp 8080:80
+```
+
+**Locally-built workload images:** set `image.privateRegistry=""`, `image.repository/tag` to
+your local build with `pullPolicy: IfNotPresent`, then load it into the node:
+```powershell
+Import-OctoImageToKind -Image my-adapter:dev
+```
+(`Import-OctoImageToKind` uses `kind load`, and automatically falls back to `docker save | ctr import`
+on hosts running Docker's containerd image store, where `kind load` produces an incomplete image.)
+
+## Teardown
+
+```powershell
+Uninstall-OctoKubernetes      # deletes the kind cluster AND its data (Mongo/Crate PVCs)
+```
+
+To go back to the legacy docker-compose infra afterwards: `Start-OctoInfrastructure`.
+
+## Backups
+
+The kind infra uses `local-path` PVCs: data survives pod restarts but **not** `kind delete cluster`
+(i.e. `Uninstall-OctoKubernetes`). There is no automated backup of the kind infra yet — for
+durable data either keep the cluster, or `mongodump` / take a CrateDB snapshot before teardown.
+The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the docker-compose infra.
+
+## Troubleshooting
+
+- **`Install-OctoKubernetes` refuses immediately** — the docker-compose infra is running. Run
+  `Stop-OctoInfrastructure` (or `docker stop mongo-0.mongo rabbitmq cratedb01 ...`).
+- **Operator pod is Ready but pools show "Unregistered" / logs say "Cannot connect to controller"**
+  — the host Communication Controller isn't running, or `-ControllerHost` is wrong. Start the
+  controller via `Start-Octo` and confirm the LAN IP is routable from inside the cluster. On a
+  VPN/multi-NIC host pass `-ControllerHost <reachable-ip>` to `Deploy-OctoOperator`.
+- **Operator/adapter version mismatch** — the default published operator image
+  (`3.3.108.0`) may not match a controller you built from this branch. If pool registration
+  misbehaves, deploy a version-matched operator with `Deploy-OctoOperator -BuildLocal`.
+- **`kind load` "content digest ... not found" / pod won't start with a locally-built image**
+  — Docker's containerd image store breaks `kind load docker-image`. `Import-OctoImageToKind`
+  already works around this; if you load images by hand, use
+  `docker save <img> | docker exec -i kind-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -`.
+- **Stale admission webhooks 500 on CR create** (after re-running the operator) — delete leftover
+  configs: `kubectl delete validatingwebhookconfiguration communication-operator-validators --ignore-not-found`
+  and the matching `mutatingwebhookconfiguration`.
+- **CrateDB pod CrashLoops / "max virtual memory areas too low"** — the privileged init step
+  sets `vm.max_map_count=262144` on the node; on some Docker backends it may need setting on the
+  Docker VM itself.
+
+## Notes on deviations from the original plan (discovered during implementation)
+
+These were found by running every step on a real macOS / Docker 29 / Apple-Silicon machine:
+- **Operator image:** pulled `meshmakers/octo-communication-operator:3.3.108.0` (no `latest` tag exists).
+- **Webhook certs:** generated with **openssl** inside `Deploy-OctoOperator` (self-contained) rather
+  than `octo-cli -c GenerateOperatorCertificates` (octo-cli need not be built).
+- **`Get-HostLanIPv4`** falls back to interface enumeration because `GetHostAddresses(GetHostName())`
+  throws on a Mac whose hostname isn't resolvable.
+- **`Deploy-OctoOperator`** runs `helm dependency build`/`update` so it self-bootstraps on a fresh
+  `octo-helm-core` checkout.
+- **`Import-OctoImageToKind`** falls back to `docker save | ctr import` under the containerd image store.
