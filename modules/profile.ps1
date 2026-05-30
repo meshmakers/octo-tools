@@ -27,6 +27,7 @@ else {
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
+$kubernetesPath = Resolve-Path (Join-Path $toolsPath "kubernetes/")
 
 $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
 
@@ -73,6 +74,10 @@ Import-Module "$modulePath/Get-AllGitRepStatus.psm1"
 Import-Module "$modulePath/Invoke-BuildFrontend.psm1"
 Import-Module "$modulePath/Join-KubeConfigs.psm1"
 Import-Module "$modulePath/Remove-KubeConfig.psm1"
+Import-Module "$modulePath/Import-OctoImageToKind.psm1"
+Import-Module "$modulePath/Deploy-OctoOperator.psm1"
+Import-Module "$modulePath/Get-OctoKubernetesStatus.psm1"
+Import-Module "$modulePath/Uninstall-OctoKubernetes.psm1"
 Import-Module "$modulePath/Invoke-OctoCliReconfigureLogLevel.psm1"
 Import-Module "$modulePath/Invoke-CleanAllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-BuildZenonPlug.psm1"
