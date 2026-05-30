@@ -1,0 +1,35 @@
+# Local dev values for octo-mesh-communication-operator (central mode).
+# CRDs are installed separately by Install-OctoKubernetes.
+octo-mesh-crds:
+  enabled: false
+
+image:
+  repository: meshmakers/octo-communication-operator
+  pullPolicy: IfNotPresent
+  privateRegistry: ""
+  tag: ""            # set via --set image.tag=...
+
+operator:
+  autoManagePools: true
+  poolNamespace: octo
+  defaultPoolName: default
+  adapterIgnoreCertificateValidation: true
+  communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
+  clusterDependencies:
+    mongodbHost: "mongodb-0.mongodb.octo-infra.svc.cluster.local:27017"
+    mongodbReplicaSet: "rs"
+    rabbitMqHost: "rabbitmq.octo-infra.svc.cluster.local"
+    rabbitMqUser: "guest"
+    streamDataHost: "cratedb.octo-infra.svc.cluster.local"
+    streamDataUser: "octo-system"
+  clusterSecrets:
+    mongodbUserPassword: "OctoUser1"
+    mongodbAdminPassword: "OctoAdmin1"
+    streamDataPassword: ""
+
+broker:
+  host: "rabbitmq.octo-infra.svc.cluster.local"
+  virtualHost: "/"
+  port: 5672
+  username: "guest"
+  password: "guest"
