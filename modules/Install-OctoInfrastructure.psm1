@@ -181,6 +181,17 @@ function Set-WSLConfig {
     }
 }
 
+function Test-DockerComposeInfraRunning {
+    # Returns $true if any of the docker-compose infra containers are running,
+    # which would collide on host ports 27017/5672/5432 with the kind infra.
+    $names = @("mongo-0.mongo", "rabbitmq", "cratedb01")
+    $running = docker ps --format '{{.Names}}' 2>$null
+    foreach ($n in $names) {
+        if ($running -contains $n) { return $true }
+    }
+    return $false
+}
+
 function Install-OctoKubernetes {
     <#
 .SYNOPSIS
@@ -233,7 +244,9 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         [Parameter()] [string]$ClusterName = "kind",
         [Parameter()] [string]$CrdReleaseName = "octo-mesh-crds",
         [Parameter()] [string]$CrdNamespace = "octo-operator-system",
-        [Parameter()] [string]$PoolNamespace = "octo"
+        [Parameter()] [string]$PoolNamespace = "octo",
+        [Parameter()] [string]$InfraNamespace = "octo-infra",
+        [Parameter()] [switch]$SkipInfra
     )
 
     if (!(Test-Path $rootPath)) {
@@ -247,11 +260,16 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         return
     }
 
-    foreach ($tool in @("kind", "helm", "kubectl")) {
+    foreach ($tool in @("kind", "helm", "kubectl", "docker")) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
             Write-Error "$tool is not on PATH. Install it before running Install-OctoKubernetes."
             return
         }
+    }
+
+    if (-not $SkipInfra -and (Test-DockerComposeInfraRunning)) {
+        Write-Error "docker-compose infrastructure is running and will collide on host ports 27017/5672/5432. Run 'Stop-OctoInfrastructure' first, or pass -SkipInfra to install only the k8s control plane."
+        return
     }
 
     $crdChartPath = Join-Path $branchRootPath "octo-helm-core/src/octo-mesh-crds"
@@ -269,8 +287,13 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
     }
     else {
         Write-Progress -Activity 'Install Octo Kubernetes' -Status "Creating kind cluster '$ClusterName'" -PercentComplete 25
-        Write-Host "Creating kind cluster '$ClusterName'" -ForegroundColor Green
-        & kind create cluster --name $ClusterName
+        $kindConfig = Join-Path $branchRootPath "octo-tools/kubernetes/kind-cluster.yaml"
+        if (!(Test-Path $kindConfig)) {
+            Write-Error "kind config not found at $kindConfig"
+            return
+        }
+        Write-Host "Creating kind cluster '$ClusterName' from $kindConfig" -ForegroundColor Green
+        & kind create cluster --name $ClusterName --config $kindConfig
         if ($LASTEXITCODE -ne 0) {
             Write-Error "kind create cluster failed with exit code $LASTEXITCODE"
             return
@@ -288,18 +311,59 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         return
     }
 
-    Write-Progress -Activity 'Install Octo Kubernetes' -Status "Ensuring '$PoolNamespace' namespace exists" -PercentComplete 85
-    & kubectl --context "kind-$ClusterName" get namespace $PoolNamespace 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Creating namespace '$PoolNamespace' for auto-managed CommunicationPool resources" -ForegroundColor Green
-        & kubectl --context "kind-$ClusterName" create namespace $PoolNamespace
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "kubectl create namespace failed with exit code $LASTEXITCODE"
-            return
+    Write-Progress -Activity 'Install Octo Kubernetes' -Status "Applying namespaces" -PercentComplete 85
+    $k8sDir = Join-Path $branchRootPath "octo-tools/kubernetes"
+    Write-Host "Applying namespaces" -ForegroundColor Green
+    & kubectl --context "kind-$ClusterName" apply -f (Join-Path $k8sDir "namespaces.yaml")
+    if ($LASTEXITCODE -ne 0) { Write-Error "kubectl apply namespaces failed"; return }
+
+    if (-not $SkipInfra) {
+        $ctx = "kind-$ClusterName"
+        $infraDir = Join-Path $k8sDir "infra"
+
+        # 1) keyFile secret (generate once; reuse infrastructure/file.key if present)
+        $keyFile = Join-Path $infrastructurePath "file.key"
+        if (!(Test-Path $keyFile)) {
+            Write-Host "Generating Mongo keyFile" -ForegroundColor Green
+            $randBytes = New-Object byte[] 741
+            [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($randBytes)
+            [Convert]::ToBase64String($randBytes) > $keyFile
         }
-    }
-    else {
-        Write-Host "Namespace '$PoolNamespace' already exists, leaving it untouched" -ForegroundColor Yellow
+        & kubectl --context $ctx -n $InfraNamespace delete secret mongodb-keyfile --ignore-not-found | Out-Null
+        & kubectl --context $ctx -n $InfraNamespace create secret generic mongodb-keyfile --from-file=file.key=$keyFile
+        if ($LASTEXITCODE -ne 0) { Write-Error "create mongodb-keyfile secret failed"; return }
+
+        # 2) Mongo init scripts configmap
+        & kubectl --context $ctx -n $InfraNamespace delete configmap mongodb-init --ignore-not-found | Out-Null
+        & kubectl --context $ctx -n $InfraNamespace create configmap mongodb-init "--from-file=$(Join-Path $infraDir "mongo-init")"
+        if ($LASTEXITCODE -ne 0) { Write-Error "create mongodb-init configmap failed"; return }
+
+        # 3) Apply infra workloads
+        foreach ($m in @("rabbitmq.yaml", "cratedb.yaml", "mongodb.yaml")) {
+            & kubectl --context $ctx apply -f (Join-Path $infraDir $m)
+            if ($LASTEXITCODE -ne 0) { Write-Error "kubectl apply $m failed"; return }
+        }
+
+        # 4) Wait for readiness
+        Write-Host "Waiting for infra to become ready..." -ForegroundColor Green
+        & kubectl --context $ctx -n $InfraNamespace rollout status deploy/rabbitmq --timeout=180s
+        & kubectl --context $ctx -n $InfraNamespace rollout status statefulset/cratedb --timeout=300s
+        & kubectl --context $ctx -n $InfraNamespace rollout status statefulset/mongodb --timeout=300s
+
+        # 5) Initialize the replica set (retry on transient network error), then seed admin user
+        Write-Host "Initializing Mongo replica set" -ForegroundColor Green
+        while ($true) {
+            & { & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/init-replicaset.js } 2>k8s-stderr.txt
+            $err = Get-Content k8s-stderr.txt -Raw
+            Write-Host $err
+            if ((-not [string]::IsNullOrWhiteSpace($err)) -and ($err -match "MongoNetworkError|not running|ECONNREFUSED")) {
+                Start-Sleep -s 3
+                continue
+            }
+            Remove-Item k8s-stderr.txt -ErrorAction SilentlyContinue
+            break
+        }
+        & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/create-admin-user.js
     }
 
     Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Complete' -PercentComplete 100
