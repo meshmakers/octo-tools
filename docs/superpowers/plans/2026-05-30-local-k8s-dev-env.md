@@ -542,7 +542,9 @@ After the namespaces apply, before the status print, add:
 
         # 2) Mongo init scripts configmap
         & kubectl --context $ctx -n $InfraNamespace delete configmap mongodb-init --ignore-not-found | Out-Null
-        & kubectl --context $ctx -n $InfraNamespace create configmap mongodb-init --from-file=(Join-Path $infraDir "mongo-init")
+        # NOTE: the --from-file value must be a single concatenated string; `--from-file=(Join-Path ...)`
+        # tokenizes into two args under PowerShell and kubectl rejects it ("exactly one NAME is required").
+        & kubectl --context $ctx -n $InfraNamespace create configmap mongodb-init "--from-file=$(Join-Path $infraDir "mongo-init")"
         if ($LASTEXITCODE -ne 0) { Write-Error "create mongodb-init configmap failed"; return }
 
         # 3) Apply infra workloads
