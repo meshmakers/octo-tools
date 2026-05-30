@@ -330,7 +330,7 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
             [Convert]::ToBase64String($randBytes) > $keyFile
         }
         & kubectl --context $ctx -n $InfraNamespace delete secret mongodb-keyfile --ignore-not-found | Out-Null
-        & kubectl --context $ctx -n $InfraNamespace create secret generic mongodb-keyfile --from-file=file.key=$keyFile
+        & kubectl --context $ctx -n $InfraNamespace create secret generic mongodb-keyfile "--from-file=file.key=$keyFile"
         if ($LASTEXITCODE -ne 0) { Write-Error "create mongodb-keyfile secret failed"; return }
 
         # 2) Mongo init scripts configmap
