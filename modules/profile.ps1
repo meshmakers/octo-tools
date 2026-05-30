@@ -92,6 +92,7 @@ Import-Module "$modulePath/Get-BranchAvailability.psm1"
 Import-Module "$modulePath/Invoke-CleanupInfraContainerDisks.psm1"
 Import-Module "$modulePath/Manage-OctoInfrastructureBackup.psm1"
 Import-Module "$modulePath/Compare-Pipelines.psm1"
+Import-Module "$modulePath/Compare-CkVersions.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
