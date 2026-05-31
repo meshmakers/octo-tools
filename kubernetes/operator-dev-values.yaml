@@ -25,7 +25,13 @@ operator:
   clusterSecrets:
     mongodbUserPassword: "OctoUser1"
     mongodbAdminPassword: "OctoAdmin1"
-    streamDataPassword: ""
+    # The local single-node CrateDB runs auth-less, but the octo-mesh-adapter /
+    # octo-eda-adapter charts unconditionally require secrets.streamDataPassword
+    # (no features.streamData gate, unlike octo-plug-simulation). The operator
+    # only injects ClusterSecrets fields that are non-empty, so leaving this blank
+    # makes the chart render fail ("secrets.streamDataPassword must be set"). A
+    # dummy value satisfies the chart; CrateDB ignores it.
+    streamDataPassword: "OctoStream1"
 
 broker:
   host: "rabbitmq.octo-infra.svc.cluster.local"
