@@ -246,7 +246,11 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         [Parameter()] [string]$CrdNamespace = "octo-operator-system",
         [Parameter()] [string]$PoolNamespace = "octo",
         [Parameter()] [string]$InfraNamespace = "octo-infra",
-        [Parameter()] [switch]$SkipInfra
+        [Parameter()] [switch]$SkipInfra,
+        # Internal dev container registry the node should be able to pull adapter images
+        # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
+        # configure containerd to skip verification for it. Pass "" to skip this.
+        [Parameter()] [string]$DevRegistry = "docker.mm.cloud"
     )
 
     if (!(Test-Path $rootPath)) {
@@ -298,6 +302,32 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
             Write-Error "kind create cluster failed with exit code $LASTEXITCODE"
             return
         }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DevRegistry)) {
+        Write-Progress -Activity 'Install Octo Kubernetes' -Status "Configuring dev registry '$DevRegistry'" -PercentComplete 45
+        Write-Host "Configuring containerd to pull from dev registry '$DevRegistry' (skip TLS verify)" -ForegroundColor Green
+        $node = "$ClusterName-control-plane"
+        # config_path is normally set by kind-cluster.yaml (containerdConfigPatches). Add it
+        # + restart containerd for any pre-existing cluster created before that was added.
+        $hasCfg = (& docker exec $node sh -c "grep -q 'config_path' /etc/containerd/config.toml && echo yes" 2>$null)
+        if ($hasCfg -ne "yes") {
+            & docker exec $node sh -c "printf '\n[plugins.`"io.containerd.grpc.v1.cri`".registry]\n  config_path = `"/etc/containerd/certs.d`"\n' >> /etc/containerd/config.toml"
+            & docker exec $node systemctl restart containerd
+            Start-Sleep -Seconds 5
+        }
+        # certs.d hosts.toml: skip TLS verify for the (anonymous, internal-CA) dev registry.
+        $tmpToml = Join-Path ([System.IO.Path]::GetTempPath()) "octo-hosts.toml"
+        @"
+server = "https://$DevRegistry"
+
+[host."https://$DevRegistry"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true
+"@ | Set-Content -Path $tmpToml -NoNewline
+        & docker exec $node mkdir -p "/etc/containerd/certs.d/$DevRegistry"
+        & docker cp $tmpToml "${node}:/etc/containerd/certs.d/$DevRegistry/hosts.toml"
+        Remove-Item $tmpToml -ErrorAction SilentlyContinue
     }
 
     Write-Progress -Activity 'Install Octo Kubernetes' -Status "Installing $CrdReleaseName Helm chart" -PercentComplete 60

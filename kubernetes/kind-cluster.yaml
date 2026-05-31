@@ -1,6 +1,14 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: kind
+# Enable per-registry containerd config (certs.d). Install-OctoKubernetes writes a
+# hosts.toml under /etc/containerd/certs.d/<dev-registry> so the node can pull adapter
+# images from the internal dev registry, whose TLS cert is signed by an internal CA the
+# node would otherwise reject ("x509: certificate signed by unknown authority").
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
     extraPortMappings:

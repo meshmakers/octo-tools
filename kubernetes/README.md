@@ -124,6 +124,13 @@ helm --kube-context kind-kind upgrade --install demoapp \
 kubectl --context kind-kind -n octo port-forward deploy/demoapp 8080:80
 ```
 
+**Pulling from the dev registry (`docker.mm.cloud`):** `Install-OctoKubernetes` configures the
+kind node's containerd to `skip_verify` TLS for the dev registry (its cert is signed by an
+internal CA the node doesn't trust) via `kind-cluster.yaml`'s `containerdConfigPatches` +
+`/etc/containerd/certs.d/<registry>/hosts.toml`. The registry is the `-DevRegistry` parameter
+(default `docker.mm.cloud`; pass `""` to skip). With `operator.imageRegistry: docker.mm.cloud`
+in `operator-dev-values.yaml`, adapters then pull `docker.mm.cloud/meshmakers/octo-mesh-adapter:<tag>`.
+
 **Locally-built workload images:** set `image.privateRegistry=""`, `image.repository/tag` to
 your local build with `pullPolicy: IfNotPresent`, then load it into the node:
 ```powershell
@@ -159,6 +166,17 @@ The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the do
 - **Operator/adapter version mismatch** — the default published operator image
   (`3.3.108.0`) may not match a controller you built from this branch. If pool registration
   misbehaves, deploy a version-matched operator with `Deploy-OctoOperator -BuildLocal`.
+- **Adapter pod `ImagePullBackOff` with `x509: certificate signed by unknown authority`** — the
+  node doesn't trust the dev registry's internal CA. `Install-OctoKubernetes` configures
+  `skip_verify` for `-DevRegistry` (default `docker.mm.cloud`); if you created the cluster before
+  that change, just re-run `Install-OctoKubernetes` (it adds the certs.d config + restarts
+  containerd if needed). Also make sure the registry is actually reachable (VPN) from the node.
+- **Adapter helm-install fails: `improper constraint: main-latest`** — `main-latest` is an *image*
+  tag, not a chart version. In Studio set the adapter's **Chart Version** to a real published
+  version (e.g. `0.1.260531002`), not the image tag; the image tag is a separate `image.tag` value.
+- **Adapter chart render fails: `cannot unmarshal number into ... EnvVar...value of type string`** —
+  the published `3.3.x` chart predates the `adapterRtId | quote` fix and chokes on the all-digit
+  seeded rtIds. Pin Chart Version to a `0.1.260…` build (which has the fix).
 - **`kind load` "content digest ... not found" / pod won't start with a locally-built image**
   — Docker's containerd image store breaks `kind load docker-image`. `Import-OctoImageToKind`
   already works around this; if you load images by hand, use
