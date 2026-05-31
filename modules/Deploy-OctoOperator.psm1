@@ -38,6 +38,31 @@ by 127.0.0.1 / localhost.
     return $null
 }
 
+function Get-KindHostGatewayIp {
+    <#
+.SYNOPSIS
+Returns the IP the kind node uses for host.docker.internal — the Docker host gateway.
+
+.DESCRIPTION
+On Docker Desktop the kind node resolves host.docker.internal to a stable gateway
+address (e.g. 192.168.65.254) that does NOT change when the host's LAN / VPN /
+Tailscale IP changes. In-cluster pods reach the host's services through it
+directly (it is an IP, so no in-cluster DNS entry is needed). Preferred over
+Get-HostLanIPv4 for the Communication Controller URI, whose LAN IP otherwise
+flaps (e.g. Wi-Fi vs Tailscale).
+
+.PARAMETER ClusterName
+kind cluster name; the node container is "{ClusterName}-control-plane". Defaults to "kind".
+#>
+    param([Parameter()] [string]$ClusterName = "kind")
+    $node = "$ClusterName-control-plane"
+    $line = & docker exec $node getent hosts host.docker.internal 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($line)) {
+        return (($line -split '\s+') | Where-Object { $_ })[0]
+    }
+    return $null
+}
+
 function Deploy-OctoOperator {
     <#
 .SYNOPSIS
@@ -114,12 +139,20 @@ of pulling the published image. Sets the image tag to "dev".
     }
 
     if ([string]::IsNullOrWhiteSpace($ControllerHost)) {
-        $ControllerHost = Get-HostLanIPv4
+        # Prefer the kind node's Docker host-gateway (host.docker.internal) — a
+        # stable address that survives host LAN / VPN / Tailscale IP changes, so the
+        # operator + adapter pods can always reach the host-process controller. Fall
+        # back to the host LAN IP for non-Docker-Desktop engines that don't expose it.
+        $ControllerHost = Get-KindHostGatewayIp -ClusterName $ClusterName
         if ([string]::IsNullOrWhiteSpace($ControllerHost)) {
-            Write-Error "Could not resolve a non-loopback IPv4 address for this host. Pass -ControllerHost explicitly."
+            Write-Host "host.docker.internal not resolvable from the kind node; falling back to the host LAN IP." -ForegroundColor Yellow
+            $ControllerHost = Get-HostLanIPv4
+        }
+        if ([string]::IsNullOrWhiteSpace($ControllerHost)) {
+            Write-Error "Could not resolve a host address for the Communication Controller. Pass -ControllerHost explicitly."
             return
         }
-        Write-Host "Resolved host LAN IPv4 for the Communication Controller: $ControllerHost" -ForegroundColor Cyan
+        Write-Host "Using host address for the Communication Controller: $ControllerHost" -ForegroundColor Cyan
     }
 
     # === Optional: build the operator image locally and load it into kind. ===
@@ -199,6 +232,11 @@ of pulling the published image. Sets the image tag to "dev".
             --set-file "serviceHooks.svcCrt=$certDir/svc.pem"
         if ($LASTEXITCODE -ne 0) { Write-Error "helm upgrade --install failed with exit code $LASTEXITCODE."; return }
 
+        # The operator reads its controller URI + config from a ConfigMap, and the
+        # chart has no config-checksum annotation — so a helm upgrade that only
+        # changes config (e.g. a new controller host) won't roll the pod on its own.
+        # Force a restart so config changes always take effect.
+        & kubectl --context $kubeContext -n $Namespace rollout restart deploy/communication-operator | Out-Null
         Write-Host "Waiting for the operator deployment to roll out..." -ForegroundColor Green
         & kubectl --context $kubeContext -n $Namespace rollout status deploy/communication-operator --timeout=180s
         if ($LASTEXITCODE -ne 0) { Write-Error "Operator rollout did not complete (exit code $LASTEXITCODE)."; return }
@@ -210,4 +248,4 @@ of pulling the published image. Sets the image tag to "dev".
     }
 }
 
-Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4')
+Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp')

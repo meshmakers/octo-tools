@@ -29,8 +29,9 @@ octo-cli                                       CRDs + communication-operator (ce
   the *same* localhost ports used today, so `Start-Octo` services connect with **no config
   change** (they already run with `OCTO_SYSTEM__USEDIRECTCONNECTION=true`).
 - **Cluster → host controller:** the operator and adapter pods reach the host-process
-  Communication Controller via the host's **LAN IP** (auto-detected), with TLS validation
-  bypassed (`adapterIgnoreCertificateValidation: true`) because the host serves a `localhost`
+  Communication Controller via the kind node's **Docker host-gateway** (`host.docker.internal`,
+  e.g. `192.168.65.254`) — a stable address that does *not* change with your LAN/VPN/Tailscale IP —
+  with TLS validation bypassed (`adapterIgnoreCertificateValidation: true`) because the host serves a `localhost`
   dev cert.
 
 ### In-cluster DNS + host-port contract
@@ -66,14 +67,17 @@ Load the cmdlets:
 Install-OctoKubernetes
 
 # 2) Deploy the Communication Operator (central mode). Generates webhook certs with openssl,
-#    pulls the published image, and points the operator at your host controller (auto-detected LAN IP).
+#    pulls the published image, and points the operator at your host controller via the stable
+#    Docker host-gateway (host.docker.internal), and force-rolls it so config changes take effect.
 Deploy-OctoOperator
 ```
 
 `Deploy-OctoOperator` options:
 - `-ImageTag <tag>` — operator image tag (default `3.3.108.0`, the newest published; there is no `latest`).
 - `-ControllerHost <ip>` — override the host address the operator/adapters use to reach the
-  controller (needed on multi-NIC / VPN hosts where the auto-detected IP is wrong).
+  controller. By default the cmdlet uses the kind node's Docker host-gateway
+  (`host.docker.internal`, e.g. `192.168.65.254`) — a **stable** address that does not change with
+  your LAN/VPN/Tailscale IP. Only override on non-Docker-Desktop engines that don't expose it.
 - `-BuildLocal` — build the operator image from `octo-communication-operator` source and load
   it into kind instead of pulling the published image. Use this when you've changed operator
   code and need it version-matched to your locally-built controller.
@@ -148,9 +152,10 @@ The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the do
 - **`Install-OctoKubernetes` refuses immediately** — the docker-compose infra is running. Run
   `Stop-OctoInfrastructure` (or `docker stop mongo-0.mongo rabbitmq cratedb01 ...`).
 - **Operator pod is Ready but pools show "Unregistered" / logs say "Cannot connect to controller"**
-  — the host Communication Controller isn't running, or `-ControllerHost` is wrong. Start the
-  controller via `Start-Octo` and confirm the LAN IP is routable from inside the cluster. On a
-  VPN/multi-NIC host pass `-ControllerHost <reachable-ip>` to `Deploy-OctoOperator`.
+  — the host Communication Controller isn't running, or unreachable from the cluster. Start it via
+  `Start-Octo`. The operator reaches it via the stable Docker host-gateway (`host.docker.internal`
+  → e.g. `192.168.65.254`), which survives LAN/VPN/Tailscale IP changes; if your engine doesn't
+  expose it, pass `-ControllerHost <reachable-ip>` to `Deploy-OctoOperator`.
 - **Operator/adapter version mismatch** — the default published operator image
   (`3.3.108.0`) may not match a controller you built from this branch. If pool registration
   misbehaves, deploy a version-matched operator with `Deploy-OctoOperator -BuildLocal`.
