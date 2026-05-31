@@ -13,6 +13,15 @@ operator:
   autoManagePools: true
   poolNamespace: octo
   defaultPoolName: default
+  # Pull adapter / application images from the dev registry (where the multi-arch
+  # images are published) instead of public Docker Hub. The operator projects this
+  # as image.privateRegistry into EVERY deployed workload (operator-wide). NOTE the
+  # image TAG is not projected — set image.tag per adapter (e.g. main-latest) in
+  # Studio, since the chart's default tag is the chart appVersion. Requires the dev
+  # registry to be reachable + pullable from the cluster (anon pull, else add a
+  # docker-registry secret + imagePullSecrets per adapter — the operator's
+  # adapterImagePullSecretName is currently a no-op).
+  imageRegistry: docker.mm.cloud
   adapterIgnoreCertificateValidation: true
   communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
   clusterDependencies:
