@@ -27,6 +27,21 @@ winget install Kubernetes.kind
 > resolves on PATH — winget updates the persisted user PATH but not already-running processes.
 > Verify with `kind version`.
 
+> **Linux (Docker CE / Engine):** there is no bundled installer — drop the three binaries on
+> PATH (use `arm64` instead of `amd64` on Apple-Silicon/ARM hosts). The cmdlets run under `pwsh`
+> on Linux just like macOS/Windows.
+> ```bash
+> # kind
+> curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
+> chmod +x kind && sudo mv kind /usr/local/bin/kind
+> # kubectl
+> curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+> chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+> # helm
+> curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+> sudo mv linux-amd64/helm /usr/local/bin/helm && rm -rf linux-amd64
+> ```
+
 **Repos:** `octo-helm-core` must be checked out **next to** the other repos (it ships the CRDs +
 operator chart). It is a **sibling** of `octo-tools` in your workspace:
 

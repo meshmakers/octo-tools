@@ -51,6 +51,12 @@ directly (it is an IP, so no in-cluster DNS entry is needed). Preferred over
 Get-HostLanIPv4 for the Communication Controller URI, whose LAN IP otherwise
 flaps (e.g. Wi-Fi vs Tailscale).
 
+On Docker CE (Linux), the kind node does NOT get a host.docker.internal entry,
+but its default-route gateway is the kind bridge gateway (e.g. 172.18.0.1) which
+*is* the host as seen from the node — the Docker CE equivalent of the host
+gateway, and equally stable for the cluster's lifetime. We fall back to it so
+Linux hosts also get a stable controller address instead of the flappy LAN IP.
+
 .PARAMETER ClusterName
 kind cluster name; the node container is "{ClusterName}-control-plane". Defaults to "kind".
 #>
@@ -59,6 +65,17 @@ kind cluster name; the node container is "{ClusterName}-control-plane". Defaults
     $line = & docker exec $node getent hosts host.docker.internal 2>$null
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($line)) {
         return (($line -split '\s+') | Where-Object { $_ })[0]
+    }
+    # Docker CE / Linux: no host.docker.internal entry. The node's default-route
+    # gateway is the kind bridge gateway, which routes to the host.
+    $route = & docker exec $node ip -4 route show default 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($route)) {
+        # e.g. "default via 172.18.0.1 dev eth0"
+        $parts = ($route -split '\s+') | Where-Object { $_ }
+        $viaIdx = [Array]::IndexOf($parts, 'via')
+        if ($viaIdx -ge 0 -and $viaIdx + 1 -lt $parts.Count) {
+            return $parts[$viaIdx + 1]
+        }
     }
     return $null
 }

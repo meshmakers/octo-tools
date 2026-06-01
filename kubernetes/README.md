@@ -32,7 +32,10 @@ octo-cli                                       CRDs + communication-operator (ce
   Communication Controller via the kind node's **Docker host-gateway** (`host.docker.internal`,
   e.g. `192.168.65.254`) — a stable address that does *not* change with your LAN/VPN/Tailscale IP —
   with TLS validation bypassed (`adapterIgnoreCertificateValidation: true`) because the host serves a `localhost`
-  dev cert.
+  dev cert. **On Docker CE / Linux** the node has no `host.docker.internal` entry, so
+  `Deploy-OctoOperator` falls back to the node's default-route gateway (the kind bridge gateway,
+  e.g. `172.18.0.1`) — equally stable for the cluster's lifetime and routes to the host. For this
+  to work the host services must listen on all interfaces (they bind `*:5015` etc., so they do).
 
 ### In-cluster DNS + host-port contract
 
@@ -48,6 +51,9 @@ On PATH: `kind` (v0.31+), `kubectl`, `helm` (v3), `docker` (daemon running), `op
 and `mongosh` (optional, for host verification). Install kind on macOS with `brew install kind`;
 on **Windows** (Docker Desktop) with `winget install Kubernetes.kind` — then **restart your shell**
 so `kind` resolves on PATH (winget updates the persisted user PATH, not running processes).
+On **Linux** (Docker CE/Engine) there is no bundled installer — drop the `kind`/`kubectl`/`helm`
+binaries on PATH manually (see QUICKSTART → Prerequisites; use the `arm64` URLs on ARM hosts).
+The cmdlets run under `pwsh` on Linux exactly as on macOS/Windows.
 `octo-helm-core` must be checked out next to the other repos (it ships the CRDs + operator chart).
 
 > **Port collision with docker-compose infra.** The kind infra binds the *same* host ports
@@ -79,7 +85,9 @@ Deploy-OctoOperator
 - `-ControllerHost <ip>` — override the host address the operator/adapters use to reach the
   controller. By default the cmdlet uses the kind node's Docker host-gateway
   (`host.docker.internal`, e.g. `192.168.65.254`) — a **stable** address that does not change with
-  your LAN/VPN/Tailscale IP. Only override on non-Docker-Desktop engines that don't expose it.
+  your LAN/VPN/Tailscale IP. On Docker CE / Linux (no `host.docker.internal`) it auto-falls back to
+  the kind bridge gateway (e.g. `172.18.0.1`), which is equally stable — so you normally don't need
+  to override there either. Only pass this if neither is reachable (e.g. an unusual network setup).
 - `-BuildLocal` — build the operator image from `octo-communication-operator` source and load
   it into kind instead of pulling the published image. Use this when you've changed operator
   code and need it version-matched to your locally-built controller.
@@ -165,6 +173,12 @@ The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the do
   `Start-Octo`. The operator reaches it via the stable Docker host-gateway (`host.docker.internal`
   → e.g. `192.168.65.254`), which survives LAN/VPN/Tailscale IP changes; if your engine doesn't
   expose it, pass `-ControllerHost <reachable-ip>` to `Deploy-OctoOperator`.
+  - **On Docker CE / Linux** the operator uses the kind bridge gateway (e.g. `172.18.0.1`)
+    automatically. If it still can't connect after `Start-Octo`, check (a) the controller is
+    listening on all interfaces — `ss -tlnp | grep 5015` should show `*:5015`, which `Start-Octo`
+    does by default — and (b) a host firewall (ufw/firewalld) isn't dropping traffic from the kind
+    bridge subnet to host port 5015 (Docker usually adds the allow rule; a locked-down host may
+    need one for the `172.18.0.0/16` kind subnet → `:5015`).
 - **Operator/adapter version mismatch** — the default published operator image
   (`3.3.108.0`) may not match a controller you built from this branch. If pool registration
   misbehaves, deploy a version-matched operator with `Deploy-OctoOperator -BuildLocal`.
