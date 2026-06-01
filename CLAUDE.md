@@ -40,6 +40,7 @@ All commands require PowerShell and are available after loading the profile:
 - `Install-OctoInfrastructure` - Initial infrastructure setup
 - `Get-OctoInfrastructureStatus` - Check infrastructure status
 - `Start-Octo` - Start the Octo application after infrastructure is running
+- `Stop-Octo` - Stop services started in non-interactive mode (`Start-Octo -nonInteractive $true`)
 
 ### Repository Management
 - `Sync-AllGitRepos` - Sync all repositories
@@ -53,10 +54,13 @@ All commands require PowerShell and are available after loading the profile:
 - `Invoke-KillDotnet` - Kill all dotnet processes (Windows only)
 - `Remove-GlobalNuGetPackages` - Clean global NuGet cache
 
-### Database Operations
-- `Invoke-MongoBackup` - Backup MongoDB
-- `Invoke-MongoRestore` - Restore MongoDB
-- `Invoke-MongoDeleteOctoMesh` - Delete OctoMesh database
+### Infrastructure Backup (MongoDB + CrateDB)
+Backups operate on the Docker volumes; stop the infrastructure first (`Stop-OctoInfrastructure`). Stored under `infrastructure/backups/`.
+- `Backup-OctoInfrastructure` - Back up all infrastructure volumes (optional `-Name`, defaults to a timestamp)
+- `Restore-OctoInfrastructure` - Restore volumes from a named backup (`-Name`; omit to list backups)
+- `Get-OctoInfrastructureBackup` - List available backups
+- `Remove-OctoInfrastructureBackup` - Delete a named backup (`-Name`, `-Force` to skip prompt)
+- `Invoke-MongoPortForward` - Port-forward MongoDB for direct DB access
 
 ### Authentication
 - `Invoke-OctoCliLoginLocal` - Login to local environment
