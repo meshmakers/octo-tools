@@ -178,6 +178,10 @@ of pulling the published image. Sets the image tag to "dev".
     # trusts the operator's TLS endpoint when invoking the webhook.
     $certDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "octo-operator-certs-$([System.Guid]::NewGuid().ToString('N'))")
     New-Item -ItemType Directory -Path $certDir -Force | Out-Null
+    # Helm --set-file treats backslashes as escape chars, which mangles Windows temp
+    # paths (C:\Users\... -> C:Users...). Use forward slashes — accepted by helm,
+    # openssl, and Remove-Item on all platforms; a no-op on macOS/Linux paths.
+    $certDir = $certDir -replace '\\', '/'
     try {
         $svcSan1 = "communication-operator.$Namespace.svc"
         $svcSan2 = "communication-operator.$Namespace.svc.cluster.local"

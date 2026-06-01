@@ -12,7 +12,7 @@ Implementation plan: `../docs/superpowers/plans/2026-05-30-local-k8s-dev-env.md`
 ## Architecture
 
 ```
-HOST (macOS)                                 kind cluster "kind" (Docker)
+HOST (macOS / Windows)                       kind cluster "kind" (Docker)
 ─────────────────────────────────           ─────────────────────────────────────────────
 Start-Octo host processes (HTTPS):           ns octo-infra:
   identity 5003 · asset-repo 5001              mongodb (1-member RS "rs", keyFile)
@@ -45,7 +45,9 @@ octo-cli                                       CRDs + communication-operator (ce
 ## Prerequisites
 
 On PATH: `kind` (v0.31+), `kubectl`, `helm` (v3), `docker` (daemon running), `openssl`,
-and `mongosh` (optional, for host verification). Install kind on macOS with `brew install kind`.
+and `mongosh` (optional, for host verification). Install kind on macOS with `brew install kind`;
+on **Windows** (Docker Desktop) with `winget install Kubernetes.kind` — then **restart your shell**
+so `kind` resolves on PATH (winget updates the persisted user PATH, not running processes).
 `octo-helm-core` must be checked out next to the other repos (it ships the CRDs + operator chart).
 
 > **Port collision with docker-compose infra.** The kind infra binds the *same* host ports
@@ -171,12 +173,6 @@ The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the do
   `skip_verify` for `-DevRegistry` (default `docker.mm.cloud`); if you created the cluster before
   that change, just re-run `Install-OctoKubernetes` (it adds the certs.d config + restarts
   containerd if needed). Also make sure the registry is actually reachable (VPN) from the node.
-- **Adapter helm-install fails: `improper constraint: main-latest`** — `main-latest` is an *image*
-  tag, not a chart version. In Studio set the adapter's **Chart Version** to a real published
-  version (e.g. `0.1.260531002`), not the image tag; the image tag is a separate `image.tag` value.
-- **Adapter chart render fails: `cannot unmarshal number into ... EnvVar...value of type string`** —
-  the published `3.3.x` chart predates the `adapterRtId | quote` fix and chokes on the all-digit
-  seeded rtIds. Pin Chart Version to a `0.1.260…` build (which has the fix).
 - **`kind load` "content digest ... not found" / pod won't start with a locally-built image**
   — Docker's containerd image store breaks `kind load docker-image`. `Import-OctoImageToKind`
   already works around this; if you load images by hand, use
@@ -199,3 +195,21 @@ These were found by running every step on a real macOS / Docker 29 / Apple-Silic
 - **`Deploy-OctoOperator`** runs `helm dependency build`/`update` so it self-bootstraps on a fresh
   `octo-helm-core` checkout.
 - **`Import-OctoImageToKind`** falls back to `docker save | ctr import` under the containerd image store.
+
+### Windows (Docker Desktop) portability fixes
+
+Verified end-to-end on Windows 11 / Docker Desktop 29 / PowerShell 7. The bring-up is identical
+(`Install-OctoKubernetes` → `Deploy-OctoOperator` → `Invoke-BuildAll` → `Start-Octo` →
+`Invoke-OctoCliLoginLocal`); these Windows-specific fixes were needed:
+- **kind install:** `winget install Kubernetes.kind` (no Homebrew). winget updates the persisted
+  user PATH but not already-running shells — restart the shell (or add
+  `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Kubernetes.kind_*\` to PATH) before running the cmdlets.
+- **`Deploy-OctoOperator` — `helm --set-file` backslash escaping:** Helm's `--set`/`--set-file`
+  parser treats `\` as an escape char, so a Windows temp cert path (`C:\Users\…\octo-operator-certs-…`)
+  collapsed to `C:Users…` and the cert file wasn't found. Fixed by normalizing the temp cert dir to
+  forward slashes (`$certDir -replace '\\','/'`) — accepted by helm/openssl/Remove-Item on all
+  platforms, a no-op on macOS/Linux.
+- **`Get-OctoKubernetesStatus` — host-port probe false negative:** Docker Desktop warms its
+  published-port proxy lazily, so the first connect to a kind-mapped port can take >1s. The 800 ms
+  `Test-HostPortOpen` timeout reported the (actually open) infra ports as "closed". Bumped to 2.5 s
+  and added an `EndConnect`/`Connected` check so a refused port still reads correctly.

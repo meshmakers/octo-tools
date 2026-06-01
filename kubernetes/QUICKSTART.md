@@ -16,8 +16,16 @@ monorepo workspace root. All cmdlets are idempotent — re-running is safe.
 (`mongosh` optional, for host-side verification).
 
 ```powershell
-brew install kind        # kubectl / helm / openssl are usually already installed
+# macOS (kubectl / helm / openssl are usually already installed)
+brew install kind
+
+# Windows (Docker Desktop). winget puts kind in %LOCALAPPDATA%\Microsoft\WinGet\Packages\...
+winget install Kubernetes.kind
 ```
+
+> **Windows:** after `winget install`, **restart your shell** (or open a new `pwsh`) so `kind`
+> resolves on PATH — winget updates the persisted user PATH but not already-running processes.
+> Verify with `kind version`.
 
 **Repos:** `octo-helm-core` must be checked out **next to** the other repos (it ships the CRDs +
 operator chart). It is a **sibling** of `octo-tools` in your workspace:
@@ -121,8 +129,9 @@ Start-OctoInfrastructure          # (optional) go back to the legacy docker-comp
 | Symptom | Fix |
 |---|---|
 | `Install-OctoKubernetes` refuses immediately | docker-compose infra still running → `Stop-OctoInfrastructure` |
+| Windows: `kind` / cmdlet says *"kind is not on PATH"* right after `winget install` | winget didn't update the running shell → restart `pwsh` (or add `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Kubernetes.kind_*\` to PATH), then `kind version` |
+| Windows: `Get-OctoKubernetesStatus` shows host ports `closed` but infra pods are Running | Docker Desktop's port-proxy first-connect lag (fixed: probe now waits 2.5s). Confirm with `kind get clusters` + `docker port kind-control-plane`; the ports are mapped to `127.0.0.1` |
 | Operator Ready but pools "Unregistered" | host controller not running → `Start-Octo` |
 | Adapter `ImagePullBackOff` · `x509: certificate signed by unknown authority` | not on VPN, or node doesn't trust the dev registry → check VPN, re-run `Install-OctoKubernetes` |
-| Adapter install `improper constraint: main-latest` | `main-latest` is an image tag, not a chart version → set a real **Chart Version** in Studio |
 
 See [`README.md`](./README.md) → *Troubleshooting* for the full list.

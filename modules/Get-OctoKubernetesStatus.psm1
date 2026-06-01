@@ -2,9 +2,17 @@ function Test-HostPortOpen([string]$hostName, [int]$port) {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $iar = $client.BeginConnect($hostName, $port, $null, $null)
-        $ok = $iar.AsyncWaitHandle.WaitOne(800)
+        # Docker Desktop (Windows/macOS) warms its published-port proxy lazily, so the
+        # first connect to a kind-mapped host port can take >1s — an 800ms wait gives a
+        # false "closed". Use a generous timeout and confirm the socket actually
+        # connected: a refused port also signals the wait handle, so WaitOne alone is
+        # not enough (EndConnect throws on failure, leaving Connected = $false).
+        $connected = $false
+        if ($iar.AsyncWaitHandle.WaitOne(2500)) {
+            try { $client.EndConnect($iar); $connected = $client.Connected } catch { $connected = $false }
+        }
         $client.Close()
-        return $ok
+        return $connected
     } catch { return $false }
 }
 
