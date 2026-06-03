@@ -11,11 +11,15 @@ containerdConfigPatches:
       config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
+    # listenAddress 0.0.0.0 binds the host ports on ALL interfaces, so the infra and
+    # ingress are reachable from other machines on the LAN (matches the old docker-compose
+    # behaviour, which used short-form `port:port` mappings = bind to 0.0.0.0). Note this
+    # exposes Mongo/Crate/RabbitMQ to the network without an auth gateway.
     extraPortMappings:
-      - { containerPort: 30017, hostPort: 27017, listenAddress: "127.0.0.1", protocol: TCP }  # mongodb
-      - { containerPort: 30672, hostPort: 5672,  listenAddress: "127.0.0.1", protocol: TCP }  # rabbitmq amqp
-      - { containerPort: 31672, hostPort: 15672, listenAddress: "127.0.0.1", protocol: TCP }  # rabbitmq mgmt
-      - { containerPort: 30543, hostPort: 5432,  listenAddress: "127.0.0.1", protocol: TCP }  # cratedb psql
-      - { containerPort: 30420, hostPort: 4301,  listenAddress: "127.0.0.1", protocol: TCP }  # cratedb http
-      - { containerPort: 30080, hostPort: 80,   listenAddress: "127.0.0.1", protocol: TCP }  # ingress-nginx http
-      - { containerPort: 30443, hostPort: 443,  listenAddress: "127.0.0.1", protocol: TCP }  # ingress-nginx https
+      - { containerPort: 30017, hostPort: 27017, listenAddress: "0.0.0.0", protocol: TCP }  # mongodb
+      - { containerPort: 30672, hostPort: 5672,  listenAddress: "0.0.0.0", protocol: TCP }  # rabbitmq amqp
+      - { containerPort: 31672, hostPort: 15672, listenAddress: "0.0.0.0", protocol: TCP }  # rabbitmq mgmt
+      - { containerPort: 30543, hostPort: 5432,  listenAddress: "0.0.0.0", protocol: TCP }  # cratedb psql
+      - { containerPort: 30420, hostPort: 4301,  listenAddress: "0.0.0.0", protocol: TCP }  # cratedb http
+      - { containerPort: 30080, hostPort: 80,   listenAddress: "0.0.0.0", protocol: TCP }  # ingress-nginx http
+      - { containerPort: 30443, hostPort: 443,  listenAddress: "0.0.0.0", protocol: TCP }  # ingress-nginx https
