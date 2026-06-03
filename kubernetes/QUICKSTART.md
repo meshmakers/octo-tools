@@ -130,6 +130,28 @@ kubectl --context kind-kind -n octo get pods
 
 ---
 
+## 6 · Web exposure (ingress + TLS)
+
+The cluster runs **ingress-nginx** (class `nginx`) + **cert-manager** with a CA issuer
+**`mm-cloud-issuer`** — same as test-2/staging, so an app's ingress values copy over unchanged
+(`-SkipIngress` to skip). Apps are reached at **`https://<name>.localhost`** (resolves to
+127.0.0.1, no `/etc/hosts` needed). Expose a workload via the chart's ingress path:
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  annotations: { cert-manager.io/cluster-issuer: mm-cloud-issuer }
+publicUri: "https://<name>.localhost"
+```
+
+Trust the exported root CA to silence browser TLS warnings (macOS):
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain infrastructure/local-root-ca.crt
+```
+
+---
+
 ## Teardown
 
 ```powershell

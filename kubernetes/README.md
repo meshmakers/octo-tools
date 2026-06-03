@@ -149,6 +149,34 @@ Import-OctoImageToKind -Image my-adapter:dev
 (`Import-OctoImageToKind` uses `kind load`, and automatically falls back to `docker save | ctr import`
 on hosts running Docker's containerd image store, where `kind load` produces an incomplete image.)
 
+## Web exposure (ingress-nginx + cert-manager)
+
+`Install-OctoKubernetes` installs **ingress-nginx** (class `nginx`, NodePort 30080/30443 mapped
+to host 80/443 by `kind-cluster.yaml`) and **cert-manager** (jetstack), then applies a CA
+`ClusterIssuer` named **`mm-cloud-issuer`** backed by a local self-signed root CA — the same
+name/kind test-2/staging use, so an app's `ingress`/`publicUri` values copy over unchanged.
+Pass `-SkipIngress` to skip it.
+
+Apps are reached at **`https://<name>.localhost`** — `*.localhost` resolves to `127.0.0.1` in
+browsers and the macOS resolver with no external service and no `/etc/hosts` edit. For Linux /
+CLI tools that don't special-case `.localhost`, add `127.0.0.1 <name>.localhost` to `/etc/hosts`.
+
+Expose a workload via the chart's ingress path (identical to staging):
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: mm-cloud-issuer
+publicUri: "https://<name>.localhost"
+```
+
+The local root CA is exported to `infrastructure/local-root-ca.crt`. To avoid browser TLS
+warnings, trust it (macOS):
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain infrastructure/local-root-ca.crt
+```
+
 ## Teardown
 
 ```powershell
