@@ -172,10 +172,12 @@ publicUri: "https://<name>.localhost"
 ```
 
 The local root CA is exported to `infrastructure/local-root-ca.crt`. To avoid browser TLS
-warnings, trust it (macOS):
-```bash
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain infrastructure/local-root-ca.crt
+warnings, trust it (cross-platform; prompts for sudo on macOS/Linux):
+```powershell
+Trust-OctoLocalCa                      # or run setup with: Install-OctoKubernetes -TrustCa
 ```
+`Untrust-OctoLocalCa` removes it. (macOS adds it to the System keychain as a trusted root;
+Windows imports into `Cert:\LocalMachine\Root`; Linux uses `update-ca-certificates`.)
 
 ## Teardown
 

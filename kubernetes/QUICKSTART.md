@@ -145,10 +145,11 @@ ingress:
 publicUri: "https://<name>.localhost"
 ```
 
-Trust the exported root CA to silence browser TLS warnings (macOS):
-```bash
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain infrastructure/local-root-ca.crt
+Trust the local root CA so the browser shows the app as secure (cross-platform; prompts for sudo on macOS/Linux):
+```powershell
+Trust-OctoLocalCa                      # or run setup with: Install-OctoKubernetes -TrustCa
 ```
+(`Untrust-OctoLocalCa` removes it again.)
 
 ---
 

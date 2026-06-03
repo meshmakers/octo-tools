@@ -250,6 +250,10 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
+        # Also add the exported local root CA to the OS trust store so browsers/tools accept
+        # the mm-cloud-issuer certs without warnings. Prompts for sudo (macOS/Linux); off by
+        # default. You can run Trust-OctoLocalCa later instead.
+        [Parameter()] [switch]$TrustCa,
         # Internal dev container registry the node should be able to pull adapter images
         # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
         # configure containerd to skip verification for it. Pass "" to skip this.
@@ -432,7 +436,11 @@ server = "https://$DevRegistry"
         if ($caB64) {
             [IO.File]::WriteAllBytes($caPath, [Convert]::FromBase64String($caB64))
             Write-Host "Local root CA written to $caPath" -ForegroundColor Cyan
-            Write-Host "  Trust it (macOS): sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain `"$caPath`"" -ForegroundColor Yellow
+            if ($TrustCa) {
+                Trust-OctoLocalCa -CaPath $caPath
+            } else {
+                Write-Host "  Trust it: run 'Trust-OctoLocalCa' (or pass -TrustCa next time)" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -456,6 +464,65 @@ server = "https://$DevRegistry"
     }
 }
 
+function Trust-OctoLocalCa {
+<#
+.SYNOPSIS
+Add the local kind root CA (infrastructure/local-root-ca.crt) to the OS trust store so
+browsers and CLI tools accept the mm-cloud-issuer certificates without warnings.
+
+.DESCRIPTION
+macOS adds it as a trusted root to the System keychain (sudo). Windows imports it into
+Cert:\LocalMachine\Root (admin). Linux copies it into /usr/local/share/ca-certificates and
+runs update-ca-certificates (sudo). Restart the browser afterwards.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter()] [string]$CaPath = (Join-Path $infrastructurePath "local-root-ca.crt")
+    )
+
+    if (!(Test-Path $CaPath)) {
+        Write-Error "Local root CA not found at $CaPath. Run Install-OctoKubernetes first."
+        return
+    }
+
+    if ($IsMacOS) {
+        Write-Host "Adding $CaPath to the System keychain as a trusted root (sudo)..." -ForegroundColor Green
+        & sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain $CaPath
+    }
+    elseif ($IsWindows) {
+        Write-Host "Importing $CaPath into Cert:\LocalMachine\Root..." -ForegroundColor Green
+        Import-Certificate -FilePath $CaPath -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
+    }
+    elseif ($IsLinux) {
+        Write-Host "Installing $CaPath into the system trust store (sudo)..." -ForegroundColor Green
+        & sudo cp $CaPath /usr/local/share/ca-certificates/octo-local-root-ca.crt
+        & sudo update-ca-certificates | Out-Null
+    }
+    else {
+        Write-Warning "Unsupported OS; trust $CaPath manually."
+        return
+    }
+    Write-Host "Local root CA trusted. Restart the browser to pick it up." -ForegroundColor Cyan
+}
+
+function Untrust-OctoLocalCa {
+    [CmdletBinding()]
+    param()
+    if ($IsMacOS) {
+        & sudo security delete-certificate -c octo-local-root-ca /Library/Keychains/System.keychain 2>$null
+    }
+    elseif ($IsWindows) {
+        Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -match 'octo-local-root-ca' } | Remove-Item
+    }
+    elseif ($IsLinux) {
+        & sudo rm -f /usr/local/share/ca-certificates/octo-local-root-ca.crt
+        & sudo update-ca-certificates | Out-Null
+    }
+    Write-Host "Local root CA untrusted." -ForegroundColor Cyan
+}
+
 Export-ModuleMember -Function @('Install-OctoInfrastructure')
 Export-ModuleMember -Function @('Install-OctoKubernetes')
+Export-ModuleMember -Function @('Trust-OctoLocalCa')
+Export-ModuleMember -Function @('Untrust-OctoLocalCa')
 Export-ModuleMember -Function @('Wait-DockerContainer')
