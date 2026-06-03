@@ -247,6 +247,9 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         [Parameter()] [string]$PoolNamespace = "octo",
         [Parameter()] [string]$InfraNamespace = "octo-infra",
         [Parameter()] [switch]$SkipInfra,
+        # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
+        # By default they are installed so the local cluster exposes web workloads like staging.
+        [Parameter()] [switch]$SkipIngress,
         # Internal dev container registry the node should be able to pull adapter images
         # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
         # configure containerd to skip verification for it. Pass "" to skip this.
@@ -396,6 +399,43 @@ server = "https://$DevRegistry"
         & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/create-admin-user.js
     }
 
+    if (-not $SkipIngress) {
+        $ctx = "kind-$ClusterName"
+        Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Installing ingress-nginx + cert-manager' -PercentComplete 92
+
+        & helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>$null | Out-Null
+        & helm repo add jetstack https://charts.jetstack.io 2>$null | Out-Null
+        & helm repo update ingress-nginx jetstack | Out-Null
+
+        Write-Host "Installing ingress-nginx (4.15.1)" -ForegroundColor Green
+        & helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx `
+            --kube-context $ctx --namespace ingress-nginx --create-namespace `
+            --version 4.15.1 -f (Join-Path $k8sDir "ingress-nginx-values.yaml") --wait --timeout 180s
+        if ($LASTEXITCODE -ne 0) { Write-Error "ingress-nginx install failed"; return }
+
+        Write-Host "Installing cert-manager (v1.20.2)" -ForegroundColor Green
+        & helm upgrade --install cert-manager jetstack/cert-manager `
+            --kube-context $ctx --namespace cert-manager --create-namespace `
+            --version v1.20.2 -f (Join-Path $k8sDir "cert-manager-values.yaml") --wait --timeout 180s
+        if ($LASTEXITCODE -ne 0) { Write-Error "cert-manager install failed"; return }
+
+        & kubectl --context $ctx -n cert-manager rollout status deploy/cert-manager-webhook --timeout=120s
+
+        Write-Host "Applying mm-cloud-issuer (local root CA)" -ForegroundColor Green
+        & kubectl --context $ctx apply -f (Join-Path $k8sDir "cluster-issuer.yaml")
+        if ($LASTEXITCODE -ne 0) { Write-Error "cluster-issuer apply failed"; return }
+        & kubectl --context $ctx wait --for=condition=Ready clusterissuer/mm-cloud-issuer --timeout=120s
+
+        # Export the local root CA so the host/browser can optionally trust it.
+        $caPath = Join-Path $infrastructurePath "local-root-ca.crt"
+        $caB64 = (& kubectl --context $ctx get secret local-root-ca-tls -n cert-manager -o "jsonpath={.data.ca\.crt}")
+        if ($caB64) {
+            [IO.File]::WriteAllBytes($caPath, [Convert]::FromBase64String($caB64))
+            Write-Host "Local root CA written to $caPath" -ForegroundColor Cyan
+            Write-Host "  Trust it (macOS): sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain `"$caPath`"" -ForegroundColor Yellow
+        }
+    }
+
     Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Complete' -PercentComplete 100
 
     $currentContext = (& kubectl config current-context).Trim()
@@ -404,6 +444,10 @@ server = "https://$DevRegistry"
     Write-Host "  kind cluster:      $ClusterName" -ForegroundColor Cyan
     Write-Host "  CRDs release:      $CrdReleaseName in namespace $CrdNamespace" -ForegroundColor Cyan
     Write-Host "  Pool namespace:    $PoolNamespace" -ForegroundColor Cyan
+    if (-not $SkipIngress) {
+        Write-Host "  Ingress:           ingress-nginx (class 'nginx'), apps at https://<name>.localhost" -ForegroundColor Cyan
+        Write-Host "  TLS issuer:        mm-cloud-issuer (local root CA)" -ForegroundColor Cyan
+    }
     Write-Host "  Current context:   $currentContext" -ForegroundColor Cyan
     if ($currentContext -ne "kind-$ClusterName") {
         Write-Host ""
