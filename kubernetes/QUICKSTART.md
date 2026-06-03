@@ -145,11 +145,12 @@ ingress:
 publicUri: "https://<name>.localhost"
 ```
 
-Trust the local root CA so the browser shows the app as secure (cross-platform; prompts for sudo on macOS/Linux):
+The local root CA — **"OctoMesh Local Dev Root CA"** (find it by that name in Keychain Access) —
+is trusted automatically during setup (prompts for sudo; pass `-SkipTrustCa` to skip), so the
+browser shows the app as secure. Re-run any time — it's idempotent:
 ```powershell
-Trust-OctoLocalCa                      # or run setup with: Install-OctoKubernetes -TrustCa
+Trust-OctoLocalCa            # idempotent; Untrust-OctoLocalCa removes it
 ```
-(`Untrust-OctoLocalCa` removes it again.)
 
 ---
 

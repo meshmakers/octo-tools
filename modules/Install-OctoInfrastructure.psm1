@@ -250,10 +250,10 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
-        # Also add the exported local root CA to the OS trust store so browsers/tools accept
-        # the mm-cloud-issuer certs without warnings. Prompts for sudo (macOS/Linux); off by
-        # default. You can run Trust-OctoLocalCa later instead.
-        [Parameter()] [switch]$TrustCa,
+        # By default the exported local root CA is added to the OS trust store (Trust-OctoLocalCa)
+        # so browsers/tools accept the mm-cloud-issuer certs without warnings. This prompts for
+        # sudo on macOS/Linux. Pass -SkipTrustCa for unattended/CI runs.
+        [Parameter()] [switch]$SkipTrustCa,
         # Internal dev container registry the node should be able to pull adapter images
         # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
         # configure containerd to skip verification for it. Pass "" to skip this.
@@ -436,10 +436,11 @@ server = "https://$DevRegistry"
         if ($caB64) {
             [IO.File]::WriteAllBytes($caPath, [Convert]::FromBase64String($caB64))
             Write-Host "Local root CA written to $caPath" -ForegroundColor Cyan
-            if ($TrustCa) {
-                Trust-OctoLocalCa -CaPath $caPath
+            if (-not $SkipTrustCa) {
+                # Non-fatal: a declined/failed sudo must not abort the whole setup.
+                try { Trust-OctoLocalCa -CaPath $caPath } catch { Write-Warning "CA trust skipped: $($_.Exception.Message)" }
             } else {
-                Write-Host "  Trust it: run 'Trust-OctoLocalCa' (or pass -TrustCa next time)" -ForegroundColor Yellow
+                Write-Host "  CA not trusted (-SkipTrustCa). Run 'Trust-OctoLocalCa' to trust it." -ForegroundColor Yellow
             }
         }
     }
@@ -464,16 +465,22 @@ server = "https://$DevRegistry"
     }
 }
 
+# Common name of the local root CA — matches `commonName` in kubernetes/cluster-issuer.yaml.
+# Used as the identifiable handle for trust/untrust in the OS store, and the on-disk filename.
+$Script:OctoLocalCaName = "OctoMesh Local Dev Root CA"
+$Script:OctoLocalCaFile = "octo-mesh-local-dev-root-ca.crt"   # Linux trust-store filename
+
 function Trust-OctoLocalCa {
 <#
 .SYNOPSIS
-Add the local kind root CA (infrastructure/local-root-ca.crt) to the OS trust store so
-browsers and CLI tools accept the mm-cloud-issuer certificates without warnings.
+Trust the local kind root CA ("OctoMesh Local Dev Root CA") so browsers and CLI tools accept
+the mm-cloud-issuer certificates without warnings.
 
 .DESCRIPTION
-macOS adds it as a trusted root to the System keychain (sudo). Windows imports it into
-Cert:\LocalMachine\Root (admin). Linux copies it into /usr/local/share/ca-certificates and
-runs update-ca-certificates (sudo). Restart the browser afterwards.
+Idempotent: any previously trusted "OctoMesh Local Dev Root CA" (e.g. from an earlier cluster)
+is removed first, then the current CA is trusted — so re-runs and cluster recreations never pile
+up duplicates. macOS uses the System keychain (sudo); Windows uses Cert:\LocalMachine\Root;
+Linux uses update-ca-certificates (sudo). Restart the browser afterwards.
 #>
     [CmdletBinding()]
     param(
@@ -485,40 +492,46 @@ runs update-ca-certificates (sudo). Restart the browser afterwards.
         return
     }
 
+    $name = $Script:OctoLocalCaName
+    Write-Host "Trusting '$name' from $CaPath ..." -ForegroundColor Green
     if ($IsMacOS) {
-        Write-Host "Adding $CaPath to the System keychain as a trusted root (sudo)..." -ForegroundColor Green
+        # Idempotent: drop any prior cert with this name first (sudo caches the credential,
+        # so the delete + add are a single prompt), then add the current one.
+        & sudo security delete-certificate -c $name /Library/Keychains/System.keychain *> $null
         & sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain $CaPath
     }
     elseif ($IsWindows) {
-        Write-Host "Importing $CaPath into Cert:\LocalMachine\Root..." -ForegroundColor Green
+        Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -match [regex]::Escape($name) } |
+            Remove-Item -ErrorAction SilentlyContinue
         Import-Certificate -FilePath $CaPath -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
     }
     elseif ($IsLinux) {
-        Write-Host "Installing $CaPath into the system trust store (sudo)..." -ForegroundColor Green
-        & sudo cp $CaPath /usr/local/share/ca-certificates/octo-local-root-ca.crt
+        & sudo cp $CaPath "/usr/local/share/ca-certificates/$($Script:OctoLocalCaFile)"
         & sudo update-ca-certificates | Out-Null
     }
     else {
         Write-Warning "Unsupported OS; trust $CaPath manually."
         return
     }
-    Write-Host "Local root CA trusted. Restart the browser to pick it up." -ForegroundColor Cyan
+    Write-Host "Trusted '$name'. Restart the browser to pick it up." -ForegroundColor Cyan
 }
 
 function Untrust-OctoLocalCa {
     [CmdletBinding()]
     param()
+    $name = $Script:OctoLocalCaName
     if ($IsMacOS) {
-        & sudo security delete-certificate -c octo-local-root-ca /Library/Keychains/System.keychain 2>$null
+        & sudo security delete-certificate -c $name /Library/Keychains/System.keychain *> $null
     }
     elseif ($IsWindows) {
-        Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -match 'octo-local-root-ca' } | Remove-Item
+        Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -match [regex]::Escape($name) } |
+            Remove-Item -ErrorAction SilentlyContinue
     }
     elseif ($IsLinux) {
-        & sudo rm -f /usr/local/share/ca-certificates/octo-local-root-ca.crt
+        & sudo rm -f "/usr/local/share/ca-certificates/$($Script:OctoLocalCaFile)"
         & sudo update-ca-certificates | Out-Null
     }
-    Write-Host "Local root CA untrusted." -ForegroundColor Cyan
+    Write-Host "Untrusted '$name'." -ForegroundColor Cyan
 }
 
 Export-ModuleMember -Function @('Install-OctoInfrastructure')

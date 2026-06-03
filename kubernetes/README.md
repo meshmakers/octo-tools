@@ -171,13 +171,16 @@ ingress:
 publicUri: "https://<name>.localhost"
 ```
 
-The local root CA is exported to `infrastructure/local-root-ca.crt`. To avoid browser TLS
-warnings, trust it (cross-platform; prompts for sudo on macOS/Linux):
+The local root CA (CN **"OctoMesh Local Dev Root CA"**, exported to
+`infrastructure/local-root-ca.crt`) is **trusted automatically during setup** so browsers/tools
+accept the certs without warnings (prompts for sudo on macOS/Linux; pass `-SkipTrustCa` for
+unattended runs). The trust step is **idempotent** — re-running or recreating the cluster
+replaces the entry rather than piling up duplicates:
 ```powershell
-Trust-OctoLocalCa                      # or run setup with: Install-OctoKubernetes -TrustCa
+Trust-OctoLocalCa            # idempotent; Untrust-OctoLocalCa removes it
 ```
-`Untrust-OctoLocalCa` removes it. (macOS adds it to the System keychain as a trusted root;
-Windows imports into `Cert:\LocalMachine\Root`; Linux uses `update-ca-certificates`.)
+macOS adds it to the System keychain as a trusted root; Windows imports into
+`Cert:\LocalMachine\Root`; Linux uses `update-ca-certificates`.
 
 ## Teardown
 
