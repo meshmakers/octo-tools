@@ -250,7 +250,7 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
-        # By default the exported local root CA is added to the OS trust store (Trust-OctoLocalCa)
+        # By default the exported local root CA is added to the OS trust store (Add-OctoLocalCaTrust)
         # so browsers/tools accept the mm-cloud-issuer certs without warnings. This prompts for
         # sudo on macOS/Linux. Pass -SkipTrustCa for unattended/CI runs.
         [Parameter()] [switch]$SkipTrustCa,
@@ -438,9 +438,9 @@ server = "https://$DevRegistry"
             Write-Host "Local root CA written to $caPath" -ForegroundColor Cyan
             if (-not $SkipTrustCa) {
                 # Non-fatal: a declined/failed sudo must not abort the whole setup.
-                try { Trust-OctoLocalCa -CaPath $caPath } catch { Write-Warning "CA trust skipped: $($_.Exception.Message)" }
+                try { Add-OctoLocalCaTrust -CaPath $caPath } catch { Write-Warning "CA trust skipped: $($_.Exception.Message)" }
             } else {
-                Write-Host "  CA not trusted (-SkipTrustCa). Run 'Trust-OctoLocalCa' to trust it." -ForegroundColor Yellow
+                Write-Host "  CA not trusted (-SkipTrustCa). Run 'Add-OctoLocalCaTrust' to trust it." -ForegroundColor Yellow
             }
         }
     }
@@ -470,7 +470,7 @@ server = "https://$DevRegistry"
 $Script:OctoLocalCaName = "OctoMesh Local Dev Root CA"
 $Script:OctoLocalCaFile = "octo-mesh-local-dev-root-ca.crt"   # Linux trust-store filename
 
-function Trust-OctoLocalCa {
+function Add-OctoLocalCaTrust {
 <#
 .SYNOPSIS
 Trust the local kind root CA ("OctoMesh Local Dev Root CA") so browsers and CLI tools accept
@@ -516,7 +516,7 @@ Linux uses update-ca-certificates (sudo). Restart the browser afterwards.
     Write-Host "Trusted '$name'. Restart the browser to pick it up." -ForegroundColor Cyan
 }
 
-function Untrust-OctoLocalCa {
+function Remove-OctoLocalCaTrust {
     [CmdletBinding()]
     param()
     $name = $Script:OctoLocalCaName
@@ -536,6 +536,6 @@ function Untrust-OctoLocalCa {
 
 Export-ModuleMember -Function @('Install-OctoInfrastructure')
 Export-ModuleMember -Function @('Install-OctoKubernetes')
-Export-ModuleMember -Function @('Trust-OctoLocalCa')
-Export-ModuleMember -Function @('Untrust-OctoLocalCa')
+Export-ModuleMember -Function @('Add-OctoLocalCaTrust')
+Export-ModuleMember -Function @('Remove-OctoLocalCaTrust')
 Export-ModuleMember -Function @('Wait-DockerContainer')

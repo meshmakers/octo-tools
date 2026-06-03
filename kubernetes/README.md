@@ -177,7 +177,7 @@ accept the certs without warnings (prompts for sudo on macOS/Linux; pass `-SkipT
 unattended runs). The trust step is **idempotent** — re-running or recreating the cluster
 replaces the entry rather than piling up duplicates:
 ```powershell
-Trust-OctoLocalCa            # idempotent; Untrust-OctoLocalCa removes it
+Add-OctoLocalCaTrust            # idempotent; Remove-OctoLocalCaTrust removes it
 ```
 macOS adds it to the System keychain as a trusted root; Windows imports into
 `Cert:\LocalMachine\Root`; Linux uses `update-ca-certificates`.

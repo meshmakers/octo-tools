@@ -149,7 +149,7 @@ The local root CA — **"OctoMesh Local Dev Root CA"** (find it by that name in 
 is trusted automatically during setup (prompts for sudo; pass `-SkipTrustCa` to skip), so the
 browser shows the app as secure. Re-run any time — it's idempotent:
 ```powershell
-Trust-OctoLocalCa            # idempotent; Untrust-OctoLocalCa removes it
+Add-OctoLocalCaTrust            # idempotent; Remove-OctoLocalCaTrust removes it
 ```
 
 ---
