@@ -6,8 +6,10 @@ octo-mesh-crds:
 image:
   repository: meshmakers/octo-communication-operator
   pullPolicy: IfNotPresent
-  privateRegistry: ""
-  tag: ""            # set via --set image.tag=...
+  # Pull the operator's own image from the dev registry (where CI pushes the
+  # rolling :main-latest tag), same place the adapter/app images come from.
+  privateRegistry: docker.mm.cloud
+  tag: ""            # set via --set image.tag=... (Install-OctoKubernetes uses main-latest)
 
 operator:
   autoManagePools: true

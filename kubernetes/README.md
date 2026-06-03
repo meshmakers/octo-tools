@@ -73,25 +73,21 @@ Load the cmdlets:
 # kind cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
 # ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
 # Idempotent; refuses if the docker-compose infra is running.
-Install-OctoKubernetes                          # operator: latest published image
-Install-OctoKubernetes -Configuration DebugL    # operator: BUILT from octo-communication-operator source
+Install-OctoKubernetes
 ```
 
-The Communication Operator is now deployed by `Install-OctoKubernetes` itself: with
-`-Configuration DebugL` it is built from the `octo-communication-operator` source and loaded into
-kind (version-matched to your local DebugL services); any other value installs the latest
-published operator image. `-SkipOperator` skips it. `Deploy-OctoOperator` is still available to
-(re)deploy the operator standalone — for example after changing operator code — with these options:
-- `-ImageTag <tag>` — operator image tag (default `3.3.108.0`, the newest published; there is no `latest`).
+The Communication Operator is deployed by `Install-OctoKubernetes` itself, pulled from the dev
+registry (`docker.mm.cloud/meshmakers/octo-communication-operator:main-latest`, the rolling tag
+CI publishes on every main build) — the same registry the adapter/app images come from.
+`-SkipOperator` skips it. `Deploy-OctoOperator` is still available to (re)deploy it standalone:
+- `-ImageTag <tag>` — operator image tag (default `main-latest`; pulled from the dev registry via
+  `image.privateRegistry` in `operator-dev-values.yaml`).
 - `-ControllerHost <ip>` — override the host address the operator/adapters use to reach the
   controller. By default the cmdlet uses the kind node's Docker host-gateway
   (`host.docker.internal`, e.g. `192.168.65.254`) — a **stable** address that does not change with
   your LAN/VPN/Tailscale IP. On Docker CE / Linux (no `host.docker.internal`) it auto-falls back to
   the kind bridge gateway (e.g. `172.18.0.1`), which is equally stable — so you normally don't need
   to override there either. Only pass this if neither is reachable (e.g. an unusual network setup).
-- `-BuildLocal` — build the operator image from `octo-communication-operator` source and load
-  it into kind instead of pulling the published image. Use this when you've changed operator
-  code and need it version-matched to your locally-built controller.
 
 ## Daily development
 
@@ -213,9 +209,9 @@ The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the do
     does by default — and (b) a host firewall (ufw/firewalld) isn't dropping traffic from the kind
     bridge subnet to host port 5015 (Docker usually adds the allow rule; a locked-down host may
     need one for the `172.18.0.0/16` kind subnet → `:5015`).
-- **Operator/adapter version mismatch** — the default published operator image
-  (`3.3.108.0`) may not match a controller you built from this branch. If pool registration
-  misbehaves, deploy a version-matched operator with `Deploy-OctoOperator -BuildLocal`.
+- **Operator/adapter version mismatch** — the operator runs the dev registry's rolling
+  `:main-latest` image, which may lag/lead a controller you built from this branch. If pool
+  registration misbehaves, re-run `Deploy-OctoOperator` to pull the newest `:main-latest`.
 - **Adapter pod `ImagePullBackOff` with `x509: certificate signed by unknown authority`** — the
   node doesn't trust the dev registry's internal CA. `Install-OctoKubernetes` configures
   `skip_verify` for `-DevRegistry` (default `docker.mm.cloud`); if you created the cluster before
@@ -235,7 +231,7 @@ The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the do
 ## Notes on deviations from the original plan (discovered during implementation)
 
 These were found by running every step on a real macOS / Docker 29 / Apple-Silicon machine:
-- **Operator image:** pulled `meshmakers/octo-communication-operator:3.3.108.0` (no `latest` tag exists).
+- **Operator image:** pulled from the dev registry at `docker.mm.cloud/meshmakers/octo-communication-operator:main-latest` (rolling main-build tag).
 - **Webhook certs:** generated with **openssl** inside `Deploy-OctoOperator` (self-contained) rather
   than `octo-cli -c GenerateOperatorCertificates` (octo-cli need not be built).
 - **`Get-HostLanIPv4`** falls back to interface enumeration because `GetHostAddresses(GetHostName())`

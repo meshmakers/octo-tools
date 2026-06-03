@@ -108,25 +108,21 @@ Namespace the operator is installed into. Defaults to "octo-operator-system".
 Helm release name. Defaults to "octo-operator".
 
 .PARAMETER ImageTag
-Operator image tag to deploy. Defaults to the newest published tag
-"3.3.108.0" (there is no "latest" tag). Overridden to "dev" when -BuildLocal.
+Operator image tag to deploy. Defaults to "main-latest" — the rolling tag CI
+publishes to the dev registry (docker.mm.cloud) on every main build. The image
+is pulled from the dev registry (image.privateRegistry in operator-dev-values.yaml).
 
 .PARAMETER ControllerHost
 Host/IP of the host-side Communication Controller. When empty, resolved from
 Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
-
-.PARAMETER BuildLocal
-Build the operator image locally from source and import it into kind instead
-of pulling the published image. Sets the image tag to "dev".
 #>
     param(
         [string]$branch = "",
         [string]$ClusterName = "kind",
         [string]$Namespace = "octo-operator-system",
         [string]$ReleaseName = "octo-operator",
-        [string]$ImageTag = "3.3.108.0",
-        [string]$ControllerHost = "",
-        [switch]$BuildLocal
+        [string]$ImageTag = "main-latest",
+        [string]$ControllerHost = ""
     )
 
     $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
@@ -170,22 +166,6 @@ of pulling the published image. Sets the image tag to "dev".
             return
         }
         Write-Host "Using host address for the Communication Controller: $ControllerHost" -ForegroundColor Cyan
-    }
-
-    # === Optional: build the operator image locally and load it into kind. ===
-    if ($BuildLocal) {
-        $dockerfile = [System.IO.Path]::Combine($branchRootPath, "octo-communication-operator/src/CommunicationOperator/Dockerfile")
-        if (-not (Test-Path $dockerfile)) {
-            Write-Error "Local build requested but Dockerfile not found at '$dockerfile'."
-            return
-        }
-        $localImage = "meshmakers/octo-communication-operator:dev"
-        $buildContext = [System.IO.Path]::Combine($branchRootPath, "octo-communication-operator")
-        Write-Host "Building operator image '$localImage' from '$dockerfile'" -ForegroundColor Green
-        & docker build -t $localImage -f $dockerfile $buildContext
-        if ($LASTEXITCODE -ne 0) { Write-Error "docker build failed with exit code $LASTEXITCODE."; return }
-        Import-OctoImageToKind -Image $localImage -ClusterName $ClusterName
-        $ImageTag = "dev"
     }
 
     # === Generate admission-webhook serving certificates with openssl. ===

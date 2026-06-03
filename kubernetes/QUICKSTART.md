@@ -79,15 +79,13 @@ Stop-OctoInfrastructure
 # Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
 # ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
 # Also configures the node to trust the docker.mm.cloud dev registry.
-Install-OctoKubernetes                          # operator: latest published image
-Install-OctoKubernetes -Configuration DebugL    # operator: BUILT from octo-communication-operator source
+Install-OctoKubernetes
 ```
 
-The Communication Operator is deployed as part of bring-up — `-Configuration DebugL` builds it
-from source and loads it into kind (version-matched to your local DebugL services); any other
-value pulls the latest published operator. Use `-SkipOperator` to skip it. `Deploy-OctoOperator`
-remains available to (re)deploy the operator standalone (its options are documented in
-[`README.md`](./README.md)).
+The Communication Operator is deployed as part of bring-up — pulled from the dev registry
+(`docker.mm.cloud/meshmakers/octo-communication-operator:main-latest`, the rolling tag CI
+publishes on every main build), same place adapter/app images come from. Use `-SkipOperator`
+to skip it. `Deploy-OctoOperator` remains available to (re)deploy the operator standalone.
 
 ---
 
