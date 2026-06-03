@@ -70,17 +70,18 @@ Load the cmdlets:
 ## One-time / cluster bring-up
 
 ```powershell
-# 1) kind cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init.
-#    Idempotent; refuses if the docker-compose infra is running.
-Install-OctoKubernetes
-
-# 2) Deploy the Communication Operator (central mode). Generates webhook certs with openssl,
-#    pulls the published image, and points the operator at your host controller via the stable
-#    Docker host-gateway (host.docker.internal), and force-rolls it so config changes take effect.
-Deploy-OctoOperator
+# kind cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
+# ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
+# Idempotent; refuses if the docker-compose infra is running.
+Install-OctoKubernetes                          # operator: latest published image
+Install-OctoKubernetes -Configuration DebugL    # operator: BUILT from octo-communication-operator source
 ```
 
-`Deploy-OctoOperator` options:
+The Communication Operator is now deployed by `Install-OctoKubernetes` itself: with
+`-Configuration DebugL` it is built from the `octo-communication-operator` source and loaded into
+kind (version-matched to your local DebugL services); any other value installs the latest
+published operator image. `-SkipOperator` skips it. `Deploy-OctoOperator` is still available to
+(re)deploy the operator standalone — for example after changing operator code — with these options:
 - `-ImageTag <tag>` — operator image tag (default `3.3.108.0`, the newest published; there is no `latest`).
 - `-ControllerHost <ip>` — override the host address the operator/adapters use to reach the
   controller. By default the cmdlet uses the kind node's Docker host-gateway

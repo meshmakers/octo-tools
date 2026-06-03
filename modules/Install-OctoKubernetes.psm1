@@ -76,6 +76,12 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # so browsers/tools accept the mm-cloud-issuer certs without warnings. This prompts for
         # sudo on macOS/Linux. Pass -SkipTrustCa for unattended/CI runs.
         [Parameter()] [switch]$SkipTrustCa,
+        # The Communication Operator is deployed by default. With -Configuration DebugL it is
+        # BUILT from the octo-communication-operator source and loaded into kind (matches your
+        # locally-built DebugL services); any other value installs the latest published operator
+        # image. Pass -SkipOperator to not deploy it at all.
+        [Parameter()] [string]$Configuration = "Release",
+        [Parameter()] [switch]$SkipOperator,
         # Internal dev container registry the node should be able to pull adapter images
         # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
         # configure containerd to skip verification for it. Pass "" to skip this.
@@ -267,6 +273,18 @@ server = "https://$DevRegistry"
         }
     }
 
+    if (-not $SkipOperator) {
+        Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Deploying Communication Operator' -PercentComplete 96
+        if ($Configuration -eq "DebugL") {
+            Write-Host "Deploying Communication Operator (DebugL: build from source + load into kind)" -ForegroundColor Green
+            Deploy-OctoOperator -branch $branch -ClusterName $ClusterName -BuildLocal
+        }
+        else {
+            Write-Host "Deploying Communication Operator (latest published image)" -ForegroundColor Green
+            Deploy-OctoOperator -branch $branch -ClusterName $ClusterName
+        }
+    }
+
     Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Complete' -PercentComplete 100
 
     $currentContext = (& kubectl config current-context).Trim()
@@ -275,6 +293,10 @@ server = "https://$DevRegistry"
     Write-Host "  kind cluster:      $ClusterName" -ForegroundColor Cyan
     Write-Host "  CRDs release:      $CrdReleaseName in namespace $CrdNamespace" -ForegroundColor Cyan
     Write-Host "  Pool namespace:    $PoolNamespace" -ForegroundColor Cyan
+    if (-not $SkipOperator) {
+        $opMode = if ($Configuration -eq "DebugL") { "built from source (DebugL)" } else { "latest published image" }
+        Write-Host "  Operator:          deployed ($opMode)" -ForegroundColor Cyan
+    }
     if (-not $SkipIngress) {
         Write-Host "  Ingress:           ingress-nginx (class 'nginx'), apps at https://<name>.localhost" -ForegroundColor Cyan
         Write-Host "  TLS issuer:        mm-cloud-issuer (local root CA)" -ForegroundColor Cyan

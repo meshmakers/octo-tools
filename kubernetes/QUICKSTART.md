@@ -76,14 +76,18 @@ Stop-OctoInfrastructure
 ## 2 · Bring up the cluster
 
 ```powershell
-# Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init.
+# Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
+# ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
 # Also configures the node to trust the docker.mm.cloud dev registry.
-Install-OctoKubernetes
-
-# Deploy the Communication Operator (central mode). Generates webhook certs, pulls the
-# published image, and wires it to your host controller via host.docker.internal.
-Deploy-OctoOperator
+Install-OctoKubernetes                          # operator: latest published image
+Install-OctoKubernetes -Configuration DebugL    # operator: BUILT from octo-communication-operator source
 ```
+
+The Communication Operator is deployed as part of bring-up — `-Configuration DebugL` builds it
+from source and loads it into kind (version-matched to your local DebugL services); any other
+value pulls the latest published operator. Use `-SkipOperator` to skip it. `Deploy-OctoOperator`
+remains available to (re)deploy the operator standalone (its options are documented in
+[`README.md`](./README.md)).
 
 ---
 
