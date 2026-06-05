@@ -50,3 +50,16 @@ broker:
   port: 5672
   username: "guest"
   password: "guest"
+
+# The chart's default 128Mi is too tight: the operator forks the helm CLI
+# for every workload deploy, and helm + the .NET host together blow the
+# limit (containerd OOM-kills the pod with exitCode 137, restart loop on
+# every retried workload deploy). 512Mi gives helm + index parsing
+# comfortable headroom on local kind.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi

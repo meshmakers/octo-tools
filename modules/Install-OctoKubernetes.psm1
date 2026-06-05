@@ -124,7 +124,7 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
     }
     else {
         Write-Progress -Activity 'Install Octo Kubernetes' -Status "Creating kind cluster '$ClusterName'" -PercentComplete 25
-        $kindConfig = Join-Path $branchRootPath "octo-tools/kubernetes/kind-cluster.yaml"
+        $kindConfig = Join-Path $kubernetesPath "kind-cluster.yaml"
         if (!(Test-Path $kindConfig)) {
             Write-Error "kind config not found at $kindConfig"
             return
@@ -175,7 +175,7 @@ server = "https://$DevRegistry"
     }
 
     Write-Progress -Activity 'Install Octo Kubernetes' -Status "Applying namespaces" -PercentComplete 85
-    $k8sDir = Join-Path $branchRootPath "octo-tools/kubernetes"
+    $k8sDir = $kubernetesPath
     Write-Host "Applying namespaces" -ForegroundColor Green
     & kubectl --context "kind-$ClusterName" apply -f (Join-Path $k8sDir "namespaces.yaml")
     if ($LASTEXITCODE -ne 0) { Write-Error "kubectl apply namespaces failed"; return }

@@ -62,7 +62,11 @@ kind cluster name; the node container is "{ClusterName}-control-plane". Defaults
 #>
     param([Parameter()] [string]$ClusterName = "kind")
     $node = "$ClusterName-control-plane"
-    $line = & docker exec $node getent hosts host.docker.internal 2>$null
+    # `getent hosts` may return only the AAAA record on Docker Desktop setups where
+    # host.docker.internal has both A and AAAA — but kindnet pods are IPv4-only and
+    # cannot reach an IPv6 host. Ask explicitly for IPv4 so the address we return
+    # is one a pod can actually connect to.
+    $line = & docker exec $node getent ahostsv4 host.docker.internal 2>$null
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($line)) {
         return (($line -split '\s+') | Where-Object { $_ })[0]
     }
@@ -127,7 +131,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
 
     $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
     $chart = [System.IO.Path]::Combine($branchRootPath, "octo-helm-core/src/octo-mesh-communication-operator")
-    $values = [System.IO.Path]::Combine($branchRootPath, "octo-tools/kubernetes/operator-dev-values.yaml")
+    $values = [System.IO.Path]::Combine($kubernetesPath, "operator-dev-values.yaml")
 
     if (-not (Test-Path $chart)) {
         Write-Error "Operator Helm chart not found at '$chart'."
@@ -216,7 +220,12 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
 
         # === Deploy the operator chart. ===
         $kubeContext = "kind-$ClusterName"
-        $controllerUri = "https://${ControllerHost}:5015"
+        # IPv6 literals must be wrapped in brackets in URIs (https://[::1]:5015);
+        # otherwise the trailing ":5015" is parsed as part of the address and
+        # System.Uri rejects the whole string with "Invalid port specified".
+        # Docker Desktop on macOS resolves host.docker.internal to IPv6 only.
+        $uriHost = if ($ControllerHost -match ':' -and $ControllerHost -notmatch '^\[') { "[$ControllerHost]" } else { $ControllerHost }
+        $controllerUri = "https://${uriHost}:5015"
         Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', controller '$controllerUri')" -ForegroundColor Green
 
         & helm upgrade --install $ReleaseName $chart `
