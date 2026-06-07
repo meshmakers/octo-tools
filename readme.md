@@ -72,6 +72,43 @@ The complete documentation of OctoMesh is available at https://docs.meshmakers.c
 create a folder in the users directory: `.pwsh` and add a `profile.ps1`
 This gets loaded when the terminal starts. You can for example disable the octo promt (`OCTO >`) by disabling `$Global:WantPromt = $true` in your custom `profile.ps1`.
 
+# AI Bastion
+
+The `Invoke-AiBastion` module drives the operator-side flow that registers an
+Anthropic subscription token on an OctoMesh tenant — the bastion CLI from
+ADR-15 / ADR-18 / #4123. Two cmdlets are exported once `profile.ps1` is sourced:
+
+```powershell
+Register-AiBastion -Tenant acme -AdapterUrl https://ai.mm.cloud
+Get-AiBastionStatus -Tenant acme -AdapterUrl https://ai.mm.cloud
+```
+
+Authentication uses the operator's own OctoMesh OAuth token (the same one
+`octo-cli login` deposits) — either passed via `-BearerToken` or read from
+the `OCTO_BASTION_TOKEN` environment variable. The Anthropic device-code
+flow runs on the operator's terminal; the resulting access + refresh token
+pair is POSTed to the adapter's
+`POST /{tenantId}/v1/credentials/register` endpoint, which encrypts both
+tokens at rest before persistence.
+
+Plaintext token material is held in process memory for the minimum time
+needed and explicitly overwritten + GC-collected in a `finally` block, so
+that Ctrl-C while waiting for the user to approve the device code still
+wipes the credentials.
+
+## Bastion host setup
+
+The intended deployment runs this module on `mm-ai-login.mm.cloud` (the
+shared bastion host). Allowed SSH users are managed in the OctoMesh
+identity service; the host's `/etc/ssh/sshd_config` restricts inbound
+shells to the `octo-bastion-operators` group. Each operator's session
+exports `OCTO_BASTION_TOKEN` from their `octo-cli` login and runs
+`Register-AiBastion` with the tenant slug they're onboarding.
+
+The cmdlet doesn't persist anything to disk; the only artefact of a
+successful run is the lease the adapter records server-side and a one-line
+status echo on stdout.
+
 # Support and Feedback
 
 If you encounter any issues or have questions while using OctoMesh, please don't hesitate to reach out to our support team at support@meshmakers.io. We value your feedback and are committed to helping you make the most of OctoMesh.
