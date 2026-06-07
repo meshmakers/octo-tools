@@ -26,6 +26,17 @@ operator:
   imageRegistry: docker.mm.cloud
   adapterIgnoreCertificateValidation: true
   communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
+  # Cluster-wide ingress defaults the operator projects into EVERY deployed
+  # workload's ingress — mirrors test-2/staging so the same app deployed to either
+  # cluster gets a cert-manager-issued, trusted cert with no per-app change.
+  # Without this the operator renders a bare `ingress.enabled: true` (no
+  # className / cluster-issuer / tls), so cert-manager issues no cert and
+  # ingress-nginx serves its self-signed "Fake Certificate" — which the local
+  # root CA can never validate.
+  ingress:
+    className: nginx
+    clusterIssuer: mm-cloud-issuer
+    tls: true
   clusterDependencies:
     mongodbHost: "mongodb-0.mongodb.octo-infra.svc.cluster.local:27017"
     mongodbReplicaSet: "rs"
