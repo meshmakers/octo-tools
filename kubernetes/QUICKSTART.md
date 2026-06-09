@@ -13,7 +13,8 @@ monorepo workspace root. All cmdlets are idempotent — re-running is safe.
 ## 0 · Prerequisites (once)
 
 **Tools on PATH:** `kind` (v0.31+) · `kubectl` · `helm` v3 · `docker` (daemon running) · `openssl`
-(`mongosh` optional, for host-side verification).
+(`mongosh` optional, for host-side verification). Requires **PowerShell 7.4+** (`pwsh`) — the
+dev-registry pre-flight uses `Test-Connection -TcpPort`, added in 7.4.
 
 ```powershell
 # macOS (kubectl / helm / openssl are usually already installed)
@@ -57,7 +58,8 @@ git -C ./octo-tools switch dev/local-k8s-dev-env
 ```
 
 **Dev registry:** `docker.mm.cloud` must be reachable (VPN) so the cluster can pull adapter images.
-`Install-OctoKubernetes` configures the node to trust it automatically.
+`Install-OctoKubernetes` configures the node to skip TLS verification for it automatically (its cert
+is signed by an internal CA the node doesn't trust).
 
 ---
 
@@ -78,7 +80,7 @@ Stop-OctoInfrastructure
 ```powershell
 # Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
 # ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
-# Also configures the node to trust the docker.mm.cloud dev registry.
+# Also configures the node to skip TLS verification for the docker.mm.cloud dev registry.
 Install-OctoKubernetes
 ```
 
@@ -159,7 +161,8 @@ Add-OctoLocalCaTrust            # idempotent; Remove-OctoLocalCaTrust removes it
 ## Teardown
 
 ```powershell
-Uninstall-OctoKubernetes          # deletes the kind cluster AND its data (Mongo/Crate PVCs)
+Uninstall-OctoKubernetes          # deletes the kind cluster + data (Mongo/Crate PVCs); also
+                                  # removes the local CA from the OS trust store (-KeepCaTrust to keep)
 Start-OctoInfrastructure          # (optional) go back to the legacy docker-compose infra
 ```
 

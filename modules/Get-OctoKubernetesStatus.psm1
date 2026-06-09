@@ -1,6 +1,6 @@
 function Test-HostPortOpen([string]$hostName, [int]$port) {
+    $client = New-Object System.Net.Sockets.TcpClient
     try {
-        $client = New-Object System.Net.Sockets.TcpClient
         $iar = $client.BeginConnect($hostName, $port, $null, $null)
         # Docker Desktop (Windows/macOS) warms its published-port proxy lazily, so the
         # first connect to a kind-mapped host port can take >1s — an 800ms wait gives a
@@ -11,9 +11,10 @@ function Test-HostPortOpen([string]$hostName, [int]$port) {
         if ($iar.AsyncWaitHandle.WaitOne(2500)) {
             try { $client.EndConnect($iar); $connected = $client.Connected } catch { $connected = $false }
         }
-        $client.Close()
         return $connected
-    } catch { return $false }
+    }
+    catch { return $false }
+    finally { $client.Dispose() }
 }
 
 function Get-OctoKubernetesStatus {

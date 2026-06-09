@@ -11,10 +11,28 @@ function Wait-DockerContainer([string]$containerId) {
     }
 }
 
+function Test-OctoKindInfraRunning {
+    # Returns $true if a local kind cluster node container is running. The kind dev infra
+    # binds the same host ports (27017/5672/15672/5432/4301) as this docker-compose stack
+    # (see kubernetes/kind-cluster.yaml extraPortMappings), so the two cannot run together —
+    # 'docker compose up' on top of a running cluster fails to bind those ports and leaves a
+    # half-started stack.
+    $running = docker ps --format '{{.Names}}' 2>$null
+    foreach ($n in $running) {
+        if ($n -match '-control-plane$') { return $true }
+    }
+    return $false
+}
+
 function Install-OctoInfrastructure {
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
+    }
+
+    if (Test-OctoKindInfraRunning) {
+        Write-Error "A local kind cluster is running and binds the same host ports (27017/5672/15672/5432/4301) as the docker-compose infrastructure. Run 'Uninstall-OctoKubernetes' first (or stop the kind cluster) before starting the docker-compose infrastructure."
+        return
     }
 
     $PSStyle.Progress.View = "Classic"

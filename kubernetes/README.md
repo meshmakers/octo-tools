@@ -53,7 +53,8 @@ on **Windows** (Docker Desktop) with `winget install Kubernetes.kind` — then *
 so `kind` resolves on PATH (winget updates the persisted user PATH, not running processes).
 On **Linux** (Docker CE/Engine) there is no bundled installer — drop the `kind`/`kubectl`/`helm`
 binaries on PATH manually (see QUICKSTART → Prerequisites; use the `arm64` URLs on ARM hosts).
-The cmdlets run under `pwsh` on Linux exactly as on macOS/Windows.
+The cmdlets run under `pwsh` on Linux exactly as on macOS/Windows. **PowerShell 7.4+** is
+required — the dev-registry pre-flight uses `Test-Connection -TcpPort`, which was added in 7.4.
 `octo-helm-core` must be checked out next to the other repos (it ships the CRDs + operator chart).
 
 > **Port collision with docker-compose infra.** The kind infra binds the *same* host ports
@@ -185,14 +186,17 @@ macOS adds it to the System keychain as a trusted root; Windows imports into
 Uninstall-OctoKubernetes      # deletes the kind cluster AND its data (Mongo/Crate PVCs)
 ```
 
-To go back to the legacy docker-compose infra afterwards: `Start-OctoInfrastructure`.
+`Uninstall-OctoKubernetes` also removes the local root CA from the OS trust store (so no orphaned
+"OctoMesh Local Dev Root CA" is left trusted after the cluster — whose private key it relied on — is
+gone); pass `-KeepCaTrust` to leave it in place. To go back to the legacy docker-compose infra
+afterwards: `Start-OctoInfrastructure`.
 
 ## Backups
 
 The kind infra uses `local-path` PVCs: data survives pod restarts but **not** `kind delete cluster`
 (i.e. `Uninstall-OctoKubernetes`). There is no automated backup of the kind infra yet — for
 durable data either keep the cluster, or `mongodump` / take a CrateDB snapshot before teardown.
-The legacy `Manage-OctoInfrastructureBackup` (volume-tar) applies only to the docker-compose infra.
+The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-OctoInfrastructure`) apply only to the docker-compose infra.
 
 ## Troubleshooting
 
@@ -242,7 +246,7 @@ These were found by running every step on a real macOS / Docker 29 / Apple-Silic
 
 ### Windows (Docker Desktop) portability fixes
 
-Verified end-to-end on Windows 11 / Docker Desktop 29 / PowerShell 7. The bring-up is identical
+Verified end-to-end on Windows 11 / Docker Desktop 29 / PowerShell 7.4+ (the dev-registry pre-flight uses `Test-Connection -TcpPort`, added in 7.4). The bring-up is identical
 (`Install-OctoKubernetes` → `Deploy-OctoOperator` → `Invoke-BuildAll` → `Start-Octo` →
 `Invoke-OctoCliLoginLocal`); these Windows-specific fixes were needed:
 - **kind install:** `winget install Kubernetes.kind` (no Homebrew). winget updates the persisted

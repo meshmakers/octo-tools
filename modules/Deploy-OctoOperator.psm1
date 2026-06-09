@@ -286,7 +286,13 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # Docker Desktop on macOS resolves host.docker.internal to IPv6 only.
         $uriHost = if ($ControllerHost -match ':' -and $ControllerHost -notmatch '^\[') { "[$ControllerHost]" } else { $ControllerHost }
         $controllerUri = "https://${uriHost}:5015"
-        Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', controller '$controllerUri')" -ForegroundColor Green
+        # The operator runs the rolling :main-latest tag, so the image content changes
+        # under a fixed tag. Force a fresh pull on every deploy (Always) for the normal
+        # registry path; for an offline/pre-loaded deploy (-SkipRegistryCheck, image
+        # already on the node via 'kind load') keep IfNotPresent so kubelet uses the
+        # cached image instead of trying to pull. Overrides image.pullPolicy in the values.
+        $pullPolicy = if ($SkipRegistryCheck) { "IfNotPresent" } else { "Always" }
+        Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', pullPolicy '$pullPolicy', controller '$controllerUri')" -ForegroundColor Green
 
         & helm upgrade --install $ReleaseName $chart `
             --kube-context $kubeContext `
@@ -295,6 +301,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
             --values $values `
             --set "octo-mesh-crds.enabled=false" `
             --set "image.tag=$ImageTag" `
+            --set "image.pullPolicy=$pullPolicy" `
             --set "operator.communicationControllerUri=$controllerUri" `
             --set-file "serviceHooks.caKey=$certDir/ca-key.pem" `
             --set-file "serviceHooks.caCrt=$certDir/ca.pem" `

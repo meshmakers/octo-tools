@@ -109,7 +109,7 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
     }
 
     if (-not $SkipInfra -and (Test-DockerComposeInfraRunning)) {
-        Write-Error "docker-compose infrastructure is running and will collide on host ports 27017/5672/5432. Run 'Stop-OctoInfrastructure' first, or pass -SkipInfra to install only the k8s control plane."
+        Write-Error "docker-compose infrastructure is running and will collide on host ports 27017/5672/5432. Run 'Stop-OctoInfrastructure' first, or pass '-SkipInfra -SkipOperator' to install only the cluster/CRDs/ingress (the operator needs the in-cluster infra, so -SkipInfra alone leaves it pointed at nothing)."
         return
     }
 
@@ -227,23 +227,51 @@ server = "https://$DevRegistry"
         # 4) Wait for readiness
         Write-Host "Waiting for infra to become ready..." -ForegroundColor Green
         & kubectl --context $ctx -n $InfraNamespace rollout status deploy/rabbitmq --timeout=180s
+        if ($LASTEXITCODE -ne 0) { Write-Error "rabbitmq did not become ready within the timeout (rollout status failed). Aborting before host services connect to a half-ready infra."; return }
         & kubectl --context $ctx -n $InfraNamespace rollout status statefulset/cratedb --timeout=300s
+        if ($LASTEXITCODE -ne 0) { Write-Error "cratedb did not become ready within the timeout (rollout status failed). Aborting before host services connect to a half-ready infra."; return }
         & kubectl --context $ctx -n $InfraNamespace rollout status statefulset/mongodb --timeout=300s
+        if ($LASTEXITCODE -ne 0) { Write-Error "mongodb did not become ready within the timeout (rollout status failed). Aborting before the replica-set init."; return }
 
-        # 5) Initialize the replica set (retry on transient network error), then seed admin user
+        # 5) Initialize the replica set (retry on transient network error), then seed admin user.
+        #    The init scripts are idempotent and exit 0 on a re-run; a non-zero exit whose
+        #    output is a benign "already initialized / already exists / requires auth" re-run
+        #    message is tolerated, but any OTHER failure aborts the install instead of falsely
+        #    reporting success (a wrong context, missing pod, or mongosh crash must not pass).
         Write-Host "Initializing Mongo replica set" -ForegroundColor Green
-        while ($true) {
-            & { & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/init-replicaset.js } 2>k8s-stderr.txt
-            $err = Get-Content k8s-stderr.txt -Raw
-            Write-Host $err
-            if ((-not [string]::IsNullOrWhiteSpace($err)) -and ($err -match "MongoNetworkError|not running|ECONNREFUSED")) {
-                Start-Sleep -s 3
-                continue
+        $benignMongo = "already initialized|already exists|requires authentication|not authorized|Unauthorized"
+        $mongoErr = Join-Path ([System.IO.Path]::GetTempPath()) "octo-k8s-mongo-init.stderr.txt"
+        try {
+            $initExit = 0
+            $err = ""
+            while ($true) {
+                & { & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/init-replicaset.js } 2>$mongoErr
+                $initExit = $LASTEXITCODE
+                $err = Get-Content $mongoErr -Raw
+                if (-not [string]::IsNullOrWhiteSpace($err)) { Write-Host $err }
+                if (($initExit -ne 0) -and ($err -match "MongoNetworkError|not running|ECONNREFUSED")) {
+                    Start-Sleep -s 3
+                    continue
+                }
+                break
             }
-            Remove-Item k8s-stderr.txt -ErrorAction SilentlyContinue
-            break
+            if ($initExit -ne 0 -and ($err -notmatch $benignMongo)) {
+                Write-Error "Mongo replica-set init failed (exit code $initExit). See the output above."
+                return
+            }
+
+            & { & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/create-admin-user.js } 2>$mongoErr
+            $userExit = $LASTEXITCODE
+            $userErr = Get-Content $mongoErr -Raw
+            if (-not [string]::IsNullOrWhiteSpace($userErr)) { Write-Host $userErr }
+            if ($userExit -ne 0 -and ($userErr -notmatch $benignMongo)) {
+                Write-Error "Mongo admin-user seeding failed (exit code $userExit). See the output above."
+                return
+            }
         }
-        & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/create-admin-user.js
+        finally {
+            Remove-Item $mongoErr -ErrorAction SilentlyContinue
+        }
     }
 
     $caTrustNote = $null
@@ -295,6 +323,12 @@ server = "https://$DevRegistry"
     }
 
     if (-not $SkipOperator) {
+        if ($SkipInfra) {
+            Write-Warning ("Deploying the operator with -SkipInfra: it expects in-cluster infra at " +
+                "mongodb-0.mongodb.$InfraNamespace / rabbitmq.$InfraNamespace. If that infra isn't already " +
+                "present from a prior install, the operator's managed pools won't reach the DB/broker. " +
+                "Pass -SkipOperator as well if you only want the cluster/CRDs/ingress.")
+        }
         Write-Host "Deploying Communication Operator (dev registry, :main-latest)" -ForegroundColor Green
         Deploy-OctoOperator -branch $branch -ClusterName $ClusterName -SkipRegistryCheck:$SkipRegistryCheck
     }

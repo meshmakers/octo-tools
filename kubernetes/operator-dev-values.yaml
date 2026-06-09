@@ -5,7 +5,12 @@ octo-mesh-crds:
 
 image:
   repository: meshmakers/octo-communication-operator
-  pullPolicy: IfNotPresent
+  # The operator runs the rolling :main-latest tag (CI republishes it on every main
+  # build), so the image content changes under a fixed tag — IfNotPresent would keep
+  # serving the node's stale cached layer and a re-deploy would never pick up a newer
+  # build. Default to Always so every (re)deploy re-pulls. Deploy-OctoOperator drops
+  # this back to IfNotPresent for offline/pre-loaded (-SkipRegistryCheck) deploys.
+  pullPolicy: Always
   # Pull the operator's own image from the dev registry (where CI pushes the
   # rolling :main-latest tag), same place the adapter/app images come from.
   privateRegistry: docker.mm.cloud
