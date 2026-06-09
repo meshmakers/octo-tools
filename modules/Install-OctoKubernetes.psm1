@@ -246,6 +246,7 @@ server = "https://$DevRegistry"
         & kubectl --context $ctx -n $InfraNamespace exec mongodb-0 -- mongosh admin /scripts/create-admin-user.js
     }
 
+    $caTrustNote = $null
     if (-not $SkipIngress) {
         $ctx = "kind-$ClusterName"
         & helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>$null | Out-Null
@@ -278,10 +279,17 @@ server = "https://$DevRegistry"
             [IO.File]::WriteAllBytes($caPath, [Convert]::FromBase64String($caB64))
             Write-Host "Local root CA written to $caPath" -ForegroundColor Cyan
             if (-not $SkipTrustCa) {
-                # Non-fatal: a declined/failed sudo must not abort the whole setup.
-                try { Add-OctoLocalCaTrust -CaPath $caPath } catch { Write-Warning "CA trust skipped: $($_.Exception.Message)" }
+                # Non-fatal: a declined/failed sudo (or a non-elevated Windows session) must
+                # not abort the whole setup. Capture the reason in $caTrustNote so it is
+                # surfaced in the final summary, where it is visible instead of buried mid-run.
+                try {
+                    Add-OctoLocalCaTrust -CaPath $caPath
+                } catch {
+                    Write-Warning "CA trust skipped: $($_.Exception.Message)"
+                    $caTrustNote = "Could not auto-trust the local root CA ($($_.Exception.Message)). Trust it manually with 'Add-OctoLocalCaTrust' (on Windows, from an elevated PowerShell)."
+                }
             } else {
-                Write-Host "  CA not trusted (-SkipTrustCa). Run 'Add-OctoLocalCaTrust' to trust it." -ForegroundColor Yellow
+                $caTrustNote = "Local root CA not trusted (-SkipTrustCa). Trust it with 'Add-OctoLocalCaTrust'."
             }
         }
     }
@@ -309,6 +317,11 @@ server = "https://$DevRegistry"
         Write-Host ""
         Write-Host "Note: current kubectl context is not 'kind-$ClusterName'." -ForegroundColor Yellow
         Write-Host "Run 'kubectl config use-context kind-$ClusterName' before running the operator." -ForegroundColor Yellow
+    }
+
+    if ($caTrustNote) {
+        Write-Host ""
+        Write-Host "  CA trust:          $caTrustNote" -ForegroundColor Yellow
     }
 }
 
@@ -350,7 +363,7 @@ Linux uses update-ca-certificates (sudo). Restart the browser afterwards.
     elseif ($IsWindows) {
         Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -match [regex]::Escape($name) } |
             Remove-Item -ErrorAction SilentlyContinue
-        Import-Certificate -FilePath $CaPath -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
+        Import-Certificate -FilePath $CaPath -CertStoreLocation 'Cert:\LocalMachine\Root' -ErrorAction Stop | Out-Null
     }
     elseif ($IsLinux) {
         & sudo cp $CaPath "/usr/local/share/ca-certificates/$($Script:OctoLocalCaFile)"
