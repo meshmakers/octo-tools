@@ -46,9 +46,11 @@ Helm release name for the CRDs chart. Defaults to "octo-mesh-crds".
 Namespace into which the CRDs Helm release is installed. Defaults to
 "octo-operator-system".
 
-.PARAMETER PoolNamespace
-Namespace into which the operator places auto-created CommunicationPool CRs
-and broker secrets. Defaults to "octo".
+.PARAMETER ExposeLan
+Bind the infra + ingress host ports on 0.0.0.0 instead of the default 127.0.0.1
+(loopback), so other machines on the LAN can reach them. Exposes MongoDB / CrateDB /
+RabbitMQ (dev creds, CrateDB auth-less) to the network — only use on a trusted network.
+Takes effect only when the cluster is created (recreate to change).
 
 .EXAMPLE
 Install-OctoKubernetes
@@ -66,12 +68,15 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         [Parameter()] [string]$ClusterName = "kind",
         [Parameter()] [string]$CrdReleaseName = "octo-mesh-crds",
         [Parameter()] [string]$CrdNamespace = "octo-operator-system",
-        [Parameter()] [string]$PoolNamespace = "octo",
-        [Parameter()] [string]$InfraNamespace = "octo-infra",
         [Parameter()] [switch]$SkipInfra,
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
+        # By default the infra + ingress host ports bind to 127.0.0.1 (loopback only). Pass
+        # -ExposeLan to bind them on 0.0.0.0 so other machines on the LAN can reach them —
+        # this exposes Mongo/CrateDB/RabbitMQ (dev creds) to the network, so only use it on a
+        # trusted network. Only takes effect when the cluster is created (recreate to change).
+        [Parameter()] [switch]$ExposeLan,
         # By default the exported local root CA is added to the OS trust store (Add-OctoLocalCaTrust)
         # so browsers/tools accept the mm-cloud-issuer certs without warnings. This prompts for
         # sudo on macOS/Linux. Pass -SkipTrustCa for unattended/CI runs.
@@ -89,6 +94,13 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # configure containerd to skip verification for it. Pass "" to skip this.
         [Parameter()] [string]$DevRegistry = "docker.mm.cloud"
     )
+
+    # Namespaces are fixed by the static manifests (namespaces.yaml, the infra YAML which is
+    # applied without -n, and operator-dev-values.yaml). They are locals, not parameters,
+    # because overriding only some of those would split the install across namespaces and
+    # break it — changing a namespace means editing those manifests too.
+    $InfraNamespace = "octo-infra"
+    $PoolNamespace = "octo"
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
@@ -149,10 +161,21 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
             Write-Error "kind config not found at $kindConfig"
             return
         }
-        Write-Host "Creating kind cluster '$ClusterName' from $kindConfig" -ForegroundColor Green
-        & kind create cluster --name $ClusterName --config $kindConfig
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "kind create cluster failed with exit code $LASTEXITCODE"
+        # The config binds host ports to 127.0.0.1 (loopback) by default. -ExposeLan rewrites
+        # them to 0.0.0.0 (LAN-reachable) into a temp config — kind reads listenAddress from
+        # the file, so this is the only place the choice can be made (recreate to change it).
+        $configToUse = $kindConfig
+        if ($ExposeLan) {
+            $configToUse = Join-Path ([System.IO.Path]::GetTempPath()) "octo-kind-cluster-lan.yaml"
+            ((Get-Content $kindConfig -Raw) -replace 'listenAddress:\s*"127\.0\.0\.1"', 'listenAddress: "0.0.0.0"') | Set-Content -Path $configToUse -NoNewline
+            Write-Host "  -ExposeLan: binding host ports on 0.0.0.0 (LAN-reachable; this exposes the dev infra to the network)" -ForegroundColor Yellow
+        }
+        Write-Host "Creating kind cluster '$ClusterName' from $configToUse" -ForegroundColor Green
+        & kind create cluster --name $ClusterName --config $configToUse
+        $createExit = $LASTEXITCODE
+        if ($configToUse -ne $kindConfig) { Remove-Item $configToUse -ErrorAction SilentlyContinue }
+        if ($createExit -ne 0) {
+            Write-Error "kind create cluster failed with exit code $createExit"
             return
         }
     }
@@ -294,11 +317,13 @@ server = "https://$DevRegistry"
         if ($LASTEXITCODE -ne 0) { Write-Error "cert-manager install failed"; return }
 
         & kubectl --context $ctx -n cert-manager rollout status deploy/cert-manager-webhook --timeout=120s
+        if ($LASTEXITCODE -ne 0) { Write-Error "cert-manager webhook did not become ready (rollout status failed). Aborting before applying the cluster issuer."; return }
 
         Write-Host "Applying mm-cloud-issuer (local root CA)" -ForegroundColor Green
         & kubectl --context $ctx apply -f (Join-Path $k8sDir "cluster-issuer.yaml")
         if ($LASTEXITCODE -ne 0) { Write-Error "cluster-issuer apply failed"; return }
         & kubectl --context $ctx wait --for=condition=Ready clusterissuer/mm-cloud-issuer --timeout=120s
+        if ($LASTEXITCODE -ne 0) { Write-Error "mm-cloud-issuer did not become Ready (kubectl wait failed). Aborting before exporting the local root CA."; return }
 
         # Export the local root CA so the host/browser can optionally trust it.
         $caPath = Join-Path $infrastructurePath "local-root-ca.crt"

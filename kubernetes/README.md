@@ -90,6 +90,14 @@ CI publishes on every main build) — the same registry the adapter/app images c
   the kind bridge gateway (e.g. `172.18.0.1`), which is equally stable — so you normally don't need
   to override there either. Only pass this if neither is reachable (e.g. an unusual network setup).
 
+**Network binding (LAN exposure).** By default the infra + ingress host ports bind to `127.0.0.1`
+(loopback) — reachable from this machine only. To reach them from other machines on the LAN (e.g.
+testing from a phone / another laptop), pass `Install-OctoKubernetes -ExposeLan`, which binds them
+on `0.0.0.0`. ⚠️ This exposes MongoDB / CrateDB / RabbitMQ — which run with default dev credentials
+(CrateDB auth-less) — to your whole network, so only use it on a trusted network. `-ExposeLan` only
+takes effect when the cluster is created; recreate it (`Uninstall-OctoKubernetes` →
+`Install-OctoKubernetes -ExposeLan`) to change the binding.
+
 ## Daily development
 
 ```powershell

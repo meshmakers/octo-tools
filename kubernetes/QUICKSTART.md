@@ -89,6 +89,10 @@ The Communication Operator is deployed as part of bring-up — pulled from the d
 publishes on every main build), same place adapter/app images come from. Use `-SkipOperator`
 to skip it. `Deploy-OctoOperator` remains available to (re)deploy the operator standalone.
 
+> **Network binding:** infra + ingress host ports bind to `127.0.0.1` (loopback) by default.
+> Add `-ExposeLan` to bind on `0.0.0.0` for LAN access — ⚠️ this exposes Mongo/CrateDB/RabbitMQ
+> (dev creds) to your network, so only on a trusted one. Takes effect at cluster-create time.
+
 ---
 
 ## 3 · Build + start the host services
