@@ -40,6 +40,17 @@ All commands require PowerShell and are available after loading the profile:
 - `Install-OctoInfrastructure` - Initial infrastructure setup
 - `Get-OctoInfrastructureStatus` - Check infrastructure status
 - `Start-Octo` - Start the Octo application after infrastructure is running
+- `Stop-Octo` - Stop services started in non-interactive mode (`Start-Octo -nonInteractive $true`)
+
+### Local Kubernetes (Kind) dev environment
+An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, the CRDs, and the Communication Operator run inside a local [kind](https://kind.sigs.k8s.io/) cluster (the core .NET services still run as host processes via `Start-Octo`). The two infra modes share the same host ports and **cannot run at the same time**. Full runbook: `kubernetes/README.md`; from-scratch setup: `kubernetes/QUICKSTART.md`.
+- `Install-OctoKubernetes` - Create the kind cluster + CRDs + namespaces + in-cluster infra + ingress-nginx/cert-manager, then deploy the operator (idempotent; refuses while the docker-compose infra is up)
+- `Deploy-OctoOperator` - (Re)deploy the Communication Operator standalone from the dev registry (`:main-latest`)
+- `Get-OctoKubernetesStatus` - Show pods, Helm releases, and host-port reachability for the kind cluster
+- `Uninstall-OctoKubernetes` - Delete the kind cluster and its data (also removes the local CA trust unless `-KeepCaTrust`)
+- `Add-OctoLocalCaTrust` / `Remove-OctoLocalCaTrust` - Trust/untrust the local root CA ("OctoMesh Local Dev Root CA") in the OS trust store
+- `Import-OctoImageToKind` - Load a locally-built image into the kind node
+- `Register-OctoCliContext` - Set up the unified octo-cli context for the local environment
 
 ### Repository Management
 - `Sync-AllGitRepos` - Sync all repositories
@@ -53,10 +64,13 @@ All commands require PowerShell and are available after loading the profile:
 - `Invoke-KillDotnet` - Kill all dotnet processes (Windows only)
 - `Remove-GlobalNuGetPackages` - Clean global NuGet cache
 
-### Database Operations
-- `Invoke-MongoBackup` - Backup MongoDB
-- `Invoke-MongoRestore` - Restore MongoDB
-- `Invoke-MongoDeleteOctoMesh` - Delete OctoMesh database
+### Infrastructure Backup (MongoDB + CrateDB)
+Backups operate on the Docker volumes; stop the infrastructure first (`Stop-OctoInfrastructure`). Stored under `infrastructure/backups/`.
+- `Backup-OctoInfrastructure` - Back up all infrastructure volumes (optional `-Name`, defaults to a timestamp)
+- `Restore-OctoInfrastructure` - Restore volumes from a named backup (`-Name`; omit to list backups)
+- `Get-OctoInfrastructureBackup` - List available backups
+- `Remove-OctoInfrastructureBackup` - Delete a named backup (`-Name`, `-Force` to skip prompt)
+- `Invoke-MongoPortForward` - Port-forward MongoDB for direct DB access
 
 ### Authentication
 - `Invoke-OctoCliLoginLocal` - Login to local environment
@@ -68,6 +82,7 @@ All commands require PowerShell and are available after loading the profile:
 
 - `/modules/` - PowerShell modules for all development commands
 - `/infrastructure/` - Docker Compose configuration and MongoDB init scripts
+- `/kubernetes/` - Local kind cluster manifests, Helm values, and the dev-env runbooks (`README.md` / `QUICKSTART.md`)
 - `/assets/` - Terminal profile assets and logos
 
 ## Development Workflow

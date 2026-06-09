@@ -399,5 +399,7 @@ FodyWeavers.xsd
 # JetBrains Rider
 *.sln.iml
 /infrastructure/file.key
+# Per-cluster local root CA exported by Install-OctoKubernetes (regenerated each cluster).
+/infrastructure/local-root-ca.crt
 
 .claude/setting.local.json

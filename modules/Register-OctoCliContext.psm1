@@ -27,6 +27,9 @@ function Register-OctoCliContext {
     .PARAMETER IncludeReporting
         If set, also registers the reporting service URI (-rsu).
 
+    .PARAMETER IncludeAi
+        If set, also registers the AI service URI (-aisu).
+
     .PARAMETER NoSwitch
         If set, skips 'UseContext' so the active context stays unchanged.
 
@@ -44,6 +47,9 @@ function Register-OctoCliContext {
 
     .EXAMPLE
         Register-OctoCliContext -Installation prod-2 -TenantId voest -IncludeReporting
+
+    .EXAMPLE
+        Register-OctoCliContext -Installation local -TenantId meshtest -IncludeAi
     #>
     [CmdletBinding()]
     param(
@@ -58,6 +64,7 @@ function Register-OctoCliContext {
         [string]$UriSuffix = "",
 
         [switch]$IncludeReporting,
+        [switch]$IncludeAi,
         [switch]$NoSwitch,
         [switch]$NoLogin
     )
@@ -73,6 +80,7 @@ function Register-OctoCliContext {
             $bsu = "https://localhost:5009/"
             $csu = "https://localhost:5015/"
             $rsu = "https://localhost:5007/"
+            $aisu = "https://localhost:5019/"
         }
         'test-2' {
             $contextName = "test-2${contextSuffix}_$TenantId"
@@ -81,6 +89,7 @@ function Register-OctoCliContext {
             $bsu = "https://bots$uriExtension.test-2.mm.cloud/"
             $csu = "https://communication$uriExtension.test-2.mm.cloud/"
             $rsu = "https://reporting$uriExtension.test-2.mm.cloud/"
+            $aisu = "https://ai$uriExtension.test-2.mm.cloud/"
         }
         'staging-1' {
             $contextName = "staging-1${contextSuffix}_$TenantId"
@@ -89,6 +98,7 @@ function Register-OctoCliContext {
             $bsu = "https://bots$uriExtension.staging.octo-mesh.com/"
             $csu = "https://communication$uriExtension.staging.octo-mesh.com/"
             $rsu = "https://reporting$uriExtension.staging.octo-mesh.com/"
+            $aisu = "https://ai$uriExtension.staging.octo-mesh.com/"
         }
         'prod-1' {
             $contextName = "prod-1${contextSuffix}_$TenantId"
@@ -97,6 +107,7 @@ function Register-OctoCliContext {
             $bsu = "https://bots$uriExtension.prod-1.octo-mesh.com/"
             $csu = "https://communication$uriExtension.prod-1.octo-mesh.com/"
             $rsu = "https://reporting$uriExtension.prod-1.octo-mesh.com/"
+            $aisu = "https://ai$uriExtension.prod-1.octo-mesh.com/"
         }
         'prod-2' {
             $contextName = "prod-2${contextSuffix}_$TenantId"
@@ -105,6 +116,7 @@ function Register-OctoCliContext {
             $bsu = "https://bots$uriExtension.prod-2.octo-mesh.com/"
             $csu = "https://communication$uriExtension.prod-2.octo-mesh.com/"
             $rsu = "https://reporting$uriExtension.prod-2.octo-mesh.com/"
+            $aisu = "https://ai$uriExtension.prod-2.octo-mesh.com/"
         }
     }
 
@@ -124,6 +136,14 @@ function Register-OctoCliContext {
     }
     else {
         Write-Host "Excluding reporting"
+    }
+
+    if ($IncludeAi) {
+        Write-Host "Including AI"
+        $addArgs += @('-aisu', $aisu)
+    }
+    else {
+        Write-Host "Excluding AI"
     }
 
     Write-Host "Registering context '$contextName' for installation '$Installation' (tenant '$TenantId')"

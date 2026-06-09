@@ -1,0 +1,26 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kind
+# Enable per-registry containerd config (certs.d). Install-OctoKubernetes writes a
+# hosts.toml under /etc/containerd/certs.d/<dev-registry> so the node can pull adapter
+# images from the internal dev registry, whose TLS cert is signed by an internal CA the
+# node would otherwise reject ("x509: certificate signed by unknown authority").
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+    # listenAddress 127.0.0.1 binds the host ports on loopback only (safe default): the infra
+    # and ingress are reachable from this machine but NOT exposed to the LAN. Run
+    # `Install-OctoKubernetes -ExposeLan` to rewrite these to 0.0.0.0 at cluster-create time for
+    # LAN reachability (matching the old docker-compose behaviour) — that exposes
+    # Mongo/Crate/RabbitMQ (dev creds) to the network, so only opt in on a trusted network.
+    extraPortMappings:
+      - { containerPort: 30017, hostPort: 27017, listenAddress: "127.0.0.1", protocol: TCP }  # mongodb
+      - { containerPort: 30672, hostPort: 5672,  listenAddress: "127.0.0.1", protocol: TCP }  # rabbitmq amqp
+      - { containerPort: 31672, hostPort: 15672, listenAddress: "127.0.0.1", protocol: TCP }  # rabbitmq mgmt
+      - { containerPort: 30543, hostPort: 5432,  listenAddress: "127.0.0.1", protocol: TCP }  # cratedb psql
+      - { containerPort: 30420, hostPort: 4301,  listenAddress: "127.0.0.1", protocol: TCP }  # cratedb http
+      - { containerPort: 30080, hostPort: 80,   listenAddress: "127.0.0.1", protocol: TCP }  # ingress-nginx http
+      - { containerPort: 30443, hostPort: 443,  listenAddress: "127.0.0.1", protocol: TCP }  # ingress-nginx https

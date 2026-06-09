@@ -43,6 +43,10 @@ function Global:Invoke-CloneMainRepos {
     Clone-Repo -branch $branch "octo-mesh-adapter"
     Clone-Repo -branch $branch "octo-communication-controller-services"
     Clone-Repo -branch $branch "octo-communication-operator"
+    # Ships the CRDs + Communication Operator Helm charts; required by the local kind
+    # dev env (Install-OctoKubernetes / Deploy-OctoOperator) which read them from
+    # octo-helm-core/src/. Easy to miss because it isn't a .NET service repo.
+    Clone-Repo -branch $branch "octo-helm-core"
     Clone-Repo -branch $branch "octo-frontend-admin-panel"
     Clone-Repo -branch $branch "octo-frontend-libraries"
     Clone-Repo -branch $branch "octo-frontend-refinery-studio"
