@@ -153,6 +153,10 @@ function Invoke-BuildAll {
     Compile-RepoIfExists -branch $branch -name "octo-common-services" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-mesh-adapter" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-bot-services" -configuration $configuration -status $allStatus
+    # octo-communication-controller-services produces Meshmakers.Octo.ConstructionKit.Models.System.Communication,
+    # consumed by octo-ai-services and octo-plug-zenon. Without this explicit slot it falls into the alphabetical
+    # fallback and runs after octo-ai-services (a < c), breaking the AI services restore.
+    Compile-RepoIfExists -branch $branch -name "octo-communication-controller-services" -configuration $configuration -status $allStatus
 
     # Build the rest of the octo repositories
     if ($excludeAdditional -eq $false) {
