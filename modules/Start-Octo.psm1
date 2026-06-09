@@ -62,6 +62,12 @@ This is useful for running services from background agents or CI/CD pipelines.
 .PARAMETER mcpService
 If set to $true, the MCP Service will be started if the octo-mcp-service directory exists locally. If set to $false, it will not be started. Defaults to $true.
 
+.PARAMETER aiService
+If set to $true, the AI Service will be started if the octo-ai-services directory exists locally. If set to $false, it will not be started. Defaults to $true.
+
+.PARAMETER aiWorker
+If set to $true, the standalone AI Worker (Remote agent-worker host, see #4130 Phase B) will be started if the octo-ai-services directory exists locally. Defaults to $false because the AI Service's default Subprocess mode (AiWorker:Mode=Subprocess) spawns the agent CLI directly without this host — only flip this on when you want to exercise the Remote agent-worker path locally.
+
 .EXAMPLE
 Start-Octo -botService $false -identityService $true
 
@@ -103,7 +109,9 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [string]$simulationAdapterTenantId = "meshtest",
         [Parameter()] [string]$simulationAdapterId = "65d5c447b420da3fb12381bc",
         [Parameter()] [Boolean]$nonInteractive = $false,
-        [Parameter()] [Boolean]$mcpService = $true
+        [Parameter()] [Boolean]$mcpService = $true,
+        [Parameter()] [Boolean]$aiService = $true,
+        [Parameter()] [Boolean]$aiWorker = $false
     )
     if ($identityOnly) {
         $botService = $false;
@@ -114,6 +122,8 @@ Use this function to selectively start OctoMesh services based on your requireme
         $dataRefineryStudio = $false;
         $frontendLibraries = $false;
         $mcpService = $false;
+        $aiService = $false;
+        $aiWorker = $false;
     }
     if ($identityAssetRepoOnly) {
         $botService = $false;
@@ -123,6 +133,8 @@ Use this function to selectively start OctoMesh services based on your requireme
         $dataRefineryStudio = $false;
         $frontendLibraries = $false;
         $mcpService = $false;
+        $aiService = $false;
+        $aiWorker = $false;
     }
     
     $logDir = "logFiles"
@@ -181,6 +193,13 @@ Use this function to selectively start OctoMesh services based on your requireme
     # accepts EnableStreamDataAsync calls per tenant; without it the controller throws
     # StreamDataNotEnabledException. Local dev defaults to enabled.
     $env:OCTO_STREAMDATA__ENABLED = "true"
+
+    # AI service at-rest secret encryption — see InstanceSecretEncryptionService. Empty would
+    # work as a soft-fallback (encryption disabled), but token-lease / credential-binding flows
+    # then silently store plaintext. Use a deterministic 32-byte dev key so locally encrypted
+    # data survives restarts and matches across replicas if the user runs the worker too.
+    # Production sets this via OCTO_AIENCRYPTION__INSTANCESECRETKEY in the helm values.
+    $env:OCTO_AIENCRYPTION__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
     $env:OCTO_IDENTITY__IdentityServerLicenseKey = "eyJhbGciOiJQUzI1NiIsImtpZCI6IklkZW50aXR5U2VydmVyTGljZW5zZWtleS83Y2VhZGJiNzgxMzA0NjllODgwNjg5MTAyNTQxNGYxNiIsInR5cCI6ImxpY2Vuc2Urand0In0.eyJpc3MiOiJodHRwczovL2R1ZW5kZXNvZnR3YXJlLmNvbSIsImF1ZCI6IklkZW50aXR5U2VydmVyIiwiaWF0IjoxNzI0Mzk1MTUyLCJleHAiOjE3NTU5MzExNTIsImNvbXBhbnlfbmFtZSI6ImdlcmFsZC5sb2NobmVyQHNhbHpidXJnZGV2LmF0IiwiY29udGFjdF9pbmZvIjoiZ2VyYWxkLmxvY2huZXJAc2FsemJ1cmdkZXYuYXQiLCJlZGl0aW9uIjoiQ29tbXVuaXR5In0.FAmDK4UWFuh83RpqFtVR4lSktDfGVGsow1qjTNyhlkZqUJwFtO7z_d9wmGle1lUbxbB0JtKD6BHxhPlnqMvaj1jOQlSkLoz9T9IV3FrZgvK-09nPJUyt0__fdCbIQPrTE3Wri0OsxNOnOz8be0KWeyuLCZxCPZPLRzpDamjITiiG3mBHS-EFxZnNhLsn7VJwKMsi7efVZ1JOwggqqZbZ49phKQSe7dWFHMs8w3F-lhNURnJIRjZ6JuRSOiYClFFA1rO23dtfGatjQdKwYkSvsPJTDMwBdGip7FcAtiTNi_SBjI2GtOao7VD1rSUOxI5o9-VPzC9wi_V2v7ZGYc7hxQ"
     $env:OCTO_IDENTITY__AutoMapperLicenseKey = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ikx1Y2t5UGVubnlTb2Z0d2FyZUxpY2Vuc2VLZXkvYmJiMTNhY2I1OTkwNGQ4OWI0Y2IxYzg1ZjA4OGNjZjkiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2x1Y2t5cGVubnlzb2Z0d2FyZS5jb20iLCJhdWQiOiJMdWNreVBlbm55U29mdHdhcmUiLCJleHAiOiIxNzg1MTk2ODAwIiwiaWF0IjoiMTc1MzcxMzU3MSIsImFjY291bnRfaWQiOiIwMTk4NTE3OTFmNzY3ZDEwOGMwYjNiYzhjODNlMmY5NSIsImN1c3RvbWVyX2lkIjoiY3RtXzAxazE4cWp4NTJtemtlbW1wcWszZmF5Mnl3Iiwic3ViX2lkIjoiLSIsImVkaXRpb24iOiIwIiwidHlwZSI6IjIifQ.qlbbn1_eEpLhfUIIaVMGHhiKT_FTgR7b9niUJAfZE6MA5jPLAdpzQFKhvAsMTAl8fB2tCXsrsN7lT_OSFSSsmZKY1nLwvQs5GgfyGfG0vGbWQBbQbml27ofnZcTbMVideLqOJ1uZtWkilFjQ5utvt2id4n7zegDSgXbL2uA8Fe7iE1uZdm7rMjx5nFBXSt3694FlljVQ0YcJwIhGM1J-JxoGPfsfhbpSMP3YHbWlRDv2Gt53mir5tSpYLb6ZelFkjz7a4j7Fp0kctbWMI2nPH-XIz3KbExGxRIQ3G4XJ-lHnf9mWrrgoOXmGWQihQPStfpsLIpDy7zqyLJmPbB1M4g"
 
@@ -198,6 +217,8 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "ReportingServices.log"
     Delete-LogFile -branch $branch -file "SimulationAdapter.log"
     Delete-LogFile -branch $branch -file "McpServices.log"
+    Delete-LogFile -branch $branch -file "AiServices.log"
+    Delete-LogFile -branch $branch -file "AiWorker.log"
 
     if ($identityService) {
         Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
@@ -240,6 +261,33 @@ Use this function to selectively start OctoMesh services based on your requireme
             Start-Service -branch $branch -workingDirectory "octo-mcp-service/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "McpServices.log" -cmdArguments @("Meshmakers.Octo.Backend.McpServices.dll", "--urls=https://*:5017;http://*:5016") -jobName "McpServices"
         } else {
             Write-Host "Skipping McpServices (directory not found: $mcpServicePath)" -ForegroundColor Yellow
+        }
+    }
+
+    if ($aiService) {
+        $aiServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-ai-services/bin/$configuration/$publishVersion/")
+        if (Test-Path $aiServicePath) {
+            # Main AI Adapter API + SignalR hub. Phase-1 default has the orchestrator spawn the
+            # agent CLI as a subprocess (AiWorker:Mode=Subprocess), so the standalone AiWorker
+            # below is not required for local end-to-end testing.
+            Start-Service -branch $branch -workingDirectory "octo-ai-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AiServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AiServices.dll", "--urls=https://*:5019;http://*:5018") -jobName "AiServices"
+        } else {
+            Write-Host "Skipping AiServices (directory not found: $aiServicePath)" -ForegroundColor Yellow
+        }
+    }
+
+    if ($aiWorker) {
+        $aiWorkerPath = [System.IO.Path]::Combine($rootPath, $branch, "octo-ai-services/bin/$configuration/$publishVersion/")
+        if (Test-Path $aiWorkerPath) {
+            # Standalone worker host targeted by RemoteAgentWorkerClient (#4130 Phase B). Only
+            # started when explicitly enabled — Subprocess mode in the AI service spawns the
+            # agent CLI in-process and doesn't need this host. To exercise it locally also flip
+            # the AI service to Remote mode:
+            #   $env:OCTO_AIWORKER__MODE = "Remote"
+            #   $env:OCTO_AIWORKER__REMOTEWORKERURL = "http://localhost:5022/internal/worker/run"
+            Start-Service -branch $branch -workingDirectory "octo-ai-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AiWorker.log" -cmdArguments @("Meshmakers.Octo.Backend.AiWorker.dll", "--urls=https://*:5023;http://*:5022") -jobName "AiWorker"
+        } else {
+            Write-Host "Skipping AiWorker (directory not found: $aiWorkerPath)" -ForegroundColor Yellow
         }
     }
 

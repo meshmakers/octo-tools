@@ -1,0 +1,81 @@
+# Local dev values for octo-mesh-communication-operator (central mode).
+# CRDs are installed separately by Install-OctoKubernetes.
+octo-mesh-crds:
+  enabled: false
+
+image:
+  repository: meshmakers/octo-communication-operator
+  # The operator runs the rolling :main-latest tag (CI republishes it on every main
+  # build), so the image content changes under a fixed tag — IfNotPresent would keep
+  # serving the node's stale cached layer and a re-deploy would never pick up a newer
+  # build. Default to Always so every (re)deploy re-pulls. Deploy-OctoOperator drops
+  # this back to IfNotPresent for offline/pre-loaded (-SkipRegistryCheck) deploys.
+  pullPolicy: Always
+  # Pull the operator's own image from the dev registry (where CI pushes the
+  # rolling :main-latest tag), same place the adapter/app images come from.
+  privateRegistry: docker.mm.cloud
+  tag: ""            # set via --set image.tag=... (Install-OctoKubernetes uses main-latest)
+
+operator:
+  autoManagePools: true
+  poolNamespace: octo
+  defaultPoolName: default
+  # Pull adapter / application images from the dev registry (where the multi-arch
+  # images are published) instead of public Docker Hub. The operator projects this
+  # as image.privateRegistry into EVERY deployed workload (operator-wide). NOTE the
+  # image TAG is not projected — set image.tag per adapter (e.g. main-latest) in
+  # Studio, since the chart's default tag is the chart appVersion. Requires the dev
+  # registry to be reachable + pullable from the cluster (anon pull, else add a
+  # docker-registry secret + imagePullSecrets per adapter — the operator's
+  # adapterImagePullSecretName is currently a no-op).
+  imageRegistry: docker.mm.cloud
+  adapterIgnoreCertificateValidation: true
+  communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
+  # Cluster-wide ingress defaults the operator projects into EVERY deployed
+  # workload's ingress — mirrors test-2/staging so the same app deployed to either
+  # cluster gets a cert-manager-issued, trusted cert with no per-app change.
+  # Without this the operator renders a bare `ingress.enabled: true` (no
+  # className / cluster-issuer / tls), so cert-manager issues no cert and
+  # ingress-nginx serves its self-signed "Fake Certificate" — which the local
+  # root CA can never validate.
+  ingress:
+    className: nginx
+    clusterIssuer: mm-cloud-issuer
+    tls: true
+  clusterDependencies:
+    mongodbHost: "mongodb-0.mongodb.octo-infra.svc.cluster.local:27017"
+    mongodbReplicaSet: "rs"
+    rabbitMqHost: "rabbitmq.octo-infra.svc.cluster.local"
+    rabbitMqUser: "guest"
+    streamDataHost: "cratedb.octo-infra.svc.cluster.local"
+    streamDataUser: "octo-system"
+  clusterSecrets:
+    mongodbUserPassword: "OctoUser1"
+    mongodbAdminPassword: "OctoAdmin1"
+    # The local single-node CrateDB runs auth-less, but the octo-mesh-adapter /
+    # octo-eda-adapter charts unconditionally require secrets.streamDataPassword
+    # (no features.streamData gate, unlike octo-plug-simulation). The operator
+    # only injects ClusterSecrets fields that are non-empty, so leaving this blank
+    # makes the chart render fail ("secrets.streamDataPassword must be set"). A
+    # dummy value satisfies the chart; CrateDB ignores it.
+    streamDataPassword: "OctoStream1"
+
+broker:
+  host: "rabbitmq.octo-infra.svc.cluster.local"
+  virtualHost: "/"
+  port: 5672
+  username: "guest"
+  password: "guest"
+
+# The chart's default 128Mi is too tight: the operator forks the helm CLI
+# for every workload deploy, and helm + the .NET host together blow the
+# limit (containerd OOM-kills the pod with exitCode 137, restart loop on
+# every retried workload deploy). 512Mi gives helm + index parsing
+# comfortable headroom on local kind.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi

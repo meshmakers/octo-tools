@@ -1,0 +1,35 @@
+# Local self-signed root CA fronted by a CA ClusterIssuer named exactly as
+# staging (mm-cloud-issuer), so app annotations are identical across envs.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: local-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  # Descriptive CN so it's easy to spot in Keychain Access / the OS trust store.
+  commonName: OctoMesh Local Dev Root CA
+  secretName: local-root-ca-tls
+  duration: 87600h          # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: mm-cloud-issuer
+spec:
+  ca:
+    secretName: local-root-ca-tls

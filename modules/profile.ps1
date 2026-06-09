@@ -3,7 +3,7 @@ $startPath = Get-Location
 $modulePath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $rootPath = Join-Path $modulePath "../../"
 $rootPath = Resolve-Path $rootPath
-$env:PSModulePath += ":$modulePath"
+$env:PSModulePath += "$([System.IO.Path]::PathSeparator)$modulePath"
 $publishVersion = "net10.0"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
@@ -27,6 +27,7 @@ else {
 }
 $toolsPath = Resolve-Path (Join-Path $rootPath "octo-tools/")
 $infrastructurePath = Resolve-Path (Join-Path $toolsPath "infrastructure/")
+$kubernetesPath = Resolve-Path (Join-Path $toolsPath "kubernetes/")
 
 $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
 
@@ -49,6 +50,7 @@ Import-Module "$modulePath/Push-GitRepo.psm1"
 Import-Module "$modulePath/Push-AllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-AiBastion.psm1"
 Import-Module "$modulePath/Install-OctoInfrastructure.psm1"
+Import-Module "$modulePath/Install-OctoKubernetes.psm1"
 Import-Module "$modulePath/Uninstall-OctoInfrastructure.psm1"
 Import-Module "$modulePath/Invoke-BuildAndStartOcto.psm1"
 Import-Module "$modulePath/Invoke-Build.psm1"
@@ -75,6 +77,10 @@ Import-Module "$modulePath/Get-AllGitRepStatus.psm1"
 Import-Module "$modulePath/Invoke-BuildFrontend.psm1"
 Import-Module "$modulePath/Join-KubeConfigs.psm1"
 Import-Module "$modulePath/Remove-KubeConfig.psm1"
+Import-Module "$modulePath/Import-OctoImageToKind.psm1"
+Import-Module "$modulePath/Deploy-OctoOperator.psm1"
+Import-Module "$modulePath/Get-OctoKubernetesStatus.psm1"
+Import-Module "$modulePath/Uninstall-OctoKubernetes.psm1"
 Import-Module "$modulePath/Invoke-OctoCliReconfigureLogLevel.psm1"
 Import-Module "$modulePath/Invoke-CleanAllGitRepos.psm1"
 Import-Module "$modulePath/Invoke-BuildZenonPlug.psm1"
