@@ -84,6 +84,27 @@ kind cluster name; the node container is "{ClusterName}-control-plane". Defaults
     return $null
 }
 
+function Test-OctoNodeResolves {
+<#
+.SYNOPSIS
+Returns $true if the kind node can resolve a DNS name from inside the node.
+
+.DESCRIPTION
+Used as a Deploy-OctoOperator pre-flight. The node's kubelet pulls the operator image
+from the internal dev registry (image.privateRegistry, e.g. docker.mm.cloud), which
+resolves only over Tailscale's split-DNS (mm.cloud -> tailnet). If the node can't
+resolve it the pull ImagePullBackOff's and the rollout sits for the full timeout before
+erroring — so we check first and fail fast with an actionable message. `getent hosts`
+exits 0 only when the name resolves.
+#>
+    param(
+        [Parameter(Mandatory)] [string]$Node,
+        [Parameter(Mandatory)] [string]$Name
+    )
+    $out = (& docker exec $Node getent hosts $Name 2>$null | Out-String)
+    return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($out))
+}
+
 function Deploy-OctoOperator {
     <#
 .SYNOPSIS
@@ -126,7 +147,11 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         [string]$Namespace = "octo-operator-system",
         [string]$ReleaseName = "octo-operator",
         [string]$ImageTag = "main-latest",
-        [string]$ControllerHost = ""
+        [string]$ControllerHost = "",
+        # Skip the pre-flight that verifies the dev registry resolves from the kind
+        # node. Use when the operator image is already on the node (kind load) and you
+        # deploy offline, so an unreachable registry must not block the deploy.
+        [switch]$SkipRegistryCheck
     )
 
     $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
@@ -140,6 +165,41 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
     if (-not (Test-Path $values)) {
         Write-Error "Operator dev values not found at '$values'."
         return
+    }
+
+    # === Pre-flight: fail fast if the operator image can't be pulled. ===
+    # The node's kubelet pulls the operator image from the internal dev registry
+    # (image.privateRegistry in the values), which resolves only over Tailscale's
+    # split-DNS. If the node can't resolve it the pull ImagePullBackOff's and the
+    # rollout waits out the full --timeout (180s) before failing — so check now and
+    # tell the user exactly what to fix. Skipped when privateRegistry is empty
+    # (locally-built images) or via -SkipRegistryCheck (image pre-loaded with kind load).
+    if (-not $SkipRegistryCheck) {
+        $node = "$ClusterName-control-plane"
+        $registry = "docker.mm.cloud"
+        $m = Select-String -Path $values -Pattern '^\s*privateRegistry:\s*(\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($m) { $registry = $m.Matches[0].Groups[1].Value.Trim('"') }
+        if (-not [string]::IsNullOrWhiteSpace($registry)) {
+            $nodeRunning = (& docker inspect -f '{{.State.Running}}' $node 2>$null)
+            if ($nodeRunning -ne 'true') {
+                Write-Error "kind node '$node' is not running. Create the cluster first (Install-OctoKubernetes) before deploying the operator."
+                return
+            }
+            if (-not (Test-OctoNodeResolves -Node $node -Name $registry)) {
+                $msg = @(
+                    "Dev registry '$registry' does not resolve from the kind node '$node'."
+                    "The operator image pull would fail (ImagePullBackOff) and the rollout would time out."
+                    "This registry is internal and resolves only over Tailscale. Fix and retry:"
+                    "  1. Connect Tailscale:            tailscale up    (verify: tailscale ip -4 shows a 100.x address)"
+                    "  2. Confirm the node resolves it: docker exec $node getent hosts $registry"
+                    "  3. Re-run the operator deploy."
+                    "(If the image is already on the node via 'kind load', pass -SkipRegistryCheck.)"
+                ) -join [Environment]::NewLine
+                Write-Error $msg
+                return
+            }
+            Write-Host "Pre-flight OK: dev registry '$registry' resolves from the kind node." -ForegroundColor DarkGray
+        }
     }
 
     # === Vendor the chart's sub-chart dependencies (e.g. octo-mesh-crds). ===

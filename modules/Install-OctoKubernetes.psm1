@@ -80,6 +80,10 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # (docker.mm.cloud) at the rolling :main-latest tag — same place adapter/app images
         # come from. Pass -SkipOperator to skip it.
         [Parameter()] [switch]$SkipOperator,
+        # Skip the upfront check that the dev registry is reachable, and the matching
+        # node-level check in Deploy-OctoOperator. Use when images are pre-loaded
+        # (kind load) so an unreachable registry must not block the install.
+        [Parameter()] [switch]$SkipRegistryCheck,
         # Internal dev container registry the node should be able to pull adapter images
         # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
         # configure containerd to skip verification for it. Pass "" to skip this.
@@ -115,15 +119,31 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         return
     }
 
-    $PSStyle.Progress.View = "Classic"
-    Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Checking kind cluster' -PercentComplete 0
+    # === Prerequisite: fail fast BEFORE building anything if the dev registry isn't
+    # reachable. The operator (and later every adapter/app) image is pulled from it, so
+    # otherwise we stand up the whole cluster and only hit ImagePullBackOff at the
+    # operator step. A TCP probe works the same whether the registry is reached over the
+    # office network or remotely (Tailscale) — we don't care how the name resolves, only
+    # that it does. Re-checked from the kind node in Deploy-OctoOperator once it exists. ===
+    if (-not $SkipRegistryCheck -and -not $SkipOperator -and -not [string]::IsNullOrWhiteSpace($DevRegistry)) {
+        Write-Host "Checking dev registry '$DevRegistry' is reachable..." -ForegroundColor Green
+        if (-not (Test-Connection -TargetName $DevRegistry -TcpPort 443 -Quiet -TimeoutSeconds 5)) {
+            Write-Error (@(
+                "Dev registry '$DevRegistry' is not reachable on port 443, so cluster images can't be pulled."
+                "Aborting before building the cluster (the operator step would otherwise fail with ImagePullBackOff)."
+                "If you're off the office network, connect Tailscale ('tailscale up') and re-run."
+                "(Pass -SkipRegistryCheck to bypass, e.g. images pre-loaded with 'kind load'; or -SkipOperator to set up only the cluster.)"
+            ) -join [Environment]::NewLine)
+            return
+        }
+        Write-Host "Prerequisite OK: dev registry '$DevRegistry' is reachable." -ForegroundColor DarkGray
+    }
 
     $existingClusters = (& kind get clusters 2>$null) -split "`n" | Where-Object { $_ -ne "" }
     if ($existingClusters -contains $ClusterName) {
         Write-Host "kind cluster '$ClusterName' already exists, leaving it untouched" -ForegroundColor Yellow
     }
     else {
-        Write-Progress -Activity 'Install Octo Kubernetes' -Status "Creating kind cluster '$ClusterName'" -PercentComplete 25
         $kindConfig = Join-Path $kubernetesPath "kind-cluster.yaml"
         if (!(Test-Path $kindConfig)) {
             Write-Error "kind config not found at $kindConfig"
@@ -138,7 +158,6 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
     }
 
     if (-not [string]::IsNullOrWhiteSpace($DevRegistry)) {
-        Write-Progress -Activity 'Install Octo Kubernetes' -Status "Configuring dev registry '$DevRegistry'" -PercentComplete 45
         Write-Host "Configuring containerd to pull from dev registry '$DevRegistry' (skip TLS verify)" -ForegroundColor Green
         $node = "$ClusterName-control-plane"
         # config_path is normally set by kind-cluster.yaml (containerdConfigPatches). Add it
@@ -163,7 +182,6 @@ server = "https://$DevRegistry"
         Remove-Item $tmpToml -ErrorAction SilentlyContinue
     }
 
-    Write-Progress -Activity 'Install Octo Kubernetes' -Status "Installing $CrdReleaseName Helm chart" -PercentComplete 60
     Write-Host "Installing/upgrading Helm release '$CrdReleaseName' in namespace '$CrdNamespace' from $crdChartPath" -ForegroundColor Green
     & helm upgrade --install $CrdReleaseName $crdChartPath `
         --kube-context "kind-$ClusterName" `
@@ -174,7 +192,6 @@ server = "https://$DevRegistry"
         return
     }
 
-    Write-Progress -Activity 'Install Octo Kubernetes' -Status "Applying namespaces" -PercentComplete 85
     $k8sDir = $kubernetesPath
     Write-Host "Applying namespaces" -ForegroundColor Green
     & kubectl --context "kind-$ClusterName" apply -f (Join-Path $k8sDir "namespaces.yaml")
@@ -231,8 +248,6 @@ server = "https://$DevRegistry"
 
     if (-not $SkipIngress) {
         $ctx = "kind-$ClusterName"
-        Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Installing ingress-nginx + cert-manager' -PercentComplete 92
-
         & helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>$null | Out-Null
         & helm repo add jetstack https://charts.jetstack.io 2>$null | Out-Null
         & helm repo update ingress-nginx jetstack | Out-Null
@@ -272,12 +287,9 @@ server = "https://$DevRegistry"
     }
 
     if (-not $SkipOperator) {
-        Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Deploying Communication Operator' -PercentComplete 96
         Write-Host "Deploying Communication Operator (dev registry, :main-latest)" -ForegroundColor Green
-        Deploy-OctoOperator -branch $branch -ClusterName $ClusterName
+        Deploy-OctoOperator -branch $branch -ClusterName $ClusterName -SkipRegistryCheck:$SkipRegistryCheck
     }
-
-    Write-Progress -Activity 'Install Octo Kubernetes' -Status 'Complete' -PercentComplete 100
 
     $currentContext = (& kubectl config current-context).Trim()
     Write-Host ""
