@@ -40,7 +40,9 @@ function Update-MeshmakerVersion {
                 $pattern = '(<MeshmakerVersion>)[^<]*(</MeshmakerVersion>)'
                 
                 if ($content -match $pattern) {
-                    $newContent = $content -replace $pattern, "`$1$Version`$2"
+                    # Use ${1}/${2} (explicit delimiters) so the regex engine doesn't read $1
+                    # followed by a digit version like 4.1.37 as a single backreference $14.
+                    $newContent = $content -replace $pattern, "`${1}$Version`${2}"
                     Set-Content -Path $buildPropsPath -Value $newContent -NoNewline
                     Write-Host "  ✓ Updated MeshmakerVersion to $Version" -ForegroundColor Green
                     $updatedCount++
