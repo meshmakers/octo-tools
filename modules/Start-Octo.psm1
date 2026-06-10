@@ -194,12 +194,18 @@ Use this function to selectively start OctoMesh services based on your requireme
     # StreamDataNotEnabledException. Local dev defaults to enabled.
     $env:OCTO_STREAMDATA__ENABLED = "true"
 
-    # AI service at-rest secret encryption — see InstanceSecretEncryptionService. Empty would
-    # work as a soft-fallback (encryption disabled), but token-lease / credential-binding flows
-    # then silently store plaintext. Use a deterministic 32-byte dev key so locally encrypted
-    # data survives restarts and matches across replicas if the user runs the worker too.
-    # Production sets this via OCTO_AIENCRYPTION__INSTANCESECRETKEY in the helm values.
+    # At-rest secret encryption — shared dev key across services so cross-replica
+    # round-trips work (M1 operational unification, see octo-ai-services
+    # docs/concepts/implementation-m1.md §3.5). The same byte value feeds both
+    # OCTO_AIENCRYPTION__INSTANCESECRETKEY (binds to AiEncryptionOptions, consumed
+    # by the AI Adapter's InstanceSecretEncryptionService) and
+    # OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY (binds to
+    # CommunicationControllerOptions, consumed by WorkloadEncryptionService). Both
+    # services delegate the actual crypto to Meshmakers.Octo.Sdk.Common.Encryption.
+    # InstanceSecretCrypto. Production sets the same byte value via the Helm
+    # global.instanceSecretKey materialised into both env vars.
     $env:OCTO_AIENCRYPTION__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
+    $env:OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
     $env:OCTO_IDENTITY__IdentityServerLicenseKey = "eyJhbGciOiJQUzI1NiIsImtpZCI6IklkZW50aXR5U2VydmVyTGljZW5zZWtleS83Y2VhZGJiNzgxMzA0NjllODgwNjg5MTAyNTQxNGYxNiIsInR5cCI6ImxpY2Vuc2Urand0In0.eyJpc3MiOiJodHRwczovL2R1ZW5kZXNvZnR3YXJlLmNvbSIsImF1ZCI6IklkZW50aXR5U2VydmVyIiwiaWF0IjoxNzI0Mzk1MTUyLCJleHAiOjE3NTU5MzExNTIsImNvbXBhbnlfbmFtZSI6ImdlcmFsZC5sb2NobmVyQHNhbHpidXJnZGV2LmF0IiwiY29udGFjdF9pbmZvIjoiZ2VyYWxkLmxvY2huZXJAc2FsemJ1cmdkZXYuYXQiLCJlZGl0aW9uIjoiQ29tbXVuaXR5In0.FAmDK4UWFuh83RpqFtVR4lSktDfGVGsow1qjTNyhlkZqUJwFtO7z_d9wmGle1lUbxbB0JtKD6BHxhPlnqMvaj1jOQlSkLoz9T9IV3FrZgvK-09nPJUyt0__fdCbIQPrTE3Wri0OsxNOnOz8be0KWeyuLCZxCPZPLRzpDamjITiiG3mBHS-EFxZnNhLsn7VJwKMsi7efVZ1JOwggqqZbZ49phKQSe7dWFHMs8w3F-lhNURnJIRjZ6JuRSOiYClFFA1rO23dtfGatjQdKwYkSvsPJTDMwBdGip7FcAtiTNi_SBjI2GtOao7VD1rSUOxI5o9-VPzC9wi_V2v7ZGYc7hxQ"
     $env:OCTO_IDENTITY__AutoMapperLicenseKey = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ikx1Y2t5UGVubnlTb2Z0d2FyZUxpY2Vuc2VLZXkvYmJiMTNhY2I1OTkwNGQ4OWI0Y2IxYzg1ZjA4OGNjZjkiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2x1Y2t5cGVubnlzb2Z0d2FyZS5jb20iLCJhdWQiOiJMdWNreVBlbm55U29mdHdhcmUiLCJleHAiOiIxNzg1MTk2ODAwIiwiaWF0IjoiMTc1MzcxMzU3MSIsImFjY291bnRfaWQiOiIwMTk4NTE3OTFmNzY3ZDEwOGMwYjNiYzhjODNlMmY5NSIsImN1c3RvbWVyX2lkIjoiY3RtXzAxazE4cWp4NTJtemtlbW1wcWszZmF5Mnl3Iiwic3ViX2lkIjoiLSIsImVkaXRpb24iOiIwIiwidHlwZSI6IjIifQ.qlbbn1_eEpLhfUIIaVMGHhiKT_FTgR7b9niUJAfZE6MA5jPLAdpzQFKhvAsMTAl8fB2tCXsrsN7lT_OSFSSsmZKY1nLwvQs5GgfyGfG0vGbWQBbQbml27ofnZcTbMVideLqOJ1uZtWkilFjQ5utvt2id4n7zegDSgXbL2uA8Fe7iE1uZdm7rMjx5nFBXSt3694FlljVQ0YcJwIhGM1J-JxoGPfsfhbpSMP3YHbWlRDv2Gt53mir5tSpYLb6ZelFkjz7a4j7Fp0kctbWMI2nPH-XIz3KbExGxRIQ3G4XJ-lHnf9mWrrgoOXmGWQihQPStfpsLIpDy7zqyLJmPbB1M4g"
 
