@@ -35,6 +35,11 @@ function Global:Invoke-CloneMainRepos {
     Clone-Repo -branch $branch "octo-construction-kit-engine-mongodb"
     Clone-Repo -branch $branch "octo-sdk"
     Clone-Repo -branch $branch "octo-common-services"
+    # Phase 3 of the YAML migration: adapter/pipeline framework lives here, carved
+    # out of octo-sdk (Sdk.Common/Adapters + EtlDataPipeline + Services + the
+    # Plug.Simulation / SimulationNodes / CommunicationAdapter / Common.Web projects).
+    # Depends on octo-sdk via Meshmakers.Octo.Sdk.Common / .ServiceClient packages.
+    Clone-Repo -branch $branch "octo-communication-sdk"
     Clone-Repo -branch $branch "octo-construction-kit"
     Clone-Repo -branch $branch "octo-cli"
     Clone-Repo -branch $branch "octo-identity-services"
