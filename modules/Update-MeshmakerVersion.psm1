@@ -40,7 +40,7 @@ function Update-MeshmakerVersion {
                 $pattern = '(<MeshmakerVersion>)[^<]*(</MeshmakerVersion>)'
                 
                 if ($content -match $pattern) {
-                    $newContent = $content -replace $pattern, "`$1$Version`$2"
+                    $newContent = $content -replace $pattern, "`${1}$Version`${2}"
                     Set-Content -Path $buildPropsPath -Value $newContent -NoNewline
                     Write-Host "  ✓ Updated MeshmakerVersion to $Version" -ForegroundColor Green
                     $updatedCount++
