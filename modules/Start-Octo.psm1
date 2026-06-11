@@ -227,25 +227,25 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "AiWorker.log"
 
     if ($identityService) {
-        Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://*:5003;http://*:5002") -jobName "IdentityServices"
+        Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://0.0.0.0:5003;http://0.0.0.0:5002") -jobName "IdentityServices"
     }
     if ($assetRepoService) {
-        Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://*:5000;https://*:5001") -jobName "AssetRepositoryServices"
+        Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://0.0.0.0:5000;https://0.0.0.0:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://*:5020;http://*:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
+        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
     }
     if ($botService) {
-        Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://*:5009;http://*:5008") -jobName "BotServices"
+        Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://0.0.0.0:5009;http://0.0.0.0:5008") -jobName "BotServices"
     }
     if ($communicationControllerService) {
-        Start-Service -branch $branch -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://*:5015;http://*:5014") -jobName "CommunicationControllerServices"
+        Start-Service -branch $branch -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://0.0.0.0:5015;http://0.0.0.0:5014") -jobName "CommunicationControllerServices"
     }
     if ($adminPanel) {
-        Start-Service -branch $branch -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://*:5005;http://*:5004") -jobName "AdminPanel" -aspnetEnvironment "Staging"
+        Start-Service -branch $branch -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://0.0.0.0:5005;http://0.0.0.0:5004") -jobName "AdminPanel" -aspnetEnvironment "Staging"
     }
     if ($reportingService) {
-        Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://*:5007;http://*:5006") -jobName "ReportingServices"
+        Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://0.0.0.0:5007;http://0.0.0.0:5006") -jobName "ReportingServices"
     }
     if ($simulationAdapter) {
         Write-Host "Starting SimulationAdapter (branch $( if ([string]::IsNullOrEmpty($branch)) { 'default' } else { $branch } )) -> TenantId=$simulationAdapterTenantId, AdapterId=$simulationAdapterId" -ForegroundColor Green
@@ -264,7 +264,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     if ($mcpService) {
         $mcpServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-mcp-service/bin/$configuration/$publishVersion/")
         if (Test-Path $mcpServicePath) {
-            Start-Service -branch $branch -workingDirectory "octo-mcp-service/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "McpServices.log" -cmdArguments @("Meshmakers.Octo.Backend.McpServices.dll", "--urls=https://*:5017;http://*:5016") -jobName "McpServices"
+            Start-Service -branch $branch -workingDirectory "octo-mcp-service/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "McpServices.log" -cmdArguments @("Meshmakers.Octo.Backend.McpServices.dll", "--urls=https://0.0.0.0:5017;http://0.0.0.0:5016") -jobName "McpServices"
         } else {
             Write-Host "Skipping McpServices (directory not found: $mcpServicePath)" -ForegroundColor Yellow
         }
@@ -276,7 +276,7 @@ Use this function to selectively start OctoMesh services based on your requireme
             # Main AI Adapter API + SignalR hub. Phase-1 default has the orchestrator spawn the
             # agent CLI as a subprocess (AiWorker:Mode=Subprocess), so the standalone AiWorker
             # below is not required for local end-to-end testing.
-            Start-Service -branch $branch -workingDirectory "octo-ai-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AiServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AiServices.dll", "--urls=https://*:5019;http://*:5018") -jobName "AiServices"
+            Start-Service -branch $branch -workingDirectory "octo-ai-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AiServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AiServices.dll", "--urls=https://0.0.0.0:5019;http://0.0.0.0:5018") -jobName "AiServices"
         } else {
             Write-Host "Skipping AiServices (directory not found: $aiServicePath)" -ForegroundColor Yellow
         }
@@ -291,7 +291,7 @@ Use this function to selectively start OctoMesh services based on your requireme
             # the AI service to Remote mode:
             #   $env:OCTO_AIWORKER__MODE = "Remote"
             #   $env:OCTO_AIWORKER__REMOTEWORKERURL = "http://localhost:5022/internal/worker/run"
-            Start-Service -branch $branch -workingDirectory "octo-ai-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AiWorker.log" -cmdArguments @("Meshmakers.Octo.Backend.AiWorker.dll", "--urls=https://*:5023;http://*:5022") -jobName "AiWorker"
+            Start-Service -branch $branch -workingDirectory "octo-ai-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AiWorker.log" -cmdArguments @("Meshmakers.Octo.Backend.AiWorker.dll", "--urls=https://0.0.0.0:5023;http://0.0.0.0:5022") -jobName "AiWorker"
         } else {
             Write-Host "Skipping AiWorker (directory not found: $aiWorkerPath)" -ForegroundColor Yellow
         }
