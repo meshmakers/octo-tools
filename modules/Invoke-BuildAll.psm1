@@ -151,6 +151,11 @@ function Invoke-BuildAll {
     Compile-RepoIfExists -branch $branch -name "octo-sdk" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-construction-kit-engine-mongodb" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-common-services" -configuration $configuration -status $allStatus
+    # Phase 3: octo-communication-sdk holds the adapter/pipeline framework (formerly
+    # Sdk.Common/Adapters + EtlDataPipeline + Services in octo-sdk). Depends on
+    # octo-sdk so builds AFTER it; needs to build BEFORE octo-mesh-adapter and the
+    # other 8 adapter consumer repos so they can restore the new packages.
+    Compile-RepoIfExists -branch $branch -name "octo-communication-sdk" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-mesh-adapter" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-bot-services" -configuration $configuration -status $allStatus
     # octo-communication-controller-services produces Meshmakers.Octo.ConstructionKit.Models.System.Communication,
