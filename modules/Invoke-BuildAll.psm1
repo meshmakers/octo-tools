@@ -15,8 +15,12 @@ function Compile-Repo {
         return $LASTEXITCODE -eq 0
     }
 
-    # Check if a solution file exists
-    $solutionFiles = Get-ChildItem -Path $path -Filter "*.sln"
+    # Check if a solution file exists. Match both the legacy .sln and the modern
+    # XML .slnx format (dotnet 8+) — octo-communication-sdk uses the latter, and
+    # a .sln-only filter was silently skipping the whole repo (return $true with
+    # no build), so dependent repos (mesh-adapter etc.) tried to restore against
+    # an absent Sdk.Adapters / Sdk.Pipeline package in ../nuget/.
+    $solutionFiles = @(Get-ChildItem -Path $path -File | Where-Object { $_.Extension -in '.sln','.slnx' })
     if ($solutionFiles.Count -eq 0) {
         Write-Host "No solution file found in directory $( $path )" -ForegroundColor Yellow
         return $true;
@@ -151,6 +155,11 @@ function Invoke-BuildAll {
     Compile-RepoIfExists -branch $branch -name "octo-sdk" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-construction-kit-engine-mongodb" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-common-services" -configuration $configuration -status $allStatus
+    # Phase 3: octo-communication-sdk holds the adapter/pipeline framework (formerly
+    # Sdk.Common/Adapters + EtlDataPipeline + Services in octo-sdk). Depends on
+    # octo-sdk so builds AFTER it; needs to build BEFORE octo-mesh-adapter and the
+    # other 8 adapter consumer repos so they can restore the new packages.
+    Compile-RepoIfExists -branch $branch -name "octo-communication-sdk" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-mesh-adapter" -configuration $configuration -status $allStatus
     Compile-RepoIfExists -branch $branch -name "octo-bot-services" -configuration $configuration -status $allStatus
     # octo-communication-controller-services produces Meshmakers.Octo.ConstructionKit.Models.System.Communication,
