@@ -40,9 +40,9 @@ function Update-MeshmakerVersion {
                 $pattern = '(<MeshmakerVersion>)[^<]*(</MeshmakerVersion>)'
                 
                 if ($content -match $pattern) {
-                    # Single-quoted '${1}'/'${2}' keep the group references literal; the explicit
-                    # delimiters stop the engine reading $1 + a digit version (4.1.37) as $14.
-                    $newContent = $content -replace $pattern, ('${1}' + $Version + '${2}')
+                    # Scriptblock replacement inserts $Version as a plain string, so neither a
+                    # leading digit ($14) nor a literal $ in the version is parsed as a backreference.
+                    $newContent = $content -replace $pattern, { $_.Groups[1].Value + $Version + $_.Groups[2].Value }
                     Set-Content -Path $buildPropsPath -Value $newContent -NoNewline
                     Write-Host "  ✓ Updated MeshmakerVersion to $Version" -ForegroundColor Green
                     $updatedCount++
