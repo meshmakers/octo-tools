@@ -24,8 +24,8 @@ If set to $true, the mesh adapter will be started. If set to $false, it will not
 .PARAMETER communicationControllerService
 If set to $true, the Communication Controller Service will be started. If set to $false, it will not be started.
 
-.PARAMETER adminPanel
-If set to $true, the Admin Panel will be started. If set to $false, it will not be started.
+.PARAMETER platformServices
+If set to $true, the Platform Services (tenant-scoped `_configuration` discovery endpoint that replaced the legacy admin-panel host) will be started. If set to $false, it will not be started.
 
 .PARAMETER dataRefineryStudio
 If set to $true, the Data Refinery Studio will be started. If set to $false, it will not be started.
@@ -97,7 +97,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$assetRepoService = $true,
         [Parameter()] [Boolean]$meshAdapter = $true,
         [Parameter()] [Boolean]$communicationControllerService = $true,
-        [Parameter()] [Boolean]$adminPanel = $true,
+        [Parameter()] [Boolean]$platformServices = $true,
         [Parameter()] [Boolean]$dataRefineryStudio = $true,
         [Parameter()] [Boolean]$frontendLibraries = $true,
         [Parameter()] [Boolean]$identityOnly = $false,
@@ -118,7 +118,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         $assetRepoService = $false;
         $meshAdapter = $false;
         $communicationControllerService = $false;
-        $adminPanel = $false;
+        $platformServices = $false;
         $dataRefineryStudio = $false;
         $frontendLibraries = $false;
         $mcpService = $false;
@@ -129,7 +129,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         $botService = $false;
         $meshAdapter = $false;
         $communicationControllerService = $false;
-        $adminPanel = $false;
+        $platformServices = $false;
         $dataRefineryStudio = $false;
         $frontendLibraries = $false;
         $mcpService = $false;
@@ -219,7 +219,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "MeshAdapter.log"
     Delete-LogFile -branch $branch -file "CommunicationControllerServices.log"
     Delete-LogFile -branch $branch -file "BotServices.log"
-    Delete-LogFile -branch $branch -file "AdminPanel.log"
+    Delete-LogFile -branch $branch -file "PlatformServices.log"
     Delete-LogFile -branch $branch -file "ReportingServices.log"
     Delete-LogFile -branch $branch -file "SimulationAdapter.log"
     Delete-LogFile -branch $branch -file "McpServices.log"
@@ -241,8 +241,8 @@ Use this function to selectively start OctoMesh services based on your requireme
     if ($communicationControllerService) {
         Start-Service -branch $branch -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://0.0.0.0:5015;http://0.0.0.0:5014") -jobName "CommunicationControllerServices"
     }
-    if ($adminPanel) {
-        Start-Service -branch $branch -workingDirectory "octo-frontend-admin-panel/bin/$configuration/AdminPanel/$publishVersion/publish/" -cmd "dotnet" -logname "AdminPanel.log" -cmdArguments @("Meshmakers.Octo.Backend.AdminPanel.dll", "--urls=https://0.0.0.0:5005;http://0.0.0.0:5004") -jobName "AdminPanel" -aspnetEnvironment "Staging"
+    if ($platformServices) {
+        Start-Service -branch $branch -workingDirectory "octo-platform-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "PlatformServices.log" -cmdArguments @("Meshmakers.Octo.Backend.PlatformServices.dll", "--urls=https://0.0.0.0:5025;http://0.0.0.0:5024") -jobName "PlatformServices"
     }
     if ($reportingService) {
         Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://0.0.0.0:5007;http://0.0.0.0:5006") -jobName "ReportingServices"
