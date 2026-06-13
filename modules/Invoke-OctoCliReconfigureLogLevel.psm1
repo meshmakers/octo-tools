@@ -13,7 +13,7 @@ function Invoke-OctoCliReconfigureLogLevel
     octo-cli -c ReconfigureLogLevel -n "AssetRepository" -loggerName "*" -minL $minLogLevel -maxL $maxLogLevel
     octo-cli -c ReconfigureLogLevel -n "Bot" -loggerName "*" -minL $minLogLevel -maxL $maxLogLevel
     octo-cli -c ReconfigureLogLevel -n "CommunicationController" -loggerName "*" -minL $minLogLevel -maxL $maxLogLevel
-    octo-cli -c ReconfigureLogLevel -n "AdminPanel" -loggerName "*" -minL $minLogLevel -maxL $maxLogLevel
+    octo-cli -c ReconfigureLogLevel -n "PlatformServices" -loggerName "*" -minL $minLogLevel -maxL $maxLogLevel
 }
 
 Export-ModuleMember -Function @('Invoke-OctoCliReconfigureLogLevel')
