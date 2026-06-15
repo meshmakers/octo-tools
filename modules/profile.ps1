@@ -33,7 +33,14 @@ $globalNugetPackagesPath = Join-Path $usersFolderPath ".nuget/packages/"
 
 $Global:WantPromt = $true
 
+# extend path variable here so that the tools are available in the current session, and also in any child processes
 $env:PATH += "$pathSep$toolsPath"
+
+# Environment Variables for Semaphore and Vault
+$env:SEMAPHORE_URL                       = 'https://semaphore.mm.cloud'
+$env:SEMAPHORE_BREAKGLASS_PROJECT_ID     = '1'
+$env:SEMAPHORE_BREAKGLASS_TEMPLATE_ID    = '125'
+$env:VAULT_ADDR                          = 'https://vault.mm.cloud'
 
 function Test-SubPath( [string]$directory, [string]$subpath ) {
     $dPath = [IO.Path]::GetFullPath( $directory )
@@ -78,6 +85,7 @@ Import-Module "$modulePath/Get-AllGitRepStatus.psm1"
 Import-Module "$modulePath/Invoke-BuildFrontend.psm1"
 Import-Module "$modulePath/Join-KubeConfigs.psm1"
 Import-Module "$modulePath/Remove-KubeConfig.psm1"
+Import-Module "$modulePath/Request-BreakGlassKubeConfig.psm1"
 Import-Module "$modulePath/Import-OctoImageToKind.psm1"
 Import-Module "$modulePath/Deploy-OctoOperator.psm1"
 Import-Module "$modulePath/Get-OctoKubernetesStatus.psm1"
