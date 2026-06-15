@@ -78,6 +78,13 @@ Backups operate on the Docker volumes; stop the infrastructure first (`Stop-Octo
 - `Invoke-OctoCliLoginStaging` - Login to staging
 - `Invoke-OctoCliLoginTest2` - Login to test2 environment
 
+### Cluster Access (Rancher / Break-Glass)
+Two paths for Kubernetes access to managed clusters (test-2, staging-1, prod-1, prod-2, infra, local):
+- `Get-RancherKubeConfig -Cluster <name>` - Routine read-only access. Fetches a kubeconfig via the Rancher v3 API using your personal `RANCHER_API_TOKEN` and merges it into `~/.kube/config`. The resulting kubeconfig inherits whatever permissions the token user has — for AD users this is the read-only role set (no secrets, no exec, no write). Requires `RANCHER_URL` (set in `profile.ps1`) and `RANCHER_API_TOKEN` (set in the private profile, format `token-xxxxx:secret`, created in Rancher UI -> Account & API Keys).
+- `Request-BreakGlassKubeConfig -Cluster <name> -Reason "..." -DurationHours <1-4>` - Write access for incidents. Triggers a Semaphore playbook that provisions a short-lived `cluster-admin` ServiceAccount token via Vault response-wrapping, with audit entries in Semaphore, Vault, K8s audit log, and the `ops-breakglass` Teams channel. Used for incident response only; the token TTL closes the window automatically and an hourly cleanup reaps the SA/CRB. Full runbook in `meshmakers-infrastructure/docs/BREAK-GLASS-ACCESS.md`.
+
+No persistent `cluster-owner` is bound to any AD group on the managed clusters — write access must always go through the break-glass flow.
+
 ## Project Structure
 
 - `/modules/` - PowerShell modules for all development commands
