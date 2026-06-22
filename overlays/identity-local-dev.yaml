@@ -1,0 +1,50 @@
+# AB#4209 Step 4 — local-dev URI overlay for blueprint-managed Identity clients.
+#
+# Apply via:   Apply-IdentityOverlay -OverlayFile octo-tools/overlays/identity-local-dev.yaml
+# Auto-applied by Start-Octo after Identity health-check (Step 4 wiring — separate change).
+#
+# Behaviour: every URI in this file is appended to the matching RtClient's URI lists
+# with Source = "overlay:local-dev". Duplicates against any existing entry (any source)
+# are silently skipped. The overlay entries survive blueprint re-apply via the Step 2
+# preservation pass (DefaultConfigurationCreatorService Capture/Restore) and are filtered
+# out of `DumpTenant --clean` exports so they never pollute shared seed material.
+#
+# Ports are hardcoded against the Start-Octo allocation (see octo-tools/modules/Start-Octo.psm1
+# and octo-platform-services/CLAUDE.md port table). Refinery Studio (4200) runs via its own
+# `npm start` in octo-frontend-refinery-studio — not Start-Octo. Identity / MCP swagger
+# UIs run on the same ports as the host services (5003 / 5017).
+#
+# Source of truth: octo-platform-services/docs/concepts/phase-3-followup-identity-local-dev-overlay.md §4.2
+
+overlayName: local-dev
+
+clients:
+  # Refinery Studio SPA — Angular ng-serve default port.
+  - clientId: octo-data-refinery-studio
+    redirectUris:
+      - http://localhost:4200/auth-callback
+      - http://localhost:4200/silent-renew
+    postLogoutRedirectUris:
+      - http://localhost:4200/
+    allowedCorsOrigins:
+      - http://localhost:4200
+
+  # OctoTool / octo-cli — device-code flow on localhost.
+  - clientId: octo-cli
+    redirectUris:
+      - http://localhost:5000/callback
+
+  # Identity Service Swagger UI — note the upstream typo "idenityServices" in the ClientId,
+  # preserved here to match the seed data exactly (the dedup compares ClientId verbatim).
+  - clientId: octo-idenityServices-swagger
+    redirectUris:
+      - https://localhost:5003/swagger/oauth2-redirect.html
+    allowedCorsOrigins:
+      - https://localhost:5003
+
+  # MCP Service Swagger UI — port matches McpServices = 5017 in Start-Octo.
+  - clientId: octo-mcpServices-swagger
+    redirectUris:
+      - https://localhost:5017/swagger/oauth2-redirect.html
+    allowedCorsOrigins:
+      - https://localhost:5017
