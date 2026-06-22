@@ -78,6 +78,9 @@ Backups operate on the Docker volumes; stop the infrastructure first (`Stop-Octo
 - `Invoke-OctoCliLoginStaging` - Login to staging
 - `Invoke-OctoCliLoginTest2` - Login to test2 environment
 
+### Identity Overlays (AB#4209 Step 4)
+- `Apply-IdentityOverlay` - Fans `octo-cli -c ApplyClientOverlay` across the blueprint-managed clients listed in an overlay YAML file (default: `overlays/identity-local-dev.yaml`). Idempotent — re-running on the same DB is a no-op (server dedupes against existing URIs). Per-client log lines show Added/SkippedDuplicate counts. Add `-DryRun` to print the invocations without calling out. Uses the active octo-cli context (login first with `Invoke-OctoCliLoginLocal` or similar). Standalone today; Start-Octo wiring (`-SkipOverlay` opt-out) lands in a follow-up. Concept: `octo-platform-services/docs/concepts/phase-3-followup-identity-local-dev-overlay.md` §4.3.
+
 ### Cluster Access (Rancher / Break-Glass)
 Two paths for Kubernetes access to managed clusters (test-2, staging-1, prod-1, prod-2, infra, local):
 - `Get-RancherKubeConfig -Cluster <name>` - Routine read-only access. Fetches a kubeconfig via the Rancher v3 API using your personal `RANCHER_API_TOKEN` and merges it into `~/.kube/config`. The resulting kubeconfig inherits whatever permissions the token user has — for AD users this is the read-only role set (no secrets, no exec, no write). Requires `RANCHER_URL` (set in `profile.ps1`) and `RANCHER_API_TOKEN` (set in the private profile, format `token-xxxxx:secret`, created in Rancher UI -> Account & API Keys).
