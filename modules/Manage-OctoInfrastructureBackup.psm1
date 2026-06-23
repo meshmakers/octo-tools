@@ -55,7 +55,8 @@ function Get-FriendlySize {
 
 function Backup-OctoInfrastructure {
     param(
-        [string]$Name
+        [string]$Name,
+        [switch]$Json
     )
 
     if (!(Test-Path $infrastructurePath)) {
@@ -84,27 +85,50 @@ function Backup-OctoInfrastructure {
 
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
-    Write-Host "Backing up infrastructure volumes (project: $projectName) -> $Name"
-    Write-Host ""
+    if (-not $Json) {
+        Write-Host "Backing up infrastructure volumes (project: $projectName) -> $Name"
+        Write-Host ""
+    }
 
+    $volumeResults = [System.Collections.Generic.List[object]]::new()
     $failed = $false
     foreach ($short in $script:VolumeShortNames) {
         $vol = Resolve-DockerVolume -ProjectName $projectName -ShortName $short
         if ($null -eq $vol) {
-            Write-Host "  SKIP  $short  (volume ${projectName}_${short} not found)" -ForegroundColor Yellow
+            if (-not $Json) {
+                Write-Host "  SKIP  $short  (volume ${projectName}_${short} not found)" -ForegroundColor Yellow
+            }
+            $volumeResults.Add([ordered]@{ volume = $short; status = 'SKIP' }) | Out-Null
             continue
         }
 
-        Write-Host -NoNewline ("{0,-20} ... " -f "  $short")
+        if (-not $Json) {
+            Write-Host -NoNewline ("{0,-20} ... " -f "  $short")
+        }
         docker run --rm -v "${vol}:/source:ro" -v "${dest}:/backup" alpine tar cf "/backup/${short}.tar" -C /source . 2>$null
         if ($LASTEXITCODE -eq 0) {
             $fileInfo = Get-Item (Join-Path $dest "${short}.tar")
             $size = Get-FriendlySize -Bytes $fileInfo.Length
-            Write-Host "OK ($size)" -ForegroundColor Green
+            if (-not $Json) {
+                Write-Host "OK ($size)" -ForegroundColor Green
+            }
+            $volumeResults.Add([ordered]@{ volume = $short; status = 'OK'; sizeBytes = [long]$fileInfo.Length }) | Out-Null
         } else {
-            Write-Host "FAILED" -ForegroundColor Red
+            if (-not $Json) {
+                Write-Host "FAILED" -ForegroundColor Red
+            }
+            $volumeResults.Add([ordered]@{ volume = $short; status = 'FAILED' }) | Out-Null
             $failed = $true
         }
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Backup-OctoInfrastructure' -Data ([ordered]@{
+            name    = $Name
+            success = [bool](-not $failed)
+            volumes = @($volumeResults)
+        })
+        return
     }
 
     Write-Host ""
@@ -117,7 +141,8 @@ function Backup-OctoInfrastructure {
 
 function Restore-OctoInfrastructure {
     param(
-        [string]$Name
+        [string]$Name,
+        [switch]$Json
     )
 
     if (!(Test-Path $infrastructurePath)) {
@@ -147,28 +172,51 @@ function Restore-OctoInfrastructure {
         return
     }
 
-    Write-Host "Restoring infrastructure volumes (project: $projectName) <- $Name"
-    Write-Host ""
+    if (-not $Json) {
+        Write-Host "Restoring infrastructure volumes (project: $projectName) <- $Name"
+        Write-Host ""
+    }
 
+    $volumeResults = [System.Collections.Generic.List[object]]::new()
     $failed = $false
     foreach ($short in $script:VolumeShortNames) {
         $archive = Join-Path $src "${short}.tar"
         if (!(Test-Path $archive)) {
-            Write-Host "  SKIP  $short  (no archive in backup)" -ForegroundColor Yellow
+            if (-not $Json) {
+                Write-Host "  SKIP  $short  (no archive in backup)" -ForegroundColor Yellow
+            }
+            $volumeResults.Add([ordered]@{ volume = $short; status = 'SKIP' }) | Out-Null
             continue
         }
 
         $vol = "${projectName}_${short}"
         docker volume create $vol 2>$null | Out-Null
 
-        Write-Host -NoNewline ("{0,-20} ... " -f "  $short")
+        if (-not $Json) {
+            Write-Host -NoNewline ("{0,-20} ... " -f "  $short")
+        }
         docker run --rm -v "${vol}:/target" -v "${src}:/backup:ro" alpine sh -c "rm -rf /target/* /target/..?* /target/.[!.]* 2>/dev/null; tar xf /backup/${short}.tar -C /target"
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "OK" -ForegroundColor Green
+            if (-not $Json) {
+                Write-Host "OK" -ForegroundColor Green
+            }
+            $volumeResults.Add([ordered]@{ volume = $short; status = 'OK' }) | Out-Null
         } else {
-            Write-Host "FAILED" -ForegroundColor Red
+            if (-not $Json) {
+                Write-Host "FAILED" -ForegroundColor Red
+            }
+            $volumeResults.Add([ordered]@{ volume = $short; status = 'FAILED' }) | Out-Null
             $failed = $true
         }
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Restore-OctoInfrastructure' -Data ([ordered]@{
+            name    = $Name
+            success = [bool](-not $failed)
+            volumes = @($volumeResults)
+        })
+        return
     }
 
     Write-Host ""
@@ -182,6 +230,10 @@ function Restore-OctoInfrastructure {
 }
 
 function Get-OctoInfrastructureBackup {
+    param(
+        [switch]$Json
+    )
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return
@@ -190,30 +242,54 @@ function Get-OctoInfrastructureBackup {
     $backupRoot = Join-Path $infrastructurePath "backups"
 
     if (!(Test-Path $backupRoot)) {
+        if ($Json) {
+            Write-OctoJson -Command 'Get-OctoInfrastructureBackup' -Data @()
+            return
+        }
         Write-Host "(no backups yet)"
         return
     }
 
     $dirs = Get-ChildItem -Path $backupRoot -Directory
     if ($dirs.Count -eq 0) {
+        if ($Json) {
+            Write-OctoJson -Command 'Get-OctoInfrastructureBackup' -Data @()
+            return
+        }
         Write-Host "(no backups yet)"
         return
     }
 
+    $results = [System.Collections.Generic.List[object]]::new()
     foreach ($dir in $dirs) {
         $archives = Get-ChildItem -Path $dir.FullName -File | Where-Object { $_.Extension -eq '.tar' -or $_.Extension -eq '.gz' }
         $count = ($archives | Measure-Object).Count
         $totalBytes = ($archives | Measure-Object -Property Length -Sum).Sum
         if ($null -eq $totalBytes) { $totalBytes = 0 }
         $totalSize = Get-FriendlySize -Bytes $totalBytes
-        Write-Host "  $($dir.Name)   ($count volumes, $totalSize)"
+        if ($Json) {
+            $results.Add([ordered]@{
+                name         = $dir.Name
+                volumeCount  = [int]$count
+                sizeBytes    = [long]$totalBytes
+                sizeFriendly = $totalSize
+            }) | Out-Null
+        } else {
+            Write-Host "  $($dir.Name)   ($count volumes, $totalSize)"
+        }
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Get-OctoInfrastructureBackup' -Data @($results)
+        return
     }
 }
 
 function Remove-OctoInfrastructureBackup {
     param(
         [string]$Name,
-        [switch]$Force
+        [switch]$Force,
+        [switch]$Json
     )
 
     if (!(Test-Path $infrastructurePath)) {
@@ -240,6 +316,11 @@ function Remove-OctoInfrastructureBackup {
     if ($null -eq $totalBytes) { $totalBytes = 0 }
     $totalSize = Get-FriendlySize -Bytes $totalBytes
 
+    if ($Json -and -not $Force) {
+        Write-OctoJson -Command 'Remove-OctoInfrastructureBackup' -Data (New-OctoActionResult -Success $false -Extra @{ message = 'Refusing to prompt in -Json mode; pass -Force' })
+        return
+    }
+
     if (!$Force) {
         $answer = Read-Host "Delete backup '$Name' ($totalSize)? [y/N]"
         if ($answer -notmatch '^[Yy]$') {
@@ -249,6 +330,12 @@ function Remove-OctoInfrastructureBackup {
     }
 
     Remove-Item -Path $target -Recurse -Force
+
+    if ($Json) {
+        Write-OctoJson -Command 'Remove-OctoInfrastructureBackup' -Data (New-OctoActionResult -Success $true -Extra @{ name = $Name })
+        return
+    }
+
     Write-Host "Deleted."
 }
 

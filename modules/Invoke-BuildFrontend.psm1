@@ -13,7 +13,9 @@ function Remove-DirectoryForced {
     
     if (Test-RimrafAvailable) {
         Write-Host "Using rimraf to delete $Path"
-        & rimraf $Path -I
+        # Pipe stdout to Out-Null so rimraf chatter can never leak onto the success stream
+        # (e.g. when Invoke-BuildFrontend runs with -Json).
+        & rimraf $Path -I | Out-Null
     }
     else {
         Write-Host "Using Remove-Item to delete $Path"
@@ -24,12 +26,15 @@ function Remove-DirectoryForced {
 function Invoke-BuildFrontend {
 
     param(
-        [string]$configuration = "Release")
+        [string]$configuration = "Release",
+        [switch]$Json)
     $npmVersion = npm --version
     $nodeVersion = node --version
-    
-    Write-Host "npm version: $npmVersion"
-    Write-Host "node version: $nodeVersion"
+
+    if (-not $Json) {
+        Write-Host "npm version: $npmVersion"
+        Write-Host "node version: $nodeVersion"
+    }
     
     $frontendAdminPanelRootPath = Join-Path $rootPath "octo-frontend-admin-panel"
     $frontendLibrariesPath = Join-Path $rootPath "octo-frontend-admin-panel\src\octo-frontend-libraries\src\FrontendLibraries\ClientApp"
@@ -60,10 +65,17 @@ function Invoke-BuildFrontend {
         Remove-Item -Path $frontendAdminPanelPackagesLockPath -Force
     }
     
-    Write-Host "Publishing adminpanel..."
+    if (-not $Json) {
+        Write-Host "Publishing adminpanel..."
+    }
     Push-Location -Path $frontendAdminPanelRootPath
     Invoke-Publish -configuration $configuration
     Pop-Location
-    
+
+    if ($Json) {
+        $exitCode = $Global:LASTEXITCODE
+        Write-OctoJson -Command 'Invoke-BuildFrontend' -Data (New-OctoActionResult -Success ($exitCode -eq 0) -ExitCode $exitCode)
+        return
+    }
 }
 Export-ModuleMember -Function @('Invoke-BuildFrontend')

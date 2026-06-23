@@ -75,7 +75,8 @@ function Invoke-BuildAll {
         [string]$configuration = "Release",
         [string]$branch = "",
         [Boolean]$excludeAdditional = $false,
-        [Boolean]$excludeFrontend = $false
+        [Boolean]$excludeFrontend = $false,
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -90,12 +91,16 @@ function Invoke-BuildAll {
     if ($branch -ne "") {
         $rootLeaf = Split-Path -Leaf ([IO.Path]::GetFullPath($rootPath))
         if ($rootLeaf -ieq $branch) {
-            Write-Host "Branch '$branch' already matches root leaf — using root path directly" -ForegroundColor DarkGray
+            if (-not $Json) {
+                Write-Host "Branch '$branch' already matches root leaf — using root path directly" -ForegroundColor DarkGray
+            }
             $branch = ""
         }
     }
 
-    Write-Host "Building all repositories in branch $branch with configuration $configuration" -ForegroundColor Green
+    if (-not $Json) {
+        Write-Host "Building all repositories in branch $branch with configuration $configuration" -ForegroundColor Green
+    }
 
     # kill all dotnet processes. this is necessary to avoid file locks.
     Invoke-KillDotnet
@@ -191,6 +196,30 @@ function Invoke-BuildAll {
     # Calculate percentage of successful builds
     $successfulBuilds = $allStatus.Values | Where-Object { $_.Success -eq $true }
     $percentageSuccessful = ($successfulBuilds.Count / $repositoryCount) * 100
+
+    if ($Json) {
+        $repoEntries = @(foreach ($key in $allStatus.Keys) {
+            [ordered]@{
+                repo            = $key
+                success         = [bool]$allStatus[$key].Success
+                durationSeconds = $allStatus[$key].Duration.TotalSeconds
+            }
+        })
+        $data = @{
+            branch        = $branch
+            configuration = $configuration
+            repositories  = $repoEntries
+            summary       = [ordered]@{
+                total             = $repositoryCount
+                succeeded         = $successfulBuilds.Count
+                failed            = $repositoryCount - $successfulBuilds.Count
+                percentSuccessful = $percentageSuccessful
+                elapsedSeconds    = $stopWatch.Elapsed.TotalSeconds
+            }
+        }
+        Write-OctoJson -Command 'Invoke-BuildAll' -Data $data
+        return
+    }
 
     Write-Host "Summary:"
     Write-Host "---------------------------------"

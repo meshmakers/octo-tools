@@ -97,7 +97,10 @@ function Request-BreakGlassKubeConfig {
         [int]$PollIntervalSeconds = 3,
 
         [Parameter()]
-        [int]$TimeoutSeconds = 180
+        [int]$TimeoutSeconds = 180,
+
+        [Parameter()]
+        [switch]$Json
     )
 
     if (-not $SemaphoreUrl)        { throw "SEMAPHORE_URL not set (env var or -SemaphoreUrl). See docs/BREAK-GLASS-ACCESS.md." }
@@ -272,6 +275,19 @@ Hint: 400 with 'wrapping token is not valid or does not exist' = already consume
     }
     finally {
         Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Json) {
+        # Emit only non-sensitive fields — never the wrap token or the kubeconfig itself.
+        Write-OctoJson -Command 'Request-BreakGlassKubeConfig' -Data ([ordered]@{
+            cluster       = $Cluster
+            context       = $contextName
+            expiresAt     = $expiresAt
+            durationHours = $DurationHours
+            taskId        = $taskId
+            kubeFile      = $kubeFile
+        })
+        return
     }
 
     Write-Host ""

@@ -479,7 +479,8 @@ function Compare-Pipelines {
         [string]$LocalPipelineDir = "./deployment/maco-deployment/data/pipelines",
         [string]$ExportDir = "./temp/pipeline-export",
         [string]$PipelineFile = "",
-        [switch]$KeepExports
+        [switch]$KeepExports,
+        [switch]$Json
     )
 
     # Track results
@@ -592,54 +593,60 @@ function Compare-Pipelines {
     }
 
     # Phase 4: Display summary
-    Write-Host ""
-    Write-Host "Pipeline Comparison Summary" -ForegroundColor Cyan
-    Write-Host "===========================" -ForegroundColor Cyan
-    Write-Host "Total files:    $($pipelineFiles.Count)"
-    Write-Host "Identical:      $($results.Identical.Count) " -NoNewline
-    Write-Host ([char]0x2713) -ForegroundColor Green
-    Write-Host "Modified:       $($results.Modified.Count) " -NoNewline
-    if ($results.Modified.Count -gt 0) { Write-Host ([char]0x26A0) -ForegroundColor Yellow } else { Write-Host "" }
-    Write-Host "Missing:        $($results.MissingInTenant.Count) " -NoNewline
-    if ($results.MissingInTenant.Count -gt 0) { Write-Host ([char]0x26A0) -ForegroundColor Yellow } else { Write-Host "" }
-    Write-Host "Errors:         $($results.Errors.Count) " -NoNewline
-    if ($results.Errors.Count -gt 0) { Write-Host ([char]0x2717) -ForegroundColor Red } else { Write-Host "" }
-
-    if ($results.Modified.Count -gt 0) {
+    if (-not $Json) {
         Write-Host ""
-        Write-Host "Modified files:" -ForegroundColor Yellow
-        foreach ($f in $results.Modified) {
-            Write-Host "  - $f" -ForegroundColor Yellow
+        Write-Host "Pipeline Comparison Summary" -ForegroundColor Cyan
+        Write-Host "===========================" -ForegroundColor Cyan
+        Write-Host "Total files:    $($pipelineFiles.Count)"
+        Write-Host "Identical:      $($results.Identical.Count) " -NoNewline
+        Write-Host ([char]0x2713) -ForegroundColor Green
+        Write-Host "Modified:       $($results.Modified.Count) " -NoNewline
+        if ($results.Modified.Count -gt 0) { Write-Host ([char]0x26A0) -ForegroundColor Yellow } else { Write-Host "" }
+        Write-Host "Missing:        $($results.MissingInTenant.Count) " -NoNewline
+        if ($results.MissingInTenant.Count -gt 0) { Write-Host ([char]0x26A0) -ForegroundColor Yellow } else { Write-Host "" }
+        Write-Host "Errors:         $($results.Errors.Count) " -NoNewline
+        if ($results.Errors.Count -gt 0) { Write-Host ([char]0x2717) -ForegroundColor Red } else { Write-Host "" }
+
+        if ($results.Modified.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Modified files:" -ForegroundColor Yellow
+            foreach ($f in $results.Modified) {
+                Write-Host "  - $f" -ForegroundColor Yellow
+            }
         }
-    }
 
-    if ($results.MissingInTenant.Count -gt 0) {
-        Write-Host ""
-        Write-Host "Missing in tenant:" -ForegroundColor Yellow
-        foreach ($f in $results.MissingInTenant) {
-            Write-Host "  - $f" -ForegroundColor Yellow
+        if ($results.MissingInTenant.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Missing in tenant:" -ForegroundColor Yellow
+            foreach ($f in $results.MissingInTenant) {
+                Write-Host "  - $f" -ForegroundColor Yellow
+            }
         }
-    }
 
-    if ($results.Errors.Count -gt 0) {
-        Write-Host ""
-        Write-Host "Files with errors:" -ForegroundColor Red
-        foreach ($f in $results.Errors) {
-            Write-Host "  - $f" -ForegroundColor Red
+        if ($results.Errors.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Files with errors:" -ForegroundColor Red
+            foreach ($f in $results.Errors) {
+                Write-Host "  - $f" -ForegroundColor Red
+            }
         }
     }
 
     # Phase 5: Cleanup
     if (-not $KeepExports) {
-        Write-Host ""
-        Write-Host "Cleaning up temporary files..." -ForegroundColor Gray
+        if (-not $Json) {
+            Write-Host ""
+            Write-Host "Cleaning up temporary files..." -ForegroundColor Gray
+        }
         if (Test-Path $ExportDir) {
             Remove-Item $ExportDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
     else {
-        Write-Host ""
-        Write-Host "Temporary files preserved in: $ExportDir" -ForegroundColor Gray
+        if (-not $Json) {
+            Write-Host ""
+            Write-Host "Temporary files preserved in: $ExportDir" -ForegroundColor Gray
+        }
     }
 
     # Phase 6: Determine exit code
@@ -652,6 +659,24 @@ function Compare-Pipelines {
     }
     elseif ($results.Errors.Count -gt 0) {
         $exitCode = 3
+    }
+
+    if ($Json) {
+        $payload = [ordered]@{
+            identical       = @($results.Identical)
+            modified        = @($results.Modified)
+            missingInTenant = @($results.MissingInTenant)
+            errors          = @($results.Errors)
+            counts          = [ordered]@{
+                identical       = $results.Identical.Count
+                modified        = $results.Modified.Count
+                missingInTenant = $results.MissingInTenant.Count
+                errors          = $results.Errors.Count
+            }
+        }
+        Write-OctoJson -Command 'Compare-Pipelines' -Data $payload
+        $global:LASTEXITCODE = $exitCode
+        return
     }
 
     Write-Host ""

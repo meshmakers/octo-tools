@@ -11,7 +11,10 @@ function Invoke-SwitchAllBranches {
         [switch]$Push = $false,
 
         [Parameter()]
-        [switch]$IncludeSubmodules = $false
+        [switch]$IncludeSubmodules = $false,
+
+        [Parameter()]
+        [switch]$Json
     )
 
     # Import the Find-AllGitRepos module if not already loaded
@@ -21,20 +24,39 @@ function Invoke-SwitchAllBranches {
     }
 
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
-    Write-Host "Switching all repositories in '$branchRootPath' to branch: $Name" -ForegroundColor Cyan
-    if ($IncludeSubmodules) {
-        Write-Host "Including submodules in branch switching" -ForegroundColor Cyan
+    if (-not $Json) {
+        Write-Host "Switching all repositories in '$branchRootPath' to branch: $Name" -ForegroundColor Cyan
+        if ($IncludeSubmodules) {
+            Write-Host "Including submodules in branch switching" -ForegroundColor Cyan
+        }
     }
 
     # Get all git repositories
     $repos = Find-AllGitRepos -branch $branch -IncludeSubmodules:$IncludeSubmodules
-    
+
     if ($repos.Count -eq 0) {
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-SwitchAllBranches' -Data ([ordered]@{
+                created  = @()
+                existed  = @()
+                skipped  = @()
+                errors   = @()
+                counts   = [ordered]@{
+                    created = 0
+                    existed = 0
+                    skipped = 0
+                    errors  = 0
+                }
+            })
+            return
+        }
         Write-Warning "No Git repositories found"
         return
     }
-    
-    Write-Host "Found $($repos.Count) repositories" -ForegroundColor Green
+
+    if (-not $Json) {
+        Write-Host "Found $($repos.Count) repositories" -ForegroundColor Green
+    }
     
     $branchesCreated = @()
     $branchesExisted = @()
@@ -42,7 +64,9 @@ function Invoke-SwitchAllBranches {
     $errors = @()
     
     foreach ($repo in $repos) {
-        Write-Host "`nProcessing: $repo" -ForegroundColor Yellow
+        if (-not $Json) {
+            Write-Host "`nProcessing: $repo" -ForegroundColor Yellow
+        }
         
         try {
             Push-Location $repo
@@ -202,6 +226,28 @@ function Invoke-SwitchAllBranches {
         }
     }
     
+    if ($Json) {
+        $errorsJson = @($errors | ForEach-Object {
+            [ordered]@{
+                repository = $_.Repository
+                error      = $_.Error
+            }
+        })
+        Write-OctoJson -Command 'Invoke-SwitchAllBranches' -Data ([ordered]@{
+            created  = @($branchesCreated)
+            existed  = @($branchesExisted)
+            skipped  = @($branchesSkipped)
+            errors   = $errorsJson
+            counts   = [ordered]@{
+                created = $branchesCreated.Count
+                existed = $branchesExisted.Count
+                skipped = $branchesSkipped.Count
+                errors  = $errors.Count
+            }
+        })
+        return
+    }
+
     # Summary
     Write-Host "`n========== Summary ==========" -ForegroundColor Cyan
     Write-Host "Total repositories processed: $($repos.Count)" -ForegroundColor White

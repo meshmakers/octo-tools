@@ -26,7 +26,9 @@ function Get-BranchAvailability {
         [Parameter(Mandatory = $true)]
         [string]$targetBranch,
 
-        [switch]$Fetch
+        [switch]$Fetch,
+
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -78,6 +80,18 @@ function Get-BranchAvailability {
         finally {
             Pop-Location
         }
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Get-BranchAvailability' -Data ([ordered]@{
+            branch       = $targetBranch
+            available    = @($found)
+            missing      = @($notFound)
+            total        = $directories.Count
+            foundCount   = $found.Count
+            missingCount = $notFound.Count
+        })
+        return
     }
 
     # Output results

@@ -217,7 +217,9 @@ function Compare-CkVersions {
         [Parameter(Position = 1)]
         [string]$Branch = '',
 
-        [switch]$Details
+        [switch]$Details,
+
+        [switch]$Json
     )
 
     $rootPath = $Global:ROOTPATH
@@ -239,19 +241,23 @@ function Compare-CkVersions {
     $subjectName = Split-Path -Leaf $subjectRoot
     $otherName = Split-Path -Leaf $otherRoot
 
-    Write-Host ''
-    Write-Host 'Construction Kit Version Comparison' -ForegroundColor Cyan
-    Write-Host '===================================' -ForegroundColor Cyan
-    Write-Host ("  left  : {0}  ({1})" -f $subjectName, $subjectRoot) -ForegroundColor Gray
-    Write-Host ("  right : {0}  ({1})" -f $otherName, $otherRoot) -ForegroundColor Gray
-    Write-Host ''
+    if (-not $Json) {
+        Write-Host ''
+        Write-Host 'Construction Kit Version Comparison' -ForegroundColor Cyan
+        Write-Host '===================================' -ForegroundColor Cyan
+        Write-Host ("  left  : {0}  ({1})" -f $subjectName, $subjectRoot) -ForegroundColor Gray
+        Write-Host ("  right : {0}  ({1})" -f $otherName, $otherRoot) -ForegroundColor Gray
+        Write-Host ''
+    }
 
     $subjectMap = Get-CkModelMap -Root $subjectRoot
     $otherMap = Get-CkModelMap -Root $otherRoot
 
     $allNames = @($subjectMap.Keys) + @($otherMap.Keys) | Sort-Object -Unique
     if ($allNames.Count -eq 0) {
-        Write-Host 'No ckModel.yaml files found in either branch.' -ForegroundColor Yellow
+        if (-not $Json) {
+            Write-Host 'No ckModel.yaml files found in either branch.' -ForegroundColor Yellow
+        }
         return
     }
 
@@ -292,6 +298,53 @@ function Compare-CkVersions {
             State    = $state
             IsSystem = $name -like 'System*'
         }
+    }
+
+    if ($Json) {
+        $infoToJson = {
+            param($info)
+            if ($null -eq $info) { return $null }
+            return [ordered]@{
+                version    = $info.Version
+                major      = $info.Major
+                minor      = $info.Minor
+                patch      = $info.Patch
+                hasVersion = [bool]$info.HasVersion
+                file       = $info.File
+            }
+        }
+
+        $jsonRows = @(foreach ($r in $rows) {
+                [ordered]@{
+                    name     = $r.Name
+                    state    = $r.State
+                    isSystem = [bool]$r.IsSystem
+                    left     = (& $infoToJson $r.Left)
+                    right    = (& $infoToJson $r.Right)
+                }
+            })
+
+        $equal = @($rows | Where-Object { $_.State -eq 'Equal' }).Count
+        $minor = @($rows | Where-Object { $_.State -eq 'Minor' }).Count
+        $major = @($rows | Where-Object { $_.State -eq 'Major' }).Count
+        $only = @($rows | Where-Object { $_.State -in 'OnlyLeft', 'OnlyRight' }).Count
+
+        $data = [ordered]@{
+            left    = @{ name = $subjectName; path = $subjectRoot }
+            right   = @{ name = $otherName; path = $otherRoot }
+            rows    = $jsonRows
+            summary = [ordered]@{
+                total     = $rows.Count
+                equal     = $equal
+                minor     = $minor
+                major     = $major
+                onlyInOne = $only
+            }
+        }
+
+        Write-OctoJson -Command 'Compare-CkVersions' -Data $data
+        $global:LASTEXITCODE = $minor + $major + $only
+        return
     }
 
     # Column widths over all rows for aligned output.

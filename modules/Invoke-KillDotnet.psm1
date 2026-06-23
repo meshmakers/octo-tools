@@ -10,16 +10,35 @@
 
 #>
 function Invoke-KillDotnet {
+    param(
+        [switch]$Json
+    )
+
     #we only do this on windows; linux does not seem to lock files.
     if ($IsWindows -eq $false) {
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-KillDotnet' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{ killedCount = 0; skipped = $true })
+            return
+        }
         return
     }
 
-    Write-Host "Shutdown the dotnet build server" -ForegroundColor Yellow
+    if (-not $Json) {
+        Write-Host "Shutdown the dotnet build server" -ForegroundColor Yellow
+    }
     dotnet build-server shutdown
 
-    Write-Host "Kill all dotnet processes" -ForegroundColor Yellow
-    Get-process | Where-Object { $_.Name -eq "dotnet" } | Stop-Process -Force
+    if (-not $Json) {
+        Write-Host "Kill all dotnet processes" -ForegroundColor Yellow
+    }
+    $dotnetProcesses = @(Get-process | Where-Object { $_.Name -eq "dotnet" })
+    $dotnetProcesses | Stop-Process -Force
+    $killedCount = $dotnetProcesses.Count
+
+    if ($Json) {
+        Write-OctoJson -Command 'Invoke-KillDotnet' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{ killedCount = $killedCount })
+        return
+    }
 }
 
 Export-ModuleMember -Function @('Invoke-KillDotnet')

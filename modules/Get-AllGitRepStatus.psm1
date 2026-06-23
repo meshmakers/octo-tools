@@ -2,7 +2,9 @@ function Get-AllGitRepStatus {
     param(
         [string]$branch = "",
         # Skip the network fetch and compare against last-known refs only (instant, offline).
-        [switch]$NoFetch
+        [switch]$NoFetch,
+        # Emit the per-repo status as a single JSON document instead of the colored table.
+        [switch]$Json
     )
 
     # The status line uses Unicode glyphs (arrows / check mark). macOS, Linux and pwsh 7
@@ -11,6 +13,10 @@ function Get-AllGitRepStatus {
     if ([Console]::OutputEncoding.WebName -ne 'utf-8') {
         try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch { }
     }
+
+    # Accumulates one record per repo/submodule for -Json output. The recursive helper below mutates
+    # this shared list (List[T].Add returns void, so it never leaks onto the success stream).
+    $repoRecords = [System.Collections.Generic.List[object]]::new()
 
     function Check-GitStatusRecursively($path, $indentLevel = 0) {
         Push-Location $path
@@ -96,15 +102,35 @@ function Get-AllGitRepStatus {
             $syncField = "$([char]0x2713) up to date"
         }
 
-        $statusField = "[$status]".PadRight(10)
-        $repoField = $repoName.PadRight(60 - $indent.Length)
-        $branchField = "($branchName)".PadRight(40)
+        # Build the structured record regardless of render mode (so -Json gets the same data).
+        $dirtyFiles = @()
+        if ($status -eq "Dirty" -and $statusOutput) {
+            $dirtyFiles = @($statusOutput | ForEach-Object { $_.Trim() })
+        }
+        $repoRecords.Add([pscustomobject]@{
+            repo           = $repoName
+            branch         = $branchName
+            status         = $status
+            behindUpstream = if ($null -ne $behindUpstream) { [int]$behindUpstream } else { $null }
+            aheadUpstream  = if ($null -ne $aheadUpstream) { [int]$aheadUpstream } else { $null }
+            behindMain     = [int]$behindMain
+            hasUpstream    = [bool]$hasUpstream
+            outOfSync      = [bool]$outOfSync
+            isSubmodule    = $indentLevel -gt 0
+            dirtyFiles     = $dirtyFiles
+        })
 
-        Write-Host "$statusField $indent$repoField$branchField $syncField" -ForegroundColor $color
+        if (-not $Json) {
+            $statusField = "[$status]".PadRight(10)
+            $repoField = $repoName.PadRight(60 - $indent.Length)
+            $branchField = "($branchName)".PadRight(40)
 
-        if ($status -eq "Dirty") {
-            $statusOutput | ForEach-Object {
-                Write-Host "$indent`t$_" -ForegroundColor DarkGray
+            Write-Host "$statusField $indent$repoField$branchField $syncField" -ForegroundColor $color
+
+            if ($status -eq "Dirty") {
+                $statusOutput | ForEach-Object {
+                    Write-Host "$indent`t$_" -ForegroundColor DarkGray
+                }
             }
         }
 
@@ -177,7 +203,12 @@ function Get-AllGitRepStatus {
 
     foreach ($directory in $gitRepos) {
         Check-GitStatusRecursively -path $directory.FullName
-        Write-Host ""
+        if (-not $Json) { Write-Host "" }
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Get-AllGitRepStatus' -Data @($repoRecords)
+        return
     }
 }
 

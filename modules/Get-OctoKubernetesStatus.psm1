@@ -19,12 +19,51 @@ function Test-HostPortOpen([string]$hostName, [int]$port) {
 
 function Get-OctoKubernetesStatus {
     param(
-        [Parameter()] [string]$ClusterName = "kind"
+        [Parameter()] [string]$ClusterName = "kind",
+        [switch]$Json
     )
     $ctx = "kind-$ClusterName"
 
     if (-not ((& kind get clusters 2>$null) -split "`n" | Where-Object { $_ -eq $ClusterName })) {
+        if ($Json) {
+            Write-OctoJson -Command 'Get-OctoKubernetesStatus' -Data @{ clusterExists = $false }
+            return
+        }
         Write-Host "kind cluster '$ClusterName' does not exist." -ForegroundColor Yellow
+        return
+    }
+
+    if ($Json) {
+        $podsByNs = [ordered]@{}
+        foreach ($ns in @("octo-infra", "octo-operator-system", "octo")) {
+            $podJson = & kubectl --context $ctx -n $ns get pods -o json 2>$null
+            if ($LASTEXITCODE -eq 0 -and $podJson) {
+                $parsed = $podJson | ConvertFrom-Json
+                $podsByNs[$ns] = @($parsed.items)
+            }
+            else {
+                $podsByNs[$ns] = @()
+            }
+        }
+
+        $helmReleases = @()
+        $helmJson = & helm --kube-context $ctx list -A -o json 2>$null
+        if ($LASTEXITCODE -eq 0 -and $helmJson) {
+            $helmReleases = @($helmJson | ConvertFrom-Json)
+        }
+
+        $ports = @()
+        foreach ($p in @(@{n="mongodb";port=27017}, @{n="rabbitmq-amqp";port=5672}, @{n="rabbitmq-mgmt";port=15672}, @{n="cratedb-psql";port=5432}, @{n="cratedb-http";port=4301})) {
+            $ports += @{ name = $p.n; port = $p.port; open = [bool](Test-HostPortOpen "localhost" $p.port) }
+        }
+
+        $data = [ordered]@{
+            clusterExists = $true
+            pods          = $podsByNs
+            helmReleases  = $helmReleases
+            ports         = $ports
+        }
+        Write-OctoJson -Command 'Get-OctoKubernetesStatus' -Data $data
         return
     }
 

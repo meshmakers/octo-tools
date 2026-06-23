@@ -11,6 +11,7 @@ function Invoke-CleanupInfraContainerDisks {
     .EXAMPLE
         Invoke-CleanupInfraContainerDisks
     #>
+    param([switch]$Json)
 
     # Collection for pods that need cleanup
     $cleanupCandidates = @()
@@ -62,14 +63,16 @@ function Invoke-CleanupInfraContainerDisks {
         }
 
         if ([string]::IsNullOrWhiteSpace($podOutput)) {
-            Write-Host "`n$label ($namespace): No pods found" -ForegroundColor Yellow
+            if (-not $Json) { Write-Host "`n$label ($namespace): No pods found" -ForegroundColor Yellow }
             continue
         }
 
         $pods = $podOutput -split ' ' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
-        Write-Host "`n$label ($namespace):" -ForegroundColor Cyan
-        Write-Host ("=" * 60)
+        if (-not $Json) {
+            Write-Host "`n$label ($namespace):" -ForegroundColor Cyan
+            Write-Host ("=" * 60)
+        }
 
         foreach ($pod in $pods) {
             # Determine mounts based on namespace and pod name
@@ -88,19 +91,19 @@ function Invoke-CleanupInfraContainerDisks {
                     $mounts = @('/var/baget')
                 }
                 else {
-                    Write-Host "$pod : Unknown registry type, skipping" -ForegroundColor Gray
+                    if (-not $Json) { Write-Host "$pod : Unknown registry type, skipping" -ForegroundColor Gray }
                     continue
                 }
             }
 
-            Write-Host "`n  $pod" -ForegroundColor White
+            if (-not $Json) { Write-Host "`n  $pod" -ForegroundColor White }
 
             foreach ($mount in $mounts) {
                 # Get df -h output for this mount
                 $dfOutput = kubectl exec -n $namespace $pod -- df -h $mount 2>$null
 
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Host "    $mount : Unable to check disk usage" -ForegroundColor Gray
+                    if (-not $Json) { Write-Host "    $mount : Unable to check disk usage" -ForegroundColor Gray }
                     continue
                 }
 
@@ -121,7 +124,7 @@ function Invoke-CleanupInfraContainerDisks {
 
                         # Display results with color coding
                         if ($usagePercent -ge 80) {
-                            Write-Host "    $mount : ${usagePercent}% used ($used / $size, $avail available)" -ForegroundColor Red
+                            if (-not $Json) { Write-Host "    $mount : ${usagePercent}% used ($used / $size, $avail available)" -ForegroundColor Red }
                             # Collect cleanup candidate for CI/CD agents on /azp/_work
                             if ($cleanupPath -and $mount -eq '/azp/_work') {
                                 $cleanupCandidates += [PSCustomObject]@{
@@ -137,20 +140,27 @@ function Invoke-CleanupInfraContainerDisks {
                             }
                         }
                         else {
-                            Write-Host "    $mount : ${usagePercent}% used ($used / $size, $avail available)" -ForegroundColor Green
+                            if (-not $Json) { Write-Host "    $mount : ${usagePercent}% used ($used / $size, $avail available)" -ForegroundColor Green }
                         }
                     }
                     else {
-                        Write-Host "    $mount : Unable to parse disk usage" -ForegroundColor Gray
+                        if (-not $Json) { Write-Host "    $mount : Unable to parse disk usage" -ForegroundColor Gray }
                     }
                 }
                 else {
-                    Write-Host "    $mount : Unexpected df output format" -ForegroundColor Gray
+                    if (-not $Json) { Write-Host "    $mount : Unexpected df output format" -ForegroundColor Gray }
                 }
             }
         }
 
-        Write-Host ("-" * 60)
+        if (-not $Json) { Write-Host ("-" * 60) }
+    }
+
+    # Machine-readable report-only mode: emit the disk-usage report rows and return
+    # before any interactive prompt or deletion.
+    if ($Json) {
+        Write-OctoJson -Command 'Invoke-CleanupInfraContainerDisks' -Data @($cleanupCandidates)
+        return
     }
 
     # Interactive cleanup selection

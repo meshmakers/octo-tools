@@ -5,7 +5,10 @@ function Find-AllGitRepos {
         [string]$branch = "",
 
         [Parameter()]
-        [switch]$IncludeSubmodules = $false
+        [switch]$IncludeSubmodules = $false,
+
+        [Parameter()]
+        [switch]$Json
     )
 
     $rootPath = $Global:ROOTPATH
@@ -90,7 +93,12 @@ function Find-AllGitRepos {
     $script:gitRepos = $script:gitRepos | Sort-Object
     
     Write-Verbose "Total Git repositories found: $($script:gitRepos.Count)"
-    
+
+    if ($Json) {
+        Write-OctoJson -Command 'Find-AllGitRepos' -Data $script:gitRepos
+        return
+    }
+
     # Return the array of repos
     return $script:gitRepos
 }

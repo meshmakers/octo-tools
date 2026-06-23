@@ -33,90 +33,124 @@ function Sync-YamlFiles {
         [Parameter(Mandatory=$true)]
         [string]$branchPath,
         [string[]]$excludeFiles = @("azure-pipelines.yml"),
-        [string]$excludeRepo = ""
+        [string]$excludeRepo = "",
+        [switch]$Json
     )
-    
+
     if (!(Test-Path $sourceDirectory)) {
         Write-Error "Source directory $sourceDirectory does not exist"
         return
     }
-    
+
     if (!(Test-Path $branchPath)) {
         Write-Error "Branch path $branchPath does not exist"
         return
     }
-    
+
     # Get all YAML files from source directory except excluded ones
-    $sourceFiles = Get-ChildItem -Path $sourceDirectory -Filter "*.yml" | 
+    $sourceFiles = Get-ChildItem -Path $sourceDirectory -Filter "*.yml" |
                    Where-Object { $_.Name -notin $excludeFiles }
-    
+
     if ($sourceFiles.Count -eq 0) {
-        Write-Host "No YAML files found to synchronize" -ForegroundColor Yellow
-        return
+        if (-not $Json) { Write-Host "No YAML files found to synchronize" -ForegroundColor Yellow }
+        return ,@()
     }
-    
+
     # Get all repository paths that have devops-build directories
     $repositoryPaths = Get-RepositoryPaths -branchPath $branchPath -excludeRepo $excludeRepo
-    
+
     if ($repositoryPaths.Count -eq 0) {
-        Write-Host "No repositories with devops-build directories found" -ForegroundColor Yellow
-        return
+        if (-not $Json) { Write-Host "No repositories with devops-build directories found" -ForegroundColor Yellow }
+        return ,@()
     }
-    
+
     $syncedCount = 0
     $errorCount = 0
-    
-    Write-Host "Synchronizing YAML files..." -ForegroundColor Cyan
-    Write-Host "Source: $sourceDirectory" -ForegroundColor Gray
-    Write-Host "Files to sync: $($sourceFiles.Name -join ', ')" -ForegroundColor Gray
-    Write-Host ""
-    
+    $repoResults = [System.Collections.Generic.List[object]]::new()
+
+    if (-not $Json) {
+        Write-Host "Synchronizing YAML files..." -ForegroundColor Cyan
+        Write-Host "Source: $sourceDirectory" -ForegroundColor Gray
+        Write-Host "Files to sync: $($sourceFiles.Name -join ', ')" -ForegroundColor Gray
+        Write-Host ""
+    }
+
     foreach ($repoPath in $repositoryPaths) {
         $repoName = Split-Path (Split-Path $repoPath -Parent) -Leaf
-        
+        $repoErrors = 0
+
         try {
             $filesCopied = 0
             foreach ($sourceFile in $sourceFiles) {
                 $targetPath = Join-Path -Path $repoPath -ChildPath $sourceFile.Name
-                
+
                 # Only copy if target file already exists
                 if (Test-Path $targetPath) {
                     Copy-Item -Path $sourceFile.FullName -Destination $targetPath -Force
                     $filesCopied++
                 }
             }
-            
+
             if ($filesCopied -gt 0) {
-                Write-Host "✓ Synced $repoName ($filesCopied files)" -ForegroundColor Green
+                if (-not $Json) { Write-Host "✓ Synced $repoName ($filesCopied files)" -ForegroundColor Green }
                 $syncedCount++
             } else {
-                Write-Host "○ Skipped $repoName (no matching files)" -ForegroundColor Yellow
+                if (-not $Json) { Write-Host "○ Skipped $repoName (no matching files)" -ForegroundColor Yellow }
             }
         }
         catch {
-            Write-Host "✗ Failed to sync $repoName : $($_.Exception.Message)" -ForegroundColor Red
+            if (-not $Json) { Write-Host "✗ Failed to sync $repoName : $($_.Exception.Message)" -ForegroundColor Red }
             $errorCount++
+            $repoErrors++
         }
+
+        $repoResults.Add([ordered]@{
+            repo    = $repoName
+            synced  = [int]$filesCopied
+            errors  = [int]$repoErrors
+        }) | Out-Null
     }
-    
-    Write-Host ""
-    Write-Host "Synchronization completed:" -ForegroundColor Cyan
-    Write-Host "  Repositories synced: $syncedCount" -ForegroundColor Green
-    Write-Host "  Errors: $errorCount" -ForegroundColor $(if($errorCount -gt 0){"Red"}else{"Green"})
-    Write-Host "  Files per repository: $($sourceFiles.Count)" -ForegroundColor Gray
+
+    if (-not $Json) {
+        Write-Host ""
+        Write-Host "Synchronization completed:" -ForegroundColor Cyan
+        Write-Host "  Repositories synced: $syncedCount" -ForegroundColor Green
+        Write-Host "  Errors: $errorCount" -ForegroundColor $(if($errorCount -gt 0){"Red"}else{"Green"})
+        Write-Host "  Files per repository: $($sourceFiles.Count)" -ForegroundColor Gray
+    }
+
+    return ,@($repoResults.ToArray())
 }
 
 function Sync-YamlTemplates {
     param(
         [string]$branch = "",
         [Parameter(Mandatory=$true)]
-        [string]$sourceRepo
+        [string]$sourceRepo,
+        [switch]$Json
     )
-    
+
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
     $sourceDirectory = Join-Path -Path $branchRootPath -ChildPath "$sourceRepo/devops-build"
-    
-    Sync-YamlFiles -sourceDirectory $sourceDirectory -branchPath $branchRootPath -excludeRepo $sourceRepo
+
+    $repoResults = @(Sync-YamlFiles -sourceDirectory $sourceDirectory -branchPath $branchRootPath -excludeRepo $sourceRepo -Json:$Json)
+
+    if ($Json) {
+        $syncedTotal = ($repoResults | Measure-Object -Property synced -Sum).Sum
+        $errorTotal  = ($repoResults | Measure-Object -Property errors -Sum).Sum
+        if ($null -eq $syncedTotal) { $syncedTotal = 0 }
+        if ($null -eq $errorTotal)  { $errorTotal  = 0 }
+        $data = [ordered]@{
+            repositories = @($repoResults)
+            summary      = [ordered]@{
+                repositoryCount = [int]$repoResults.Count
+                filesSynced     = [int]$syncedTotal
+                errors          = [int]$errorTotal
+            }
+        }
+        Write-OctoJson -Command 'Sync-YamlTemplates' -Data $data
+        return
+    }
 }
 
 Export-ModuleMember -Function @('Sync-YamlTemplates')

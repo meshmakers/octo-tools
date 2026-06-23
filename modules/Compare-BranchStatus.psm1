@@ -34,7 +34,8 @@ function Compare-BranchStatus {
     param(
         [string]$branch = "",
         [string]$targetBranch = "main",
-        [switch]$Details
+        [switch]$Details,
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -43,37 +44,89 @@ function Compare-BranchStatus {
     }
 
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
-    Write-Host "Checking branch status for octo-* and mm-* directories in $branchRootPath against origin/$targetBranch..." -ForegroundColor Yellow
+    if (-not $Json) {
+        Write-Host "Checking branch status for octo-* and mm-* directories in $branchRootPath against origin/$targetBranch..." -ForegroundColor Yellow
+    }
+
+    $repoResults = [System.Collections.Generic.List[object]]::new()
 
     $directories = Get-ChildItem -Directory -Path $branchRootPath | Where-Object { $_.Name -match '^(octo-|mm-)' }
-    
+
     if ($directories.Count -eq 0) {
+        if ($Json) {
+            Write-OctoJson -Command 'Compare-BranchStatus' -Data ([ordered]@{
+                repositories = @()
+                summary      = [ordered]@{
+                    repositoryCount  = 0
+                    aheadCount       = 0
+                    totalCommits     = 0
+                    totalCodeCommits = 0
+                }
+            })
+            return
+        }
         Write-Host "✓ No octo-* or mm-* directories found" -ForegroundColor Green
         return
     }
-    
+
     foreach ($dir in $directories) {
         Push-Location $dir.FullName
         try {
             # Check if it's a git repo
             if (!(Test-Path ".git")) {
+                if ($Json) {
+                    $repoResults.Add([ordered]@{
+                        repo             = $dir.Name
+                        branch           = $null
+                        commitCount      = 0
+                        codeCommits      = 0
+                        mergeCommits     = 0
+                        submoduleCommits = 0
+                        status           = 'not-a-git-repository'
+                    }) | Out-Null
+                    continue
+                }
                 Write-Host "  $($dir.Name): Not a git repository" -ForegroundColor Gray
                 continue
             }
-            
+
             # Get current branch
             $currentBranch = git rev-parse --abbrev-ref HEAD 2>$null
             if ($LASTEXITCODE -ne 0) {
+                if ($Json) {
+                    $repoResults.Add([ordered]@{
+                        repo             = $dir.Name
+                        branch           = $null
+                        commitCount      = 0
+                        codeCommits      = 0
+                        mergeCommits     = 0
+                        submoduleCommits = 0
+                        status           = 'git-error'
+                    }) | Out-Null
+                    continue
+                }
                 Write-Host "  $($dir.Name): Git error" -ForegroundColor Red
                 continue
             }
-            
+
             # Fetch latest from origin
             git fetch origin $targetBranch 2>$null | Out-Null
 
             # Check for commits ahead of origin/$targetBranch
             $commitsAhead = git rev-list --count origin/$targetBranch..$currentBranch 2>$null
             if ($LASTEXITCODE -ne 0) {
+                if ($Json) {
+                    $repoResults.Add([ordered]@{
+                        repo             = $dir.Name
+                        branch           = $currentBranch
+                        commitCount      = 0
+                        codeCommits      = 0
+                        mergeCommits     = 0
+                        submoduleCommits = 0
+                        status           = 'compare-failed'
+                    }) | Out-Null
+                    continue
+                }
                 Write-Host "  $($dir.Name): Cannot compare with origin/$targetBranch" -ForegroundColor Red
                 continue
             }
@@ -144,23 +197,77 @@ function Compare-BranchStatus {
                     $statusText = "$commitsAhead commits ahead"
                 }
                 
-                Write-Host "  $($dir.Name) [$currentBranch]: $statusText" -ForegroundColor $color
-                
-                # Show commit details if details mode is enabled
-                if ($Details -and $commitDetails.Count -gt 0) {
-                    $commitDetails | ForEach-Object { Write-Host $_ -ForegroundColor Gray }
+                if ($Json) {
+                    $repoResults.Add([ordered]@{
+                        repo             = $dir.Name
+                        branch           = $currentBranch
+                        commitCount      = [int]$commitsAhead
+                        codeCommits      = [int]$realCommits
+                        mergeCommits     = [int]$mergeCommits
+                        submoduleCommits = [int]$submoduleCommits
+                        status           = 'ahead'
+                        details          = @($commitDetails)
+                    }) | Out-Null
                 }
-                
+                else {
+                    Write-Host "  $($dir.Name) [$currentBranch]: $statusText" -ForegroundColor $color
+
+                    # Show commit details if details mode is enabled
+                    if ($Details -and $commitDetails.Count -gt 0) {
+                        $commitDetails | ForEach-Object { Write-Host $_ -ForegroundColor Gray }
+                    }
+                }
             } else {
-                Write-Host "  $($dir.Name) [$currentBranch]: ✓ No changes vs $targetBranch" -ForegroundColor Green
+                if ($Json) {
+                    $repoResults.Add([ordered]@{
+                        repo             = $dir.Name
+                        branch           = $currentBranch
+                        commitCount      = 0
+                        codeCommits      = 0
+                        mergeCommits     = 0
+                        submoduleCommits = 0
+                        status           = 'up-to-date'
+                    }) | Out-Null
+                }
+                else {
+                    Write-Host "  $($dir.Name) [$currentBranch]: ✓ No changes vs $targetBranch" -ForegroundColor Green
+                }
             }
         }
         catch {
-            Write-Host "  $($dir.Name): Error - $($_.Exception.Message)" -ForegroundColor Red
+            if ($Json) {
+                $repoResults.Add([ordered]@{
+                    repo             = $dir.Name
+                    branch           = $currentBranch
+                    commitCount      = 0
+                    codeCommits      = 0
+                    mergeCommits     = 0
+                    submoduleCommits = 0
+                    status           = 'error'
+                    details          = @($_.Exception.Message)
+                }) | Out-Null
+            }
+            else {
+                Write-Host "  $($dir.Name): Error - $($_.Exception.Message)" -ForegroundColor Red
+            }
         }
         finally {
             Pop-Location
         }
+    }
+
+    if ($Json) {
+        $aheadRepos = @($repoResults | Where-Object { $_.status -eq 'ahead' })
+        Write-OctoJson -Command 'Compare-BranchStatus' -Data ([ordered]@{
+            repositories = @($repoResults)
+            summary      = [ordered]@{
+                repositoryCount  = $repoResults.Count
+                aheadCount       = $aheadRepos.Count
+                totalCommits     = [int](($aheadRepos | Measure-Object -Property commitCount -Sum).Sum)
+                totalCodeCommits = [int](($aheadRepos | Measure-Object -Property codeCommits -Sum).Sum)
+            }
+        })
+        return
     }
 }
 

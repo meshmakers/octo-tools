@@ -66,7 +66,8 @@ function Register-OctoCliContext {
         [switch]$IncludeReporting,
         [switch]$IncludeAi,
         [switch]$NoSwitch,
-        [switch]$NoLogin
+        [switch]$NoLogin,
+        [switch]$Json
     )
 
     $uriExtension = if ($UriSuffix) { "-$UriSuffix" } else { "" }
@@ -131,19 +132,42 @@ function Register-OctoCliContext {
     )
 
     if ($IncludeReporting) {
-        Write-Host "Including reporting"
+        if (-not $Json) { Write-Host "Including reporting" }
         $addArgs += @('-rsu', $rsu)
     }
     else {
-        Write-Host "Excluding reporting"
+        if (-not $Json) { Write-Host "Excluding reporting" }
     }
 
     if ($IncludeAi) {
-        Write-Host "Including AI"
+        if (-not $Json) { Write-Host "Including AI" }
         $addArgs += @('-aisu', $aisu)
     }
     else {
-        Write-Host "Excluding AI"
+        if (-not $Json) { Write-Host "Excluding AI" }
+    }
+
+    if ($Json) {
+        & octo-cli @addArgs | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = 'octo-cli AddContext failed' })
+            return
+        }
+
+        if (-not $NoSwitch) {
+            & octo-cli -c UseContext -n $contextName | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = 'octo-cli UseContext failed' })
+                return
+            }
+        }
+
+        if (-not $NoLogin) {
+            & octo-cli -c Login -i | Out-Null
+        }
+
+        Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success ($LASTEXITCODE -eq 0) -ExitCode $LASTEXITCODE)
+        return
     }
 
     Write-Host "Registering context '$contextName' for installation '$Installation' (tenant '$TenantId')"

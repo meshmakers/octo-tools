@@ -2,7 +2,8 @@ function Invoke-CleanAllGitRepos {
 
     param(
         [Parameter(Mandatory = $false)]
-        [bool]$force = $false    
+        [bool]$force = $false,
+        [switch]$Json
     )
 
 
@@ -60,6 +61,23 @@ function Invoke-CleanAllGitRepos {
     }
 
     Pop-Location
+
+    if ($Json) {
+        $data = [ordered]@{
+            successful = @($successfullDirectories)
+            skipped    = @($pendingChangesDirectories)
+            forced     = @($forcedDirectories)
+            failed     = @($failedDirectories)
+            counts     = [ordered]@{
+                successful = $successfullDirectories.Count
+                skipped    = $pendingChangesDirectories.Count
+                forced     = $forcedDirectories.Count
+                failed     = $failedDirectories.Count
+            }
+        }
+        Write-OctoJson -Command 'Invoke-CleanAllGitRepos' -Data $data
+        return
+    }
 
     # Print summary
 

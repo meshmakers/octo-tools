@@ -14,6 +14,8 @@ function Test-OctoKindInfraRunning {
 
 function Start-OctoInfrastructure
 {
+    param([switch]$Json)
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
@@ -27,11 +29,16 @@ function Start-OctoInfrastructure
     $basedir = $PWD
     Set-Location $infrastructurePath
 
-    Write-Host "Starting Octo infrastructure"
+    if (-not $Json) { Write-Host "Starting Octo infrastructure" }
     docker compose up -d
+    $exitCode = $LASTEXITCODE
 
     Set-Location $basedir
 
+    if ($Json) {
+        Write-OctoJson -Command 'Start-OctoInfrastructure' -Data (New-OctoActionResult -Success ($exitCode -eq 0) -ExitCode $exitCode -Extra @{ action = 'start' })
+        return
+    }
 
     Write-Host "Start done. Containers are running."
     Write-Host "For stopping use 'Stop-OctoInfrastructure'"

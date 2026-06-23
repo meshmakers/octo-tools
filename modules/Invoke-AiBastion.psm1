@@ -195,7 +195,9 @@ function Get-AiBastionStatus {
         [Parameter(Mandatory = $true)]
         [string]$AdapterUrl,
 
-        [string]$BearerToken
+        [string]$BearerToken,
+
+        [switch]$Json
     )
 
     if (-not $BearerToken) {
@@ -212,6 +214,11 @@ function Get-AiBastionStatus {
     try {
         $statusResp = Invoke-RestMethod -Method Get -Uri $statusUri `
             -Headers @{ Authorization = "Bearer $BearerToken" }
+
+        if ($Json) {
+            Write-OctoJson -Command 'Get-AiBastionStatus' -Data $statusResp
+            return
+        }
 
         Write-Host "=== Bastion status: $Tenant ==="
         Write-Host "Status:           $($statusResp.status)"

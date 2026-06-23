@@ -63,7 +63,8 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         [string]$OverlayFile,
         [string]$OverlayName,
         [switch]$DryRun,
-        [string]$OctoCli = 'octo-cli'
+        [string]$OctoCli = 'octo-cli',
+        [switch]$Json
     )
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -98,7 +99,9 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         }
     }
 
-    Write-Host "Reading overlay file: $OverlayFile" -ForegroundColor Cyan
+    if (-not $Json) {
+        Write-Host "Reading overlay file: $OverlayFile" -ForegroundColor Cyan
+    }
     try {
         $overlayContent = Get-Content $OverlayFile -Raw
         $overlay = ConvertFrom-Yaml -Yaml $overlayContent
@@ -126,19 +129,25 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         return
     }
 
-    Write-Host "Overlay name : $OverlayName" -ForegroundColor Cyan
-    Write-Host "Clients      : $($clients.Count)" -ForegroundColor Cyan
-    if ($DryRun) {
-        Write-Host "Mode         : DRY RUN (no octo-cli invocations)" -ForegroundColor Yellow
+    if (-not $Json) {
+        Write-Host "Overlay name : $OverlayName" -ForegroundColor Cyan
+        Write-Host "Clients      : $($clients.Count)" -ForegroundColor Cyan
+        if ($DryRun) {
+            Write-Host "Mode         : DRY RUN (no octo-cli invocations)" -ForegroundColor Yellow
+        }
+        Write-Host ""
     }
-    Write-Host ""
 
+    $clientResults = [System.Collections.Generic.List[object]]::new()
     $failures = 0
     foreach ($client in $clients) {
         $clientId = $client.clientId
         if (-not $clientId) {
             Write-Warning "Skipping client entry without clientId."
             $failures++
+            if ($Json) {
+                $clientResults.Add([ordered]@{ client = $null; status = 'skipped-no-clientId' }) | Out-Null
+            }
             continue
         }
 
@@ -148,6 +157,9 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
 
         if (-not $redirectUris -and -not $postLogoutRedirectUris -and -not $allowedCorsOrigins) {
             Write-Warning "[$clientId] no URIs declared — skipping (server would reject with 400)."
+            if ($Json) {
+                $clientResults.Add([ordered]@{ client = $clientId; status = 'skipped-no-uris' }) | Out-Null
+            }
             continue
         }
 
@@ -157,16 +169,46 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         if ($allowedCorsOrigins) { $argList += @('-co', $allowedCorsOrigins) }
 
         if ($DryRun) {
-            Write-Host "[$clientId] $OctoCli $($argList -join ' ')" -ForegroundColor DarkGray
+            if ($Json) {
+                $clientResults.Add([ordered]@{ client = $clientId; status = "planned: $OctoCli $($argList -join ' ')" }) | Out-Null
+            }
+            else {
+                Write-Host "[$clientId] $OctoCli $($argList -join ' ')" -ForegroundColor DarkGray
+            }
             continue
         }
 
-        Write-Host "[$clientId] applying overlay..." -ForegroundColor Cyan
+        if (-not $Json) {
+            Write-Host "[$clientId] applying overlay..." -ForegroundColor Cyan
+        }
         & $OctoCli @argList
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "[$clientId] octo-cli exited $LASTEXITCODE — continuing with remaining clients."
+        $clientExit = $LASTEXITCODE
+        if ($clientExit -ne 0) {
+            if (-not $Json) {
+                Write-Warning "[$clientId] octo-cli exited $clientExit — continuing with remaining clients."
+            }
             $failures++
         }
+        if ($Json) {
+            $clientResults.Add([ordered]@{ client = $clientId; status = (($clientExit -eq 0) ? 'applied' : "failed (exit $clientExit)") }) | Out-Null
+        }
+    }
+
+    if ($Json) {
+        $data = [ordered]@{
+            overlayFile = $OverlayFile
+            dryRun      = [bool]$DryRun
+            clients     = @($clientResults)
+            summary     = [ordered]@{
+                total  = $clients.Count
+                failed = $failures
+            }
+        }
+        if ($failures -gt 0) {
+            $global:LASTEXITCODE = 1
+        }
+        Write-OctoJson -Command 'Apply-IdentityOverlay' -Data $data
+        return
     }
 
     Write-Host ""

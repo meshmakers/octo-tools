@@ -48,7 +48,8 @@ function Reset-PackageLockFiles {
 function Sync-AllGitRepos {
     param(
         [string]$branch = "",
-        [switch]$resetPackageLock
+        [switch]$resetPackageLock,
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -88,6 +89,29 @@ function Sync-AllGitRepos {
         }
     }
     
+    if ($Json) {
+        $repositories = @(
+            foreach ($key in $status.Keys) {
+                [ordered]@{
+                    repo   = $key
+                    synced = [bool]$status[$key]
+                }
+            }
+        )
+        $succeeded = @($status.Keys | Where-Object { $status[$_] -eq $true }).Count
+        $failed = @($status.Keys | Where-Object { $status[$_] -ne $true }).Count
+        $data = [ordered]@{
+            repositories = $repositories
+            summary      = [ordered]@{
+                total     = $status.Count
+                succeeded = $succeeded
+                failed    = $failed
+            }
+        }
+        Write-OctoJson -Command 'Sync-AllGitRepos' -Data $data
+        return
+    }
+
     foreach($key in $status.Keys) {
         if($status[$key] -eq $true) {
             Write-Host "Pulling repository ${key} was successful." -ForegroundColor Green

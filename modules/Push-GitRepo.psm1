@@ -14,14 +14,21 @@ Push-GitRepo -repositoryPath ".\my-repo"
 function Push-GitRepo() {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
-        [string]$repositoryPath = ".\"
+        [string]$repositoryPath = ".\",
+        [switch]$Json
     )
 
     $basedir = $PWD
-    Write-Host "Pushing repository $repositoryPath"
+    if (-not $Json) { Write-Host "Pushing repository $repositoryPath" }
     Set-Location $repositoryPath
     git push origin
+    $exitCode = $LASTEXITCODE
     Set-Location $basedir
+
+    if ($Json) {
+        Write-OctoJson -Command 'Push-GitRepo' -Data (New-OctoActionResult -Success ($exitCode -eq 0) -ExitCode $exitCode)
+        return
+    }
 }
 
 Export-ModuleMember -Function @('Push-GitRepo')

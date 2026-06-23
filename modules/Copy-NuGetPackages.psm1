@@ -3,36 +3,44 @@ function Copy-NuGetPackages
 {
     param(
         [string]$branch = "",
-        [string]$directory = ".\"
+        [string]$directory = ".\",
+        [switch]$Json
     )
 
     $filter = "Meshmakers.*.999.0.0.nupkg"
-    
-    Write-Host "Searching at $directory"
+    $copiedCount = 0
+
+    if (-not $Json) { Write-Host "Searching at $directory" }
     $binDirectories = Get-ChildItem -Path $directory -Filter 'DebugL' -Recurse -Directory | Where-Object { $_.FullName -like '*[/\]bin[/\]DebugL' }
 
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
     $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
-    Write-Host "Branch NuGet Path: $branchNugetPath"
+    if (-not $Json) { Write-Host "Branch NuGet Path: $branchNugetPath" }
 
     # Check if the branch NuGet path exists, if not create it
     if (!(Test-Path $branchNugetPath)) {
-        Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow
+        if (-not $Json) { Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow }
         New-Item -ItemType Directory -Path $branchNugetPath | Out-Null
     }
 
     foreach ($binDirectory in $binDirectories) {
 
-        Write-Host "Working on $binDirectory"
+        if (-not $Json) { Write-Host "Working on $binDirectory" }
         if ((Test-Path $binDirectory)) {
-            
+
             $nugetFiles = Get-ChildItem -Path $binDirectory -Recurse -Filter $filter
-            
+
             foreach ($file in $nugetFiles) {
-                Write-Host "Copy $file" -ForegroundColor Green
+                if (-not $Json) { Write-Host "Copy $file" -ForegroundColor Green }
                 Copy-Item -Path $file -Destination $branchNugetPath -Force
+                $copiedCount++
             }
         }
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Copy-NuGetPackages' -Data ([ordered]@{ success = $true; copiedCount = $copiedCount })
+        return
     }
 }
 

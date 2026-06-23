@@ -6,7 +6,8 @@
         # dotnet publish parameters
         [Parameter(Mandatory=$false)]
         [string[]]
-        $publishParameters = @()
+        $publishParameters = @(),
+        [switch]$Json
     )
 
     $logFile = Join-Path $repositoryPath "Invoke-Build.log"
@@ -14,19 +15,34 @@
         Remove-Item $logFile
     }
 
-    Write-Host "[$configuration] Restore nuget packages $repositoryPath" -ForegroundColor Green
+    if (-not $Json) {
+        Write-Host "[$configuration] Restore nuget packages $repositoryPath" -ForegroundColor Green
+    }
     dotnet restore $repositoryPath -f > $logFile
 
-    Write-Host "[$configuration] Publishing git repository $repositoryPath $publishParameters" -ForegroundColor Green
+    if (-not $Json) {
+        Write-Host "[$configuration] Publishing git repository $repositoryPath $publishParameters" -ForegroundColor Green
+    }
     dotnet publish $repositoryPath -c $configuration @publishParameters >> $logFile
-    $state = $LASTEXITCODE -eq 0
-    if ($state -eq $false) {
-        Write-Host "[$configuration] Publish failed" -ForegroundColor Red
+    $exitCode = $LASTEXITCODE
+    $state = $exitCode -eq 0
+    if (-not $Json) {
+        if ($state -eq $false) {
+            Write-Host "[$configuration] Publish failed" -ForegroundColor Red
+        }
+        else {
+            Write-Host "[$configuration] Publish finished" -ForegroundColor Green
+        }
     }
-    else {
-        Write-Host "[$configuration] Publish finished" -ForegroundColor Green
+    $Global:LASTEXITCODE = $exitCode
+
+    if ($Json) {
+        Write-OctoJson -Command 'Invoke-Publish' -Data (New-OctoActionResult -Success $state -ExitCode $exitCode -Extra @{
+            configuration = $configuration
+            logFile       = $logFile
+        })
+        return
     }
-    $Global:LASTEXITCODE = $LASTEXITCODE
 }
 
 

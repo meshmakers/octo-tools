@@ -13,13 +13,19 @@ This function changes to the directory provides by the argument repositoryPath
 #>
 function Sync-Submodule {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
-    param($repositoryPath = ".\")
+    param($repositoryPath = ".\", [switch]$Json)
 
     $basedir = $PWD
-    Write-Host Handling directory $repositoryPath
+    if (-not $Json) { Write-Host Handling directory $repositoryPath }
     Set-Location $repositoryPath
     git submodule update --init --remote --merge --recursive
+    $exitCode = $LASTEXITCODE
     Set-Location $basedir
+
+    if ($Json) {
+        Write-OctoJson -Command 'Sync-Submodule' -Data (New-OctoActionResult -Success ($exitCode -eq 0) -ExitCode $exitCode)
+        return
+    }
 }
 
 Export-ModuleMember -Function @('Sync-Submodule')

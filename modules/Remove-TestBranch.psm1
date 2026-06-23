@@ -51,7 +51,9 @@ function Remove-TestBranch {
         [string]$branch = "",
 
         [Parameter(Mandatory = $false)]
-        [switch]$LocalOnly
+        [switch]$LocalOnly,
+
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -69,7 +71,9 @@ function Remove-TestBranch {
     $branchName = "test/0.$MinorVersion-$Description"
     $status = @{}
 
-    Write-Host "Removing test branch '$branchName' in '$branchRootPath'" -ForegroundColor Cyan
+    if (-not $Json) {
+        Write-Host "Removing test branch '$branchName' in '$branchRootPath'" -ForegroundColor Cyan
+    }
 
     # Get all directories starting with "octo-"
     $octoDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
@@ -150,8 +154,10 @@ function Remove-TestBranch {
     }
 
     # Summary
-    Write-Host ""
-    Write-Host "Branch removal summary:" -ForegroundColor Cyan
+    if (-not $Json) {
+        Write-Host ""
+        Write-Host "Branch removal summary:" -ForegroundColor Cyan
+    }
     $localDeletedCount = 0
     $remoteDeletedCount = 0
     $skippedCount = 0
@@ -170,15 +176,48 @@ function Remove-TestBranch {
                     $deletedParts += "remote"
                     $remoteDeletedCount++
                 }
-                Write-Host "  - $key - Deleted ($($deletedParts -join ', '))" -ForegroundColor Green
+                if (-not $Json) {
+                    Write-Host "  - $key - Deleted ($($deletedParts -join ', '))" -ForegroundColor Green
+                }
             } else {
-                Write-Host "  - $key - Branch not found" -ForegroundColor Gray
+                if (-not $Json) {
+                    Write-Host "  - $key - Branch not found" -ForegroundColor Gray
+                }
                 $skippedCount++
             }
         } else {
-            Write-Host "  x $key - Failed" -ForegroundColor Red
+            if (-not $Json) {
+                Write-Host "  x $key - Failed" -ForegroundColor Red
+            }
             $failedCount++
         }
+    }
+
+    if ($Json) {
+        $repositories = @()
+        foreach ($key in $status.Keys) {
+            $repoStatus = $status[$key]
+            $repositories += [ordered]@{
+                name          = $key
+                success       = [bool]$repoStatus.Success
+                localDeleted  = [bool]$repoStatus.LocalDeleted
+                remoteDeleted = [bool]$repoStatus.RemoteDeleted
+            }
+        }
+
+        $data = [ordered]@{
+            branchName   = $branchName
+            repositories = @($repositories)
+            summary      = [ordered]@{
+                localDeleted  = $localDeletedCount
+                remoteDeleted = $remoteDeletedCount
+                notFound      = $skippedCount
+                failed        = $failedCount
+            }
+        }
+
+        Write-OctoJson -Command 'Remove-TestBranch' -Data $data
+        return
     }
 
     Write-Host ""

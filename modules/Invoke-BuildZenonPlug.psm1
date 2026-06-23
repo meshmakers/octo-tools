@@ -1,11 +1,20 @@
 function Invoke-BuildZenonPlug {
     param(
         [string]$configuration = "Release",
-        [string]$repositoryPath = ".\"
+        [string]$repositoryPath = ".\",
+        [switch]$Json
     )
-    
+
     if(!$IsWindows) {
-        Write-Host "Skipping Zenon plug (Windows-only)" -ForegroundColor Yellow
+        if (-not $Json) {
+            Write-Host "Skipping Zenon plug (Windows-only)" -ForegroundColor Yellow
+        }
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-BuildZenonPlug' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
+                logFile = $null
+                skipped = $true
+            })
+        }
         return
     }
     
@@ -28,16 +37,28 @@ function Invoke-BuildZenonPlug {
     $msbuildApp = &"${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
 
 
-    Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
+    if (-not $Json) {
+        Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
+    }
     & $msbuildApp /t:Restore /t:Build /p:Configuration=$configuration $repositoryPath  > $logFile
-    $state = $LASTEXITCODE -eq 0
-    if ($state -eq $false) {
-        Write-Host "[$configuration] Build failed" -ForegroundColor Red
+    $exitCode = $LASTEXITCODE
+    $state = $exitCode -eq 0
+    if (-not $Json) {
+        if ($state -eq $false) {
+            Write-Host "[$configuration] Build failed" -ForegroundColor Red
+        }
+        else {
+            Write-Host "[$configuration] Build finished" -ForegroundColor Green
+        }
     }
-    else {
-        Write-Host "[$configuration] Build finished" -ForegroundColor Green
+    $Global:LASTEXITCODE = $exitCode
+
+    if ($Json) {
+        Write-OctoJson -Command 'Invoke-BuildZenonPlug' -Data (New-OctoActionResult -Success $state -ExitCode $exitCode -Extra @{
+            logFile = $logFile
+        })
+        return
     }
-    $Global:LASTEXITCODE = $LASTEXITCODE
 }
 
 

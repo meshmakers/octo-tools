@@ -66,7 +66,10 @@ function Get-RancherKubeConfig {
         [string]$ContextName,
 
         [Parameter()]
-        [switch]$SkipTlsVerify
+        [switch]$SkipTlsVerify,
+
+        [Parameter()]
+        [switch]$Json
     )
 
     if (-not $RancherUrl)      { throw "RANCHER_URL not set (env var or -RancherUrl). It should be defined in octo-tools/modules/profile.ps1." }
@@ -178,6 +181,18 @@ Hint: 422 'kubeconfig token generation disabled' = global setting `kubeconfig-ge
     }
     finally {
         Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Json) {
+        # Emit only non-sensitive metadata — never the kubeconfig payload itself.
+        Write-OctoJson -Command 'Get-RancherKubeConfig' -Data ([ordered]@{
+            cluster     = $Cluster
+            contextName = $ContextName
+            clusterId   = $clusterId
+            kubeFile    = $kubeFile
+            merged      = $true
+        })
+        return
     }
 
     Write-Host ""

@@ -92,7 +92,8 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # Internal dev container registry the node should be able to pull adapter images
         # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
         # configure containerd to skip verification for it. Pass "" to skip this.
-        [Parameter()] [string]$DevRegistry = "docker.mm.cloud"
+        [Parameter()] [string]$DevRegistry = "docker.mm.cloud",
+        [Parameter()] [switch]$Json
     )
 
     # Namespaces are fixed by the static manifests (namespaces.yaml, the infra YAML which is
@@ -354,11 +355,26 @@ server = "https://$DevRegistry"
                 "present from a prior install, the operator's managed pools won't reach the DB/broker. " +
                 "Pass -SkipOperator as well if you only want the cluster/CRDs/ingress.")
         }
-        Write-Host "Deploying Communication Operator (dev registry, :main-latest)" -ForegroundColor Green
-        Deploy-OctoOperator -branch $branch -ClusterName $ClusterName -SkipRegistryCheck:$SkipRegistryCheck
+        if (-not $Json) { Write-Host "Deploying Communication Operator (dev registry, :main-latest)" -ForegroundColor Green }
+        # Do NOT pass -Json to the sub-call: it would emit its own JSON object onto
+        # stream 1 and corrupt this function's single envelope. Capture its stream-1
+        # output (native helm/kubectl stdout) under -Json so only our envelope reaches
+        # stream 1; let it stream normally otherwise.
+        if ($Json) {
+            Deploy-OctoOperator -branch $branch -ClusterName $ClusterName -SkipRegistryCheck:$SkipRegistryCheck 6>&1 | Out-Null
+        }
+        else {
+            Deploy-OctoOperator -branch $branch -ClusterName $ClusterName -SkipRegistryCheck:$SkipRegistryCheck
+        }
     }
 
     $currentContext = (& kubectl config current-context).Trim()
+
+    if ($Json) {
+        Write-OctoJson -Command 'Install-OctoKubernetes' -Data (New-OctoActionResult -Success $true -Extra @{ action = 'install' })
+        return
+    }
+
     Write-Host ""
     Write-Host "Octo Kubernetes setup complete." -ForegroundColor Green
     Write-Host "  kind cluster:      $ClusterName" -ForegroundColor Cyan

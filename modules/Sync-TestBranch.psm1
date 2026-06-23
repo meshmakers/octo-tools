@@ -52,7 +52,9 @@ function Sync-TestBranch {
         [string]$branch = "",
 
         [Parameter(Mandatory = $false)]
-        [switch]$NoPush
+        [switch]$NoPush,
+
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -263,56 +265,60 @@ function Sync-TestBranch {
     }
 
     # Summary
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "SYNC SUMMARY" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-
     $syncedCount = 0
     $upToDateCount = 0
     $notFoundCount = 0
     $failedCount = 0
 
+    if (-not $Json) {
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "SYNC SUMMARY" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host ""
+    }
+
     foreach($key in $status.Keys) {
         $repoStatus = $status[$key]
         switch ($repoStatus.Status) {
             "Synced" {
-                Write-Host "  [OK] $key - $($repoStatus.Message)" -ForegroundColor Green
+                if (-not $Json) { Write-Host "  [OK] $key - $($repoStatus.Message)" -ForegroundColor Green }
                 $syncedCount++
             }
             "UpToDate" {
-                Write-Host "  [OK] $key - Already up to date" -ForegroundColor Blue
+                if (-not $Json) { Write-Host "  [OK] $key - Already up to date" -ForegroundColor Blue }
                 $upToDateCount++
             }
             "BranchNotFound" {
-                Write-Host "  [--] $key - Branch not found" -ForegroundColor Gray
+                if (-not $Json) { Write-Host "  [--] $key - Branch not found" -ForegroundColor Gray }
                 $notFoundCount++
             }
             "MergeConflict" {
-                Write-Host "  [!!] $key - MERGE CONFLICT" -ForegroundColor Red
+                if (-not $Json) { Write-Host "  [!!] $key - MERGE CONFLICT" -ForegroundColor Red }
                 $failedCount++
             }
             "UncommittedChanges" {
-                Write-Host "  [!!] $key - Uncommitted changes" -ForegroundColor Red
+                if (-not $Json) { Write-Host "  [!!] $key - Uncommitted changes" -ForegroundColor Red }
                 $failedCount++
             }
             "PushFailed" {
-                Write-Host "  [!!] $key - Push failed" -ForegroundColor Red
+                if (-not $Json) { Write-Host "  [!!] $key - Push failed" -ForegroundColor Red }
                 $failedCount++
             }
             "Error" {
-                Write-Host "  [!!] $key - Error: $($repoStatus.Message)" -ForegroundColor Red
+                if (-not $Json) { Write-Host "  [!!] $key - Error: $($repoStatus.Message)" -ForegroundColor Red }
                 $failedCount++
             }
         }
     }
 
-    Write-Host ""
-    Write-Host "Totals: $syncedCount synced, $upToDateCount up-to-date, $notFoundCount not found, $failedCount failed" -ForegroundColor Cyan
+    if (-not $Json) {
+        Write-Host ""
+        Write-Host "Totals: $syncedCount synced, $upToDateCount up-to-date, $notFoundCount not found, $failedCount failed" -ForegroundColor Cyan
+    }
 
     # Manual action required section
-    if ($manualActionRequired.Count -gt 0) {
+    if (-not $Json -and $manualActionRequired.Count -gt 0) {
         Write-Host ""
         Write-Host "========================================" -ForegroundColor Red
         Write-Host "MANUAL ACTION REQUIRED" -ForegroundColor Red
@@ -344,7 +350,7 @@ function Sync-TestBranch {
         }
     }
 
-    return [PSCustomObject]@{
+    $result = [PSCustomObject]@{
         BranchName = $branchName
         Status = $statusArray
         ManualActionRequired = $manualActionRequired
@@ -355,6 +361,13 @@ function Sync-TestBranch {
             Failed = $failedCount
         }
     }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Sync-TestBranch' -Data $result
+        return
+    }
+
+    return $result
 }
 
 Export-ModuleMember -Function @('Sync-TestBranch')

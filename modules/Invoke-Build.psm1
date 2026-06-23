@@ -1,7 +1,8 @@
 function Invoke-Build {
     param(
         [string]$configuration = "Release",
-        [string]$repositoryPath = ".\"
+        [string]$repositoryPath = ".\",
+        [switch]$Json
     )
     $logFile = Join-Path $repositoryPath "Invoke-Build.log"
     if (Test-Path $logFile) {
@@ -10,19 +11,34 @@ function Invoke-Build {
 
     $repositoryPath = $(Resolve-Path -Path $repositoryPath).Path
 
-    Write-Host "[$configuration] Restore nuget packages $repositoryPath" -ForegroundColor Green
+    if (-not $Json) {
+        Write-Host "[$configuration] Restore nuget packages $repositoryPath" -ForegroundColor Green
+    }
     dotnet restore $repositoryPath -p:Configuration=$configuration -f > $logFile
-    
-    Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
+
+    if (-not $Json) {
+        Write-Host "[$configuration] Building git repository $repositoryPath" -ForegroundColor Green
+    }
     dotnet build $repositoryPath -c $configuration >> $logFile
-    $state = $LASTEXITCODE -eq 0
-    if ($state -eq $false) {
-        Write-Host "[$configuration] Build failed" -ForegroundColor Red
+    $exitCode = $LASTEXITCODE
+    $state = $exitCode -eq 0
+    if (-not $Json) {
+        if ($state -eq $false) {
+            Write-Host "[$configuration] Build failed" -ForegroundColor Red
+        }
+        else {
+            Write-Host "[$configuration] Build finished" -ForegroundColor Green
+        }
     }
-    else {
-        Write-Host "[$configuration] Build finished" -ForegroundColor Green
+    $Global:LASTEXITCODE = $exitCode
+
+    if ($Json) {
+        Write-OctoJson -Command 'Invoke-Build' -Data (New-OctoActionResult -Success $state -ExitCode $exitCode -Extra @{
+            configuration = $configuration
+            logFile       = $logFile
+        })
+        return
     }
-    $Global:LASTEXITCODE = $LASTEXITCODE
 }
 
 

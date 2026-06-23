@@ -52,7 +52,9 @@ function New-TestBranch {
         [string]$branch = "",
 
         [Parameter(Mandatory = $false)]
-        [switch]$NoPush
+        [switch]$NoPush,
+
+        [switch]$Json
     )
 
     if (!(Test-Path $rootPath)) {
@@ -134,27 +136,61 @@ function New-TestBranch {
     }
 
     # Summary
-    Write-Host ""
-    Write-Host "Branch summary:" -ForegroundColor Cyan
     $createdCount = 0
     $switchedCount = 0
     $failedCount = 0
+
+    if (-not $Json) {
+        Write-Host ""
+        Write-Host "Branch summary:" -ForegroundColor Cyan
+    }
 
     foreach($key in $status.Keys) {
         $repoStatus = $status[$key]
         if ($repoStatus.Success) {
             if ($repoStatus.Existed) {
-                Write-Host "  ✓ $key - Switched to existing branch '$branchName'" -ForegroundColor Yellow
+                if (-not $Json) {
+                    Write-Host "  ✓ $key - Switched to existing branch '$branchName'" -ForegroundColor Yellow
+                }
                 $switchedCount++
             } else {
-                $pushStatus = if ($NoPush) { "(local only)" } else { "and pushed" }
-                Write-Host "  ✓ $key - Branch '$branchName' created $pushStatus" -ForegroundColor Green
+                if (-not $Json) {
+                    $pushStatus = if ($NoPush) { "(local only)" } else { "and pushed" }
+                    Write-Host "  ✓ $key - Branch '$branchName' created $pushStatus" -ForegroundColor Green
+                }
                 $createdCount++
             }
         } else {
-            Write-Host "  ✗ $key - Failed" -ForegroundColor Red
+            if (-not $Json) {
+                Write-Host "  ✗ $key - Failed" -ForegroundColor Red
+            }
             $failedCount++
         }
+    }
+
+    if ($Json) {
+        $repositories = @(foreach ($key in $status.Keys) {
+            $repoStatus = $status[$key]
+            [ordered]@{
+                repo    = $key
+                Success = [bool]$repoStatus.Success
+                Existed = [bool]$repoStatus.Existed
+            }
+        })
+
+        $data = [ordered]@{
+            branchName   = $branchName
+            repositories = $repositories
+            summary      = [ordered]@{
+                created  = $createdCount
+                switched = $switchedCount
+                failed   = $failedCount
+                total    = $status.Count
+            }
+        }
+
+        Write-OctoJson -Command 'New-TestBranch' -Data $data
+        return
     }
 
     Write-Host ""

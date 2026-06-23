@@ -15,7 +15,8 @@ Sync-NugetPackages
 function Sync-NuGetPackages {
     [CmdletBinding()]
     param (
-        [boolean]$cleanBinFolder = $false
+        [boolean]$cleanBinFolder = $false,
+        [switch]$Json
     )
 
 
@@ -23,11 +24,13 @@ function Sync-NuGetPackages {
         Write-Error "Root path $rootPath does not exist"
         return;
     }
-    
+
+    $restoreExitCode = 0
+
     # Kill all dotnet processes. This is necessary to avoid file locks.
     Invoke-KillDotnet
 
-    Copy-AllNuGetPackages
+    if ($Json) { Copy-AllNuGetPackages -Json | Out-Null } else { Copy-AllNuGetPackages }
     Remove-GlobalNuGetPackages
 
     # Get all directories starting with "octo-" and "mm-""
@@ -39,15 +42,26 @@ function Sync-NuGetPackages {
         
         # Check if the ".git" directory exists
         if (Test-Path -Path $gitDirectory -PathType Container) {
-            Write-Host "Forcing restore at '$($directory.FullName)'" -ForegroundColor Green
+            if (-not $Json) { Write-Host "Forcing restore at '$($directory.FullName)'" -ForegroundColor Green }
             Push-Location $directory.FullName
             if ($cleanBinFolder) {
                 Remove-Item -Path "bin" -Recurse -Force
             }
 
-            dotnet restore /p:Configuration="DebugL" -f
+            if ($Json) {
+                dotnet restore /p:Configuration="DebugL" -f | Out-Null
+            } else {
+                dotnet restore /p:Configuration="DebugL" -f
+            }
+            if ($LASTEXITCODE -ne 0) { $restoreExitCode = $LASTEXITCODE }
             Pop-Location
         }
+    }
+
+    if ($Json) {
+        $success = ($restoreExitCode -eq 0)
+        Write-OctoJson -Command 'Sync-NuGetPackages' -Data (New-OctoActionResult -Success $success -ExitCode $restoreExitCode)
+        return
     }
 }
 

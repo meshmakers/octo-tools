@@ -151,7 +151,8 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # Skip the pre-flight that verifies the dev registry resolves from the kind
         # node. Use when the operator image is already on the node (kind load) and you
         # deploy offline, so an unreachable registry must not block the deploy.
-        [switch]$SkipRegistryCheck
+        [switch]$SkipRegistryCheck,
+        [switch]$Json
     )
 
     $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
@@ -198,7 +199,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
                 Write-Error $msg
                 return
             }
-            Write-Host "Pre-flight OK: dev registry '$registry' resolves from the kind node." -ForegroundColor DarkGray
+            if (-not $Json) { Write-Host "Pre-flight OK: dev registry '$registry' resolves from the kind node." -ForegroundColor DarkGray }
         }
     }
 
@@ -207,12 +208,16 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
     # refuses to render/install until the declared dependencies are present in
     # charts/ — even when they are disabled via condition. Build from the lock
     # first; if there is no lock yet, update to generate it and download deps.
-    Write-Host "Vendoring operator chart dependencies" -ForegroundColor Green
+    if (-not $Json) { Write-Host "Vendoring operator chart dependencies" -ForegroundColor Green }
     & helm dependency build $chart 2>$null
     if ($LASTEXITCODE -ne 0) {
         # No Chart.lock yet (fresh checkout) — generate it + download deps.
-        & helm dependency update $chart
-        if ($LASTEXITCODE -ne 0) { Write-Error "helm dependency build/update failed with exit code $LASTEXITCODE."; return }
+        $depOut = & helm dependency update $chart 2>&1
+        if (-not $Json) { $depOut | ForEach-Object { Write-Host $_ } }
+        if ($LASTEXITCODE -ne 0) {
+            if ($Json) { Write-OctoJson -Command 'Deploy-OctoOperator' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = "helm dependency build/update failed" }); return }
+            Write-Error "helm dependency build/update failed with exit code $LASTEXITCODE."; return
+        }
     }
 
     if ([string]::IsNullOrWhiteSpace($ControllerHost)) {
@@ -222,14 +227,14 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # back to the host LAN IP for non-Docker-Desktop engines that don't expose it.
         $ControllerHost = Get-KindHostGatewayIp -ClusterName $ClusterName
         if ([string]::IsNullOrWhiteSpace($ControllerHost)) {
-            Write-Host "host.docker.internal not resolvable from the kind node; falling back to the host LAN IP." -ForegroundColor Yellow
+            if (-not $Json) { Write-Host "host.docker.internal not resolvable from the kind node; falling back to the host LAN IP." -ForegroundColor Yellow }
             $ControllerHost = Get-HostLanIPv4
         }
         if ([string]::IsNullOrWhiteSpace($ControllerHost)) {
             Write-Error "Could not resolve a host address for the Communication Controller. Pass -ControllerHost explicitly."
             return
         }
-        Write-Host "Using host address for the Communication Controller: $ControllerHost" -ForegroundColor Cyan
+        if (-not $Json) { Write-Host "Using host address for the Communication Controller: $ControllerHost" -ForegroundColor Cyan }
     }
 
     # === Generate admission-webhook serving certificates with openssl. ===
@@ -247,7 +252,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         $svcSan1 = "communication-operator.$Namespace.svc"
         $svcSan2 = "communication-operator.$Namespace.svc.cluster.local"
 
-        Write-Host "Generating webhook CA + server certificate (SAN: $svcSan1, $svcSan2)" -ForegroundColor Green
+        if (-not $Json) { Write-Host "Generating webhook CA + server certificate (SAN: $svcSan1, $svcSan2)" -ForegroundColor Green }
 
         # 1. CA key + self-signed CA cert.
         & openssl req -x509 -newkey rsa:2048 -nodes `
@@ -292,9 +297,9 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # already on the node via 'kind load') keep IfNotPresent so kubelet uses the
         # cached image instead of trying to pull. Overrides image.pullPolicy in the values.
         $pullPolicy = if ($SkipRegistryCheck) { "IfNotPresent" } else { "Always" }
-        Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', pullPolicy '$pullPolicy', controller '$controllerUri')" -ForegroundColor Green
+        if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', pullPolicy '$pullPolicy', controller '$controllerUri')" -ForegroundColor Green }
 
-        & helm upgrade --install $ReleaseName $chart `
+        $helmOut = & helm upgrade --install $ReleaseName $chart `
             --kube-context $kubeContext `
             --namespace $Namespace `
             --create-namespace `
@@ -306,18 +311,33 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
             --set-file "serviceHooks.caKey=$certDir/ca-key.pem" `
             --set-file "serviceHooks.caCrt=$certDir/ca.pem" `
             --set-file "serviceHooks.svcKey=$certDir/svc-key.pem" `
-            --set-file "serviceHooks.svcCrt=$certDir/svc.pem"
-        if ($LASTEXITCODE -ne 0) { Write-Error "helm upgrade --install failed with exit code $LASTEXITCODE."; return }
+            --set-file "serviceHooks.svcCrt=$certDir/svc.pem" 2>&1
+        if (-not $Json) { $helmOut | ForEach-Object { Write-Host $_ } }
+        if ($LASTEXITCODE -ne 0) {
+            if ($Json) { Write-OctoJson -Command 'Deploy-OctoOperator' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = "helm upgrade --install failed" }); return }
+            Write-Error "helm upgrade --install failed with exit code $LASTEXITCODE."; return
+        }
 
         # The operator reads its controller URI + config from a ConfigMap, and the
         # chart has no config-checksum annotation — so a helm upgrade that only
         # changes config (e.g. a new controller host) won't roll the pod on its own.
         # Force a restart so config changes always take effect.
         & kubectl --context $kubeContext -n $Namespace rollout restart deploy/communication-operator | Out-Null
-        Write-Host "Waiting for the operator deployment to roll out..." -ForegroundColor Green
-        & kubectl --context $kubeContext -n $Namespace rollout status deploy/communication-operator --timeout=180s
-        if ($LASTEXITCODE -ne 0) { Write-Error "Operator rollout did not complete (exit code $LASTEXITCODE)."; return }
+        if (-not $Json) { Write-Host "Waiting for the operator deployment to roll out..." -ForegroundColor Green }
+        if ($Json) {
+            & kubectl --context $kubeContext -n $Namespace rollout status deploy/communication-operator --timeout=180s | Out-Null
+        } else {
+            & kubectl --context $kubeContext -n $Namespace rollout status deploy/communication-operator --timeout=180s
+        }
+        if ($LASTEXITCODE -ne 0) {
+            if ($Json) { Write-OctoJson -Command 'Deploy-OctoOperator' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = "operator rollout did not complete" }); return }
+            Write-Error "Operator rollout did not complete (exit code $LASTEXITCODE)."; return
+        }
 
+        if ($Json) {
+            Write-OctoJson -Command 'Deploy-OctoOperator' -Data (New-OctoActionResult -Success $true)
+            return
+        }
         Write-Host "Operator deployed and rolled out successfully." -ForegroundColor Cyan
     }
     finally {

@@ -21,20 +21,59 @@
 #>
 function Test-OctoEncryption {
     [CmdletBinding()]
-    param()
+    param([switch]$Json)
 
     $ai = $env:OCTO_AIENCRYPTION__INSTANCESECRETKEY
     $cc = $env:OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY
 
-    if ([string]::IsNullOrEmpty($ai)) {
+    $aiKeySet = -not [string]::IsNullOrEmpty($ai)
+    $ccKeySet = -not [string]::IsNullOrEmpty($cc)
+
+    if (-not $aiKeySet) {
+        if ($Json) {
+            Write-OctoJson -Command 'Test-OctoEncryption' -Data ([ordered]@{
+                passed      = $false
+                aiKeySet    = $false
+                ccKeySet    = [bool]$ccKeySet
+                keysMatch   = $false
+                validBase64 = $false
+                keyLength   = [int]0
+                message     = 'OCTO_AIENCRYPTION__INSTANCESECRETKEY is not set. Run Start-Octo first.'
+            })
+            return
+        }
         Write-Host "FAIL  OCTO_AIENCRYPTION__INSTANCESECRETKEY is not set. Run Start-Octo first." -ForegroundColor Red
         return $false
     }
-    if ([string]::IsNullOrEmpty($cc)) {
+    if (-not $ccKeySet) {
+        if ($Json) {
+            Write-OctoJson -Command 'Test-OctoEncryption' -Data ([ordered]@{
+                passed      = $false
+                aiKeySet    = $true
+                ccKeySet    = $false
+                keysMatch   = $false
+                validBase64 = $false
+                keyLength   = [int]0
+                message     = 'OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY is not set. Run Start-Octo first.'
+            })
+            return
+        }
         Write-Host "FAIL  OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY is not set. Run Start-Octo first." -ForegroundColor Red
         return $false
     }
     if ($ai -ne $cc) {
+        if ($Json) {
+            Write-OctoJson -Command 'Test-OctoEncryption' -Data ([ordered]@{
+                passed      = $false
+                aiKeySet    = $true
+                ccKeySet    = $true
+                keysMatch   = $false
+                validBase64 = $false
+                keyLength   = [int]0
+                message     = 'Env vars hold DIFFERENT values - cross-service decrypt will fail.'
+            })
+            return
+        }
         Write-Host "FAIL  Env vars hold DIFFERENT values — cross-service decrypt will fail." -ForegroundColor Red
         Write-Host "  AI:  $($ai.Substring(0, [Math]::Min(16, $ai.Length)))..."
         Write-Host "  CC:  $($cc.Substring(0, [Math]::Min(16, $cc.Length)))..."
@@ -44,12 +83,49 @@ function Test-OctoEncryption {
     try {
         $bytes = [Convert]::FromBase64String($ai)
     } catch {
+        if ($Json) {
+            Write-OctoJson -Command 'Test-OctoEncryption' -Data ([ordered]@{
+                passed      = $false
+                aiKeySet    = $true
+                ccKeySet    = $true
+                keysMatch   = $true
+                validBase64 = $false
+                keyLength   = [int]0
+                message     = 'Env var value is not valid base64.'
+            })
+            return
+        }
         Write-Host "FAIL  Env var value is not valid base64." -ForegroundColor Red
         return $false
     }
     if ($bytes.Length -ne 32) {
+        if ($Json) {
+            Write-OctoJson -Command 'Test-OctoEncryption' -Data ([ordered]@{
+                passed      = $false
+                aiKeySet    = $true
+                ccKeySet    = $true
+                keysMatch   = $true
+                validBase64 = $true
+                keyLength   = [int]$bytes.Length
+                message     = "Decoded key is $($bytes.Length) bytes; AES-256 requires 32."
+            })
+            return
+        }
         Write-Host "FAIL  Decoded key is $($bytes.Length) bytes; AES-256 requires 32." -ForegroundColor Red
         return $false
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Test-OctoEncryption' -Data ([ordered]@{
+            passed      = $true
+            aiKeySet    = $true
+            ccKeySet    = $true
+            keysMatch   = $true
+            validBase64 = $true
+            keyLength   = [int]$bytes.Length
+            message     = 'Both env vars set, byte-identical, decoded length 32. Cross-service decrypt will work.'
+        })
+        return
     }
 
     Write-Host "PASS  Both env vars set, byte-identical, decoded length 32. Cross-service decrypt will work." -ForegroundColor Green

@@ -25,6 +25,8 @@ function Test-OctoKindInfraRunning {
 }
 
 function Install-OctoInfrastructure {
+    param([switch]$Json)
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
@@ -85,15 +87,21 @@ function Install-OctoInfrastructure {
     # init user.
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Creating admin user' -PercentComplete 80
     docker exec mongo-0.mongo sh -c "mongosh admin /scripts/create-admin-user.js"
+    $exitCode = $LASTEXITCODE
 
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Complete' -PercentComplete 100
-    
+
+    Set-Location $basedir
+
+    if ($Json) {
+        Write-OctoJson -Command 'Install-OctoInfrastructure' -Data (New-OctoActionResult -Success ($exitCode -eq 0) -ExitCode $exitCode -Extra @{ action = 'install' })
+        return
+    }
+
     Clear-Host
     Write-Host "Initialization done. Containers are running."
     Write-Host "To stop the containers use 'Stop-OctoInfrastructure'"
     Write-Host "For the next start just 'Start-OctoInfrastructure'"
-    
-    Set-Location $basedir
 }
 
 function Set-WSLConfig {

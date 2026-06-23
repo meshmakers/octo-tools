@@ -12,25 +12,40 @@ kind cluster name. Defaults to "kind".
 #>
     param(
         [Parameter(Mandatory)] [string]$Image,
-        [Parameter()] [string]$ClusterName = "kind"
+        [Parameter()] [string]$ClusterName = "kind",
+        [Parameter()] [switch]$Json
     )
     if (-not (docker image inspect $Image 2>$null)) {
+        if ($Json) {
+            Write-OctoJson -Command 'Import-OctoImageToKind' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ image = $Image; error = "image not found in local Docker daemon" })
+            return
+        }
         Write-Error "Image '$Image' not found in the local Docker daemon. Build or pull it first."
         return
     }
-    Write-Host "Loading $Image into kind cluster '$ClusterName'" -ForegroundColor Green
+    if (-not $Json) { Write-Host "Loading $Image into kind cluster '$ClusterName'" -ForegroundColor Green }
     $kindOutput = & kind load docker-image $Image --name $ClusterName 2>&1
-    $kindOutput | ForEach-Object { Write-Host $_ }
+    if (-not $Json) { $kindOutput | ForEach-Object { Write-Host $_ } }
     if ($LASTEXITCODE -ne 0) {
         # Docker 23+ with the containerd image store exports a multi-platform OCI
         # index that kind's "ctr import --all-platforms" cannot fully resolve,
         # leaving an incomplete image on the node. Fall back to a single-platform
         # "docker save" piped straight into the node's containerd (no
         # --all-platforms), which only imports the blobs actually present.
-        Write-Host "kind load failed; falling back to single-platform docker save | ctr import" -ForegroundColor Yellow
+        if (-not $Json) { Write-Host "kind load failed; falling back to single-platform docker save | ctr import" -ForegroundColor Yellow }
         $controlPlane = "$ClusterName-control-plane"
         & docker save $Image | & docker exec -i $controlPlane ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -
-        if ($LASTEXITCODE -ne 0) { Write-Error "Fallback ctr import failed with exit code $LASTEXITCODE"; return }
+        if ($LASTEXITCODE -ne 0) {
+            if ($Json) {
+                Write-OctoJson -Command 'Import-OctoImageToKind' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ image = $Image; error = "fallback ctr import failed" })
+                return
+            }
+            Write-Error "Fallback ctr import failed with exit code $LASTEXITCODE"; return
+        }
+    }
+    if ($Json) {
+        Write-OctoJson -Command 'Import-OctoImageToKind' -Data (New-OctoActionResult -Success $true -Extra @{ image = $Image })
+        return
     }
     Write-Host "Loaded $Image" -ForegroundColor Cyan
 }
