@@ -1,6 +1,8 @@
 function Invoke-OctoCliLoginStaging {
     param($tenantId = "meshtest", $includeReporting = $false)
 
+    Write-Warning "Invoke-OctoCliLoginStaging is deprecated. Use 'Register-OctoCliContext -Installation staging-1 -TenantId $tenantId' instead (add -IncludeReporting / -IncludeAi as needed)."
+
     $contextName = "staging_$tenantId"
 
     if ($includeReporting) {

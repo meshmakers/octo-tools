@@ -1,6 +1,8 @@
 function Invoke-OctoCliLoginLocal {
     param($tenantId = "meshtest", $includeReporting = $false, $includeAi = $false)
 
+    Write-Warning "Invoke-OctoCliLoginLocal is deprecated. Use 'Register-OctoCliContext -Installation local -TenantId $tenantId' instead (add -IncludeReporting / -IncludeAi as needed)."
+
     $contextName = "local_$tenantId"
 
     $addArgs = @(

@@ -1,6 +1,8 @@
 function Invoke-OctoCliLoginProduction {
     param($tenantId = "meshtest", $includeReporting = $false)
 
+    Write-Warning "Invoke-OctoCliLoginProduction is deprecated. Use 'Register-OctoCliContext -Installation prod-1 -TenantId $tenantId' (or -Installation prod-2) instead (add -IncludeReporting as needed)."
+
     $contextName = "production_$tenantId"
 
     if ($includeReporting) {

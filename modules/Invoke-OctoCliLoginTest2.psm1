@@ -1,6 +1,8 @@
 function Invoke-OctoCliLoginTest2 {
     param($tenantId = "meshtest", $uriSuffix = "", $includeReporting = $false)
 
+    Write-Warning "Invoke-OctoCliLoginTest2 is deprecated. Use 'Register-OctoCliContext -Installation test-2 -TenantId $tenantId' instead (add -UriSuffix / -IncludeReporting / -IncludeAi as needed)."
+
     $uriExtension = if ($uriSuffix) { "-$uriSuffix" } else { "" }
     $contextSuffix = if ($uriSuffix) { "_$uriSuffix" } else { "" }
     $contextName = "test2${contextSuffix}_$tenantId"
