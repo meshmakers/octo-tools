@@ -56,7 +56,6 @@ function Global:Invoke-CloneMainRepos {
         # dev env (Install-OctoKubernetes / Deploy-OctoOperator) which read them from
         # octo-helm-core/src/. Easy to miss because it isn't a .NET service repo.
         "octo-helm-core"
-        "octo-frontend-admin-panel"
         "octo-frontend-libraries"
         "octo-frontend-refinery-studio"
     )

@@ -11,7 +11,7 @@ OctoMesh is a data transformation platform that converts raw data into meaningfu
 - **Primary Language**: PowerShell scripting
 - **Platform**: .NET 10.0 microservices
 - **Infrastructure**: Docker Compose with MongoDB replica set, CrateDB cluster, and RabbitMQ
-- **Frontend**: Angular-based admin panel
+- **Frontend**: Angular — Data Refinery Studio (octo-frontend-refinery-studio)
 
 ## Architecture
 
@@ -51,7 +51,6 @@ helper sets a safe `-Depth` so nested data isn't silently truncated).
 ### Building
 - `Invoke-BuildAll` - Build all repositories (use `-configuration Debug` for debug builds)
 - `Invoke-Build -repositoryPath .` - Build a single repository
-- `Invoke-BuildFrontend` - Build frontend projects specifically
 - `Invoke-BuildAndStartOcto` - Build everything and start the application
 
 ### Infrastructure Management

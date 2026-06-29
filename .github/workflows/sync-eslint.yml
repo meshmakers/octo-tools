@@ -12,11 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        repo: 
+        repo:
         - name: 'meshmakers/octo-frontend-libraries'
           path: 'src/FrontendLibraries/ClientApp/'
-        - name: 'meshmakers/octo-frontend-admin-panel'
-          path: 'src/AdminPanel/ClientApp/'
 
     steps:
     - name: Checkout octo-tools repo
