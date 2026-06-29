@@ -21,7 +21,7 @@ not abort the batch. Per-client log lines show Added/SkippedDuplicate counts so 
 can spot the actual deltas.
 
 The octo-cli ambient context (active context's TenantId + IdentityServiceUrl + auth tokens)
-is used. Switch contexts beforehand with `Invoke-OctoCliLoginLocal` (or equivalent) to target
+is used. Switch contexts beforehand with `Register-OctoCliContext -Installation local` (or equivalent) to target
 a different tenant.
 
 .PARAMETER OverlayFile

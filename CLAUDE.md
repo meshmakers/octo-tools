@@ -93,14 +93,10 @@ Backups operate on the Docker volumes; stop the infrastructure first (`Stop-Octo
 - `Invoke-MongoPortForward` - Port-forward MongoDB for direct DB access
 
 ### Authentication
-- `Register-OctoCliContext` - **Preferred** unified login for all installations (`-Installation local|test-2|staging-1|prod-1|prod-2`, `-IncludeReporting`, `-IncludeAi`, `-UriSuffix`, `-NoSwitch`, `-NoLogin`, `-Json`)
-- `Invoke-OctoCliLoginLocal` - **Deprecated** (emits a warning) → use `Register-OctoCliContext -Installation local`
-- `Invoke-OctoCliLoginProduction` - **Deprecated** (emits a warning) → use `Register-OctoCliContext -Installation prod-1`/`prod-2`
-- `Invoke-OctoCliLoginStaging` - **Deprecated** (emits a warning) → use `Register-OctoCliContext -Installation staging-1`
-- `Invoke-OctoCliLoginTest2` - **Deprecated** (emits a warning) → use `Register-OctoCliContext -Installation test-2`
+- `Register-OctoCliContext` - Unified login for all installations (`-Installation local|test-2|staging-1|prod-1|prod-2`, `-IncludeReporting`, `-IncludeAi`, `-UriSuffix`, `-NoSwitch`, `-NoLogin`, `-Json`). Replaces the removed per-environment `Invoke-OctoCliLogin{Local,Production,Staging,Test2}` helpers.
 
 ### Identity Overlays (AB#4209 Step 4)
-- `Apply-IdentityOverlay` - Fans `octo-cli -c ApplyClientOverlay` across the blueprint-managed clients listed in an overlay YAML file (default: `overlays/identity-local-dev.yaml`). Idempotent — re-running on the same DB is a no-op (server dedupes against existing URIs). Per-client log lines show Added/SkippedDuplicate counts. Add `-DryRun` to print the invocations without calling out. Uses the active octo-cli context (login first with `Invoke-OctoCliLoginLocal` or similar). Standalone today; Start-Octo wiring (`-SkipOverlay` opt-out) lands in a follow-up. Concept: `octo-platform-services/docs/concepts/phase-3-followup-identity-local-dev-overlay.md` §4.3.
+- `Apply-IdentityOverlay` - Fans `octo-cli -c ApplyClientOverlay` across the blueprint-managed clients listed in an overlay YAML file (default: `overlays/identity-local-dev.yaml`). Idempotent — re-running on the same DB is a no-op (server dedupes against existing URIs). Per-client log lines show Added/SkippedDuplicate counts. Add `-DryRun` to print the invocations without calling out. Uses the active octo-cli context (login first with `Register-OctoCliContext -Installation local` or similar). Standalone today; Start-Octo wiring (`-SkipOverlay` opt-out) lands in a follow-up. Concept: `octo-platform-services/docs/concepts/phase-3-followup-identity-local-dev-overlay.md` §4.3.
 
 ### Cluster Access (Rancher / Break-Glass)
 Two paths for Kubernetes access to managed clusters (test-2, staging-1, prod-1, prod-2, infra, local):

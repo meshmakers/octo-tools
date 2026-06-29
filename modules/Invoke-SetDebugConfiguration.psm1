@@ -2,7 +2,7 @@ function Invoke-SetDebugConfiguration
 {
     param([switch]$Json)
 
-    # Ensure that you have logged in to identity services (Invoke-OctoCliLoginLocal)
+    # Ensure that you have logged in to identity services (Register-OctoCliContext -Installation local)
 
     if ($Json) {
         $exitCode = 0

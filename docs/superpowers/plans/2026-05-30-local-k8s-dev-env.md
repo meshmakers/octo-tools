@@ -981,7 +981,7 @@ Run (separate invocations; ensure docker-compose infra is stopped first):
 pwsh -NoProfile -c '. ./octo-tools/modules/profile.ps1; Install-OctoKubernetes'
 pwsh -NoProfile -c '. ./octo-tools/modules/profile.ps1; Invoke-BuildAll -configuration DebugL -excludeFrontend $true'
 pwsh -NoProfile -c '. ./octo-tools/modules/profile.ps1; Start-Octo -nonInteractive $true -configuration DebugL'
-pwsh -NoProfile -c '. ./octo-tools/modules/profile.ps1; Invoke-OctoCliLoginLocal'
+pwsh -NoProfile -c '. ./octo-tools/modules/profile.ps1; Register-OctoCliContext -Installation local -TenantId meshtest'
 pwsh -NoProfile -c '. ./octo-tools/modules/profile.ps1; Deploy-OctoOperator -ImageTag latest'
 ```
 Expected: infra Ready; host services start and `octo-cli -c AuthStatus` succeeds (proves Mongo/RabbitMQ reachable from host); operator pod Ready.

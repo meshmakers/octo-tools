@@ -4,7 +4,8 @@ function Register-OctoCliContext {
         Registers an octo-cli context for one of the known OctoMesh installations.
 
     .DESCRIPTION
-        Unified replacement for Invoke-OctoCliLoginLocal / -Staging / -Production / -Test2.
+        Unified login for all OctoMesh installations (replaced the former
+        per-environment Invoke-OctoCliLogin{Local,Staging,Production,Test2} helpers).
         Builds the service URIs for the chosen installation, calls 'octo-cli -c AddContext',
         optionally switches to the new context and triggers an interactive login.
 

@@ -107,7 +107,7 @@ Start-Octo -configuration DebugL        # ⚠ blocks this terminal until you sto
 In a **second** `pwsh`, authenticate the CLI:
 
 ```powershell
-Invoke-OctoCliLoginLocal
+Register-OctoCliContext -Installation local -TenantId meshtest
 ```
 
 ---

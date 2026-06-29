@@ -107,7 +107,7 @@ Invoke-BuildAll -configuration DebugL -excludeFrontend $true
 Start-Octo -configuration DebugL
 
 # Authenticate the CLI
-Invoke-OctoCliLoginLocal
+Register-OctoCliContext -Installation local -TenantId meshtest
 
 # Frontends keep running as host dev servers (hot reload), pointed at the host backends:
 #   cd octo-frontend-refinery-studio/src/octo-mesh-refinery-studio ; npm start   (https://localhost:4200)
@@ -256,7 +256,7 @@ These were found by running every step on a real macOS / Docker 29 / Apple-Silic
 
 Verified end-to-end on Windows 11 / Docker Desktop 29 / PowerShell 7.4+ (the dev-registry pre-flight uses `Test-Connection -TcpPort`, added in 7.4). The bring-up is identical
 (`Install-OctoKubernetes` → `Deploy-OctoOperator` → `Invoke-BuildAll` → `Start-Octo` →
-`Invoke-OctoCliLoginLocal`); these Windows-specific fixes were needed:
+`Register-OctoCliContext -Installation local`); these Windows-specific fixes were needed:
 - **kind install:** `winget install Kubernetes.kind` (no Homebrew). winget updates the persisted
   user PATH but not already-running shells — restart the shell (or add
   `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Kubernetes.kind_*\` to PATH) before running the cmdlets.
