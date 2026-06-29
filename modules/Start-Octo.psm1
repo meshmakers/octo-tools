@@ -189,6 +189,15 @@ Use this function to selectively start OctoMesh services based on your requireme
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
 
+    # Point the local file-system catalogs at the selected branch checkout's .octo directory
+    # instead of the central ~/.octo defaults. Derived from $branchRootPath (= $rootPath/$branch)
+    # so the path tracks -branch (e.g. main -> meshmakers/main/.octo/...). The Start-Job service
+    # processes below inherit these; asset-repo binds OCTO_<section>__RootPath and resolves the
+    # catalogs per-checkout (RootPath drives content and, via ApplyRootPath, the co-located cache).
+    $branchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
+    $env:OCTO_LocalFileSystemCatalog__RootPath          = [System.IO.Path]::Combine($branchRootPath, ".octo/local-catalog")
+    $env:OCTO_LocalFileSystemBlueprintCatalog__RootPath = [System.IO.Path]::Combine($branchRootPath, ".octo/local-blueprint-catalog")
+
     # Concept §5: instance-level gate for stream data. With this set to true the asset-repo
     # accepts EnableStreamDataAsync calls per tenant; without it the controller throws
     # StreamDataNotEnabledException. Local dev defaults to enabled.
