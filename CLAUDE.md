@@ -93,7 +93,7 @@ Backups operate on the Docker volumes; stop the infrastructure first (`Stop-Octo
 - `Invoke-MongoPortForward` - Port-forward MongoDB for direct DB access
 
 ### Authentication
-- `Invoke-OctoCliLoginLocal` - Login to local environment
+- `Invoke-OctoCliLoginLocal` - Login to local environment (`-includeReporting`/`-includeAi` add the reporting/AI service URIs)
 - `Invoke-OctoCliLoginProduction` - Login to production
 - `Invoke-OctoCliLoginStaging` - Login to staging
 - `Invoke-OctoCliLoginTest2` - Login to test2 environment
