@@ -104,7 +104,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$identityAssetRepoOnly = $false,
         [Parameter()] [Boolean]$reportingService = $false,
         [Parameter()] [string]$meshAdapterTenantId = "meshtest",
-        [Parameter()] [string]$meshAdapterId = "66004fda527ac79a03ecedd7",
+        [Parameter()] [string]$meshAdapterId = "670000000000000000000002",
         [Parameter()] [Boolean]$simulationAdapter = $false,
         [Parameter()] [string]$simulationAdapterTenantId = "meshtest",
         [Parameter()] [string]$simulationAdapterId = "65d5c447b420da3fb12381bc",
