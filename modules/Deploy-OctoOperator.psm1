@@ -91,11 +91,11 @@ Returns $true if the kind node can resolve a DNS name from inside the node.
 
 .DESCRIPTION
 Used as a Deploy-OctoOperator pre-flight. The node's kubelet pulls the operator image
-from the internal dev registry (image.privateRegistry, e.g. docker.mm.cloud), which
-resolves only over Tailscale's split-DNS (mm.cloud -> tailnet). If the node can't
-resolve it the pull ImagePullBackOff's and the rollout sits for the full timeout before
-erroring — so we check first and fail fast with an actionable message. `getent hosts`
-exits 0 only when the name resolves.
+from the dev registry (image.privateRegistry in your operator-dev-values.yaml). If that
+registry resolves only over a VPN/split-DNS and the node can't resolve it the pull
+ImagePullBackOff's and the rollout sits for the full timeout before erroring — so we
+check first and fail fast with an actionable message. `getent hosts` exits 0 only when
+the name resolves.
 #>
     param(
         [Parameter(Mandatory)] [string]$Node,
@@ -134,8 +134,8 @@ Helm release name. Defaults to "octo-operator".
 
 .PARAMETER ImageTag
 Operator image tag to deploy. Defaults to "main-latest" — the rolling tag CI
-publishes to the dev registry (docker.mm.cloud) on every main build. The image
-is pulled from the dev registry (image.privateRegistry in operator-dev-values.yaml).
+publishes to the dev registry on every main build. The image is pulled from the
+dev registry configured under `image.privateRegistry` in operator-dev-values.yaml.
 
 .PARAMETER ControllerHost
 Host/IP of the host-side Communication Controller. When empty, resolved from
@@ -169,15 +169,15 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
     }
 
     # === Pre-flight: fail fast if the operator image can't be pulled. ===
-    # The node's kubelet pulls the operator image from the internal dev registry
-    # (image.privateRegistry in the values), which resolves only over Tailscale's
-    # split-DNS. If the node can't resolve it the pull ImagePullBackOff's and the
+    # The node's kubelet pulls the operator image from the dev registry
+    # (image.privateRegistry in the values). If the registry resolves only over VPN/
+    # split-DNS and the node can't resolve it the pull ImagePullBackOff's and the
     # rollout waits out the full --timeout (180s) before failing — so check now and
     # tell the user exactly what to fix. Skipped when privateRegistry is empty
     # (locally-built images) or via -SkipRegistryCheck (image pre-loaded with kind load).
     if (-not $SkipRegistryCheck) {
         $node = "$ClusterName-control-plane"
-        $registry = "docker.mm.cloud"
+        $registry = $(try { (Get-OctoToolsConfig).registry.url } catch { "" })
         $m = Select-String -Path $values -Pattern '^\s*privateRegistry:\s*(\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($m) { $registry = $m.Matches[0].Groups[1].Value.Trim('"') }
         if (-not [string]::IsNullOrWhiteSpace($registry)) {

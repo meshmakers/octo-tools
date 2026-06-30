@@ -11,9 +11,10 @@ image:
   # build. Default to Always so every (re)deploy re-pulls. Deploy-OctoOperator drops
   # this back to IfNotPresent for offline/pre-loaded (-SkipRegistryCheck) deploys.
   pullPolicy: Always
-  # Pull the operator's own image from the dev registry (where CI pushes the
-  # rolling :main-latest tag), same place the adapter/app images come from.
-  privateRegistry: docker.mm.cloud
+  # Pull the operator's own image from the dev registry, same place the adapter / app
+  # images come from. Replace `your-dev-registry.example.com` with your registry host
+  # (or leave empty to pull from Docker Hub instead of a private registry).
+  privateRegistry: your-dev-registry.example.com
   tag: ""            # set via --set image.tag=... (Install-OctoKubernetes uses main-latest)
 
 operator:
@@ -28,16 +29,16 @@ operator:
   # registry to be reachable + pullable from the cluster (anon pull, else add a
   # docker-registry secret + imagePullSecrets per adapter — the operator's
   # adapterImagePullSecretName is currently a no-op).
-  imageRegistry: docker.mm.cloud
+  # Replace with your registry host (same value as image.privateRegistry above).
+  imageRegistry: your-dev-registry.example.com
   adapterIgnoreCertificateValidation: true
   communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
   # Cluster-wide ingress defaults the operator projects into EVERY deployed
-  # workload's ingress — mirrors test-2/staging so the same app deployed to either
-  # cluster gets a cert-manager-issued, trusted cert with no per-app change.
-  # Without this the operator renders a bare `ingress.enabled: true` (no
+  # workload's ingress — match this to the issuer set up by Install-OctoKubernetes
+  # so deployed workloads get a cert-manager-issued, trusted cert with no per-app
+  # change. Without this the operator renders a bare `ingress.enabled: true` (no
   # className / cluster-issuer / tls), so cert-manager issues no cert and
-  # ingress-nginx serves its self-signed "Fake Certificate" — which the local
-  # root CA can never validate.
+  # ingress-nginx serves its self-signed "Fake Certificate".
   ingress:
     className: nginx
     clusterIssuer: mm-cloud-issuer

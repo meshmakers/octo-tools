@@ -1,0 +1,52 @@
+{
+  "$schema": "./docs/installations-schema.json",
+  "_comment": "Copy this file to ~/.config/octo-tools/installations.json and adapt the values to your environment. See docs/installations-config.md for the schema reference.",
+
+  "registry": {
+    "url": "docker.example.com"
+  },
+
+  "rancher": {
+    "url": "https://rancher.example.com"
+  },
+
+  "vault": {
+    "addr": "https://vault.example.com"
+  },
+
+  "semaphore": {
+    "url": "https://semaphore.example.com",
+    "breakGlassProjectId": 1,
+    "breakGlassTemplateId": 1
+  },
+
+  "aiBastion": {
+    "url": "https://ai.example.com"
+  },
+
+  "installations": [
+    {
+      "name": "local",
+      "services": {
+        "assets":        "https://localhost:5001/",
+        "identity":      "https://localhost:5003/",
+        "bots":          "https://localhost:5009/",
+        "communication": "https://localhost:5015/",
+        "reporting":     "https://localhost:5007/",
+        "ai":            "https://localhost:5019/"
+      }
+    },
+    {
+      "_comment": "Cluster-style installation. {0} is replaced with the optional URI suffix (e.g. '-pr123') so the same template covers preview environments.",
+      "name": "example-test",
+      "services": {
+        "assets":        "https://assets{0}.test.example.com/",
+        "identity":      "https://connect{0}.test.example.com/",
+        "bots":          "https://bots{0}.test.example.com/",
+        "communication": "https://communication{0}.test.example.com/",
+        "reporting":     "https://reporting{0}.test.example.com/",
+        "ai":            "https://ai{0}.test.example.com/"
+      }
+    }
+  ]
+}

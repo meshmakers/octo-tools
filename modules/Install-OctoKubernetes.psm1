@@ -82,19 +82,25 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # sudo on macOS/Linux. Pass -SkipTrustCa for unattended/CI runs.
         [Parameter()] [switch]$SkipTrustCa,
         # The Communication Operator is deployed by default, pulled from the dev registry
-        # (docker.mm.cloud) at the rolling :main-latest tag — same place adapter/app images
-        # come from. Pass -SkipOperator to skip it.
+        # configured in your octo-tools config (`registry.url`) at the rolling :main-latest
+        # tag — same place adapter/app images come from. Pass -SkipOperator to skip it.
         [Parameter()] [switch]$SkipOperator,
         # Skip the upfront check that the dev registry is reachable, and the matching
         # node-level check in Deploy-OctoOperator. Use when images are pre-loaded
         # (kind load) so an unreachable registry must not block the install.
         [Parameter()] [switch]$SkipRegistryCheck,
-        # Internal dev container registry the node should be able to pull adapter images
-        # from. Its TLS cert is signed by an internal CA the kind node doesn't trust, so we
-        # configure containerd to skip verification for it. Pass "" to skip this.
-        [Parameter()] [string]$DevRegistry = "docker.mm.cloud",
+        # Dev container registry the kind node should be able to pull adapter images from.
+        # If its TLS cert is signed by an internal CA the kind node doesn't trust we
+        # configure containerd to skip verification for it. Defaults to the `registry.url`
+        # value from your octo-tools config (~/.config/octo-tools/installations.json).
+        # Pass "" to skip the registry hook entirely.
+        [Parameter()] [string]$DevRegistry,
         [Parameter()] [switch]$Json
     )
+
+    if (-not $PSBoundParameters.ContainsKey('DevRegistry')) {
+        $DevRegistry = $(try { (Get-OctoToolsConfig).registry.url } catch { "" })
+    }
 
     # Namespaces are fixed by the static manifests (namespaces.yaml, the infra YAML which is
     # applied without -n, and operator-dev-values.yaml). They are locals, not parameters,

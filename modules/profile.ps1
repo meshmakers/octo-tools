@@ -8,8 +8,6 @@ $publishVersion = "net10.0"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
 
-$env:TELERIK_LICENSE = "***REMOVED-TELERIK-LICENSE***"
-
 $pathSep = [System.IO.Path]::PathSeparator
 
 if ($IsMacOS) {
@@ -36,12 +34,14 @@ $Global:WantPromt = $true
 # extend path variable here so that the tools are available in the current session, and also in any child processes
 $env:PATH += "$pathSep$toolsPath"
 
-# Environment Variables for Semaphore, Vault and Rancher
-$env:SEMAPHORE_URL                       = 'https://semaphore.mm.cloud'
-$env:SEMAPHORE_BREAKGLASS_PROJECT_ID     = '1'
-$env:SEMAPHORE_BREAKGLASS_TEMPLATE_ID    = '125'
-$env:VAULT_ADDR                          = 'https://vault.mm.cloud'
-$env:RANCHER_URL                         = 'https://rancher.mm.cloud'
+# Environment-specific values (TELERIK_LICENSE, SEMAPHORE_URL, VAULT_ADDR, RANCHER_URL,
+# SEMAPHORE_BREAKGLASS_PROJECT_ID, SEMAPHORE_BREAKGLASS_TEMPLATE_ID) are intentionally not
+# hardcoded here. They come from one of two places, in this order:
+#   1. ~/.config/octo-tools/installations.json    -> populated below from Get-OctoToolsConfig
+#   2. your private profile (loaded near the end of this file)
+# See docs/installations-config.md for the config schema and `installations.example.json`
+# in the repo root for a starting template. Cmdlets that need any of these env vars throw
+# a clear error if neither path has set them.
 
 function Test-SubPath( [string]$directory, [string]$subpath ) {
     $dPath = [IO.Path]::GetFullPath( $directory )
@@ -50,6 +50,7 @@ function Test-SubPath( [string]$directory, [string]$subpath ) {
 }
 
 Import-Module "$modulePath/OctoJsonOutput.psm1"
+Import-Module "$modulePath/Get-OctoToolsConfig.psm1"
 Import-Module "$modulePath/Get-OctoInfrastructureStatus.psm1"
 Import-Module "$modulePath/Sync-AllGitRepos.psm1"
 Import-Module "$modulePath/Sync-AllSubmodules.psm1"
@@ -110,6 +111,23 @@ Import-Module "$modulePath/Compare-CkVersions.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
+}
+
+# Hydrate env vars from the user's octo-tools config, if present. Silent no-op if the
+# config doesn't exist yet — the user can also set these via the private profile below,
+# or leave them unset for cmdlets that don't need them.
+if (Test-Path (Get-OctoToolsConfigPath)) {
+    try {
+        $octoConfig = Get-OctoToolsConfig
+        if (-not $env:RANCHER_URL                       -and $octoConfig.rancher.url)               { $env:RANCHER_URL                       = $octoConfig.rancher.url }
+        if (-not $env:VAULT_ADDR                        -and $octoConfig.vault.addr)                { $env:VAULT_ADDR                        = $octoConfig.vault.addr }
+        if (-not $env:SEMAPHORE_URL                     -and $octoConfig.semaphore.url)             { $env:SEMAPHORE_URL                     = $octoConfig.semaphore.url }
+        if (-not $env:SEMAPHORE_BREAKGLASS_PROJECT_ID   -and $octoConfig.semaphore.breakGlassProjectId)   { $env:SEMAPHORE_BREAKGLASS_PROJECT_ID   = [string]$octoConfig.semaphore.breakGlassProjectId }
+        if (-not $env:SEMAPHORE_BREAKGLASS_TEMPLATE_ID  -and $octoConfig.semaphore.breakGlassTemplateId)  { $env:SEMAPHORE_BREAKGLASS_TEMPLATE_ID  = [string]$octoConfig.semaphore.breakGlassTemplateId }
+    }
+    catch {
+        Write-Warning "octo-tools config present but could not be loaded: $($_.Exception.Message)"
+    }
 }
 
 if (Test-Path $privateProfilePath) {

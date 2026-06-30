@@ -4,9 +4,46 @@ This repository contains tools to simplify the development and deployment of Oct
 
 # Getting started
 
-Have a look to the [docs](http://localhost:3000/docs/developerGuide/gettingStarted/intro) to get started with OctoMesh.
-
 The complete documentation of OctoMesh is available at https://docs.meshmakers.cloud.
+
+# Configuration
+
+Some of the tooling needs values that are environment-specific (the OctoMesh
+installations you want to talk to, your container registry, your Rancher /
+Vault / Semaphore endpoints, your Telerik Kendo UI license). Those don't live
+in this repo — they live in a per-developer config file outside of git.
+
+1. **Create the config directory** and copy the example file there:
+
+   ```bash
+   mkdir -p ~/.config/octo-tools
+   cp installations.example.json ~/.config/octo-tools/installations.json
+   ```
+
+   You can put the file somewhere else and point `OCTO_TOOLS_CONFIG` at it.
+
+2. **Edit it** for your environment. See
+   [`docs/installations-config.md`](docs/installations-config.md) for the
+   schema reference. The minimum useful content is one `installations[]`
+   entry — `local` (which the example provides) is enough for an
+   all-on-localhost dev loop.
+
+3. **Add a private profile** for anything that doesn't belong in a checked-in
+   config (in particular: your Telerik Kendo UI license, your Rancher API
+   token):
+
+   * macOS / Linux: `~/.config/powershell/Microsoft.PowerShell_profile_private.ps1`
+   * Windows: `~/.pwsh/profile.ps1`
+
+   Typical content:
+
+   ```powershell
+   $env:TELERIK_LICENSE   = "<your Kendo UI license JWT — see https://www.telerik.com/account/your-licenses>"
+   $env:RANCHER_API_TOKEN = "token-xxxxx:secret"
+   ```
+
+   `modules/profile.ps1` sources this file at the end of its bootstrap, so
+   anything set here wins over the config-file defaults.
 
 # Customizing Windows Terminal Profile
 
@@ -79,8 +116,8 @@ Anthropic subscription token on an OctoMesh tenant — the bastion CLI from
 ADR-15 / ADR-18 / #4123. Two cmdlets are exported once `profile.ps1` is sourced:
 
 ```powershell
-Register-AiBastion -Tenant acme -AdapterUrl https://ai.mm.cloud
-Get-AiBastionStatus -Tenant acme -AdapterUrl https://ai.mm.cloud
+Register-AiBastion -Tenant acme -AdapterUrl https://ai.example.com
+Get-AiBastionStatus -Tenant acme -AdapterUrl https://ai.example.com
 ```
 
 Authentication uses the operator's own OctoMesh OAuth token (the same one
@@ -98,12 +135,12 @@ wipes the credentials.
 
 ## Bastion host setup
 
-The intended deployment runs this module on `mm-ai-login.mm.cloud` (the
-shared bastion host). Allowed SSH users are managed in the OctoMesh
-identity service; the host's `/etc/ssh/sshd_config` restricts inbound
-shells to the `octo-bastion-operators` group. Each operator's session
-exports `OCTO_BASTION_TOKEN` from their `octo-cli` login and runs
-`Register-AiBastion` with the tenant slug they're onboarding.
+The intended deployment runs this module on a dedicated bastion host.
+Allowed SSH users are managed in the OctoMesh identity service; the host's
+`/etc/ssh/sshd_config` restricts inbound shells to a dedicated operator
+group. Each operator's session exports `OCTO_BASTION_TOKEN` from their
+`octo-cli` login and runs `Register-AiBastion` with the tenant slug they're
+onboarding.
 
 The cmdlet doesn't persist anything to disk; the only artefact of a
 successful run is the lease the adapter records server-side and a one-line

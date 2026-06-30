@@ -57,7 +57,7 @@ git clone git@github.com:meshmakers/octo-helm-core.git
 git -C ./octo-tools switch dev/local-k8s-dev-env
 ```
 
-**Dev registry:** `docker.mm.cloud` must be reachable (VPN) so the cluster can pull adapter images.
+**Dev registry:** `your-dev-registry.example.com` must be reachable (VPN) so the cluster can pull adapter images.
 `Install-OctoKubernetes` configures the node to skip TLS verification for it automatically (its cert
 is signed by an internal CA the node doesn't trust).
 
@@ -80,12 +80,12 @@ Stop-OctoInfrastructure
 ```powershell
 # Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
 # ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
-# Also configures the node to skip TLS verification for the docker.mm.cloud dev registry.
+# Also configures the node to skip TLS verification for the your-dev-registry.example.com dev registry.
 Install-OctoKubernetes
 ```
 
 The Communication Operator is deployed as part of bring-up — pulled from the dev registry
-(`docker.mm.cloud/meshmakers/octo-communication-operator:main-latest`, the rolling tag CI
+(`your-dev-registry.example.com/meshmakers/octo-communication-operator:main-latest`, the rolling tag CI
 publishes on every main build), same place adapter/app images come from. Use `-SkipOperator`
 to skip it. `Deploy-OctoOperator` remains available to (re)deploy the operator standalone.
 

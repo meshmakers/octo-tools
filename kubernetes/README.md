@@ -78,7 +78,7 @@ Install-OctoKubernetes
 ```
 
 The Communication Operator is deployed by `Install-OctoKubernetes` itself, pulled from the dev
-registry (`docker.mm.cloud/meshmakers/octo-communication-operator:main-latest`, the rolling tag
+registry (`your-dev-registry.example.com/meshmakers/octo-communication-operator:main-latest`, the rolling tag
 CI publishes on every main build) — the same registry the adapter/app images come from.
 `-SkipOperator` skips it. `Deploy-OctoOperator` is still available to (re)deploy it standalone:
 - `-ImageTag <tag>` — operator image tag (default `main-latest`; pulled from the dev registry via
@@ -140,12 +140,13 @@ helm --kube-context kind-kind upgrade --install demoapp \
 kubectl --context kind-kind -n octo port-forward deploy/demoapp 8080:80
 ```
 
-**Pulling from the dev registry (`docker.mm.cloud`):** `Install-OctoKubernetes` configures the
-kind node's containerd to `skip_verify` TLS for the dev registry (its cert is signed by an
+**Pulling from the dev registry:** `Install-OctoKubernetes` configures the kind node's
+containerd to `skip_verify` TLS for the dev registry (its cert is typically signed by an
 internal CA the node doesn't trust) via `kind-cluster.yaml`'s `containerdConfigPatches` +
 `/etc/containerd/certs.d/<registry>/hosts.toml`. The registry is the `-DevRegistry` parameter
-(default `docker.mm.cloud`; pass `""` to skip). With `operator.imageRegistry: docker.mm.cloud`
-in `operator-dev-values.yaml`, adapters then pull `docker.mm.cloud/meshmakers/octo-mesh-adapter:<tag>`.
+(default: the `registry.url` value from your octo-tools config — see `installations.example.json`;
+pass `""` to skip). With the same value set under `operator.imageRegistry` in
+`operator-dev-values.yaml`, adapters then pull `<your-registry>/meshmakers/octo-mesh-adapter:<tag>`.
 
 **Locally-built workload images:** set `image.privateRegistry=""`, `image.repository/tag` to
 your local build with `pullPolicy: IfNotPresent`, then load it into the node:
@@ -226,9 +227,10 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
   registration misbehaves, re-run `Deploy-OctoOperator` to pull the newest `:main-latest`.
 - **Adapter pod `ImagePullBackOff` with `x509: certificate signed by unknown authority`** — the
   node doesn't trust the dev registry's internal CA. `Install-OctoKubernetes` configures
-  `skip_verify` for `-DevRegistry` (default `docker.mm.cloud`); if you created the cluster before
-  that change, just re-run `Install-OctoKubernetes` (it adds the certs.d config + restarts
-  containerd if needed). Also make sure the registry is actually reachable (VPN) from the node.
+  `skip_verify` for `-DevRegistry` (default: `registry.url` from your octo-tools config); if you
+  created the cluster before that change, just re-run `Install-OctoKubernetes` (it adds the
+  certs.d config + restarts containerd if needed). Also make sure the registry is actually
+  reachable (VPN) from the node.
 - **`kind load` "content digest ... not found" / pod won't start with a locally-built image**
   — Docker's containerd image store breaks `kind load docker-image`. `Import-OctoImageToKind`
   already works around this; if you load images by hand, use
@@ -243,7 +245,7 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
 ## Notes on deviations from the original plan (discovered during implementation)
 
 These were found by running every step on a real macOS / Docker 29 / Apple-Silicon machine:
-- **Operator image:** pulled from the dev registry at `docker.mm.cloud/meshmakers/octo-communication-operator:main-latest` (rolling main-build tag).
+- **Operator image:** pulled from the dev registry at `your-dev-registry.example.com/meshmakers/octo-communication-operator:main-latest` (rolling main-build tag).
 - **Webhook certs:** generated with **openssl** inside `Deploy-OctoOperator` (self-contained) rather
   than `octo-cli -c GenerateOperatorCertificates` (octo-cli need not be built).
 - **`Get-HostLanIPv4`** falls back to interface enumeration because `GetHostAddresses(GetHostName())`

@@ -92,17 +92,17 @@ Backups operate on the Docker volumes; stop the infrastructure first (`Stop-Octo
 - `Invoke-MongoPortForward` - Port-forward MongoDB for direct DB access
 
 ### Authentication
-- `Register-OctoCliContext` - Unified login for all installations (`-Installation local|test-2|staging-1|prod-1|prod-2`, `-IncludeReporting`, `-IncludeAi`, `-UriSuffix`, `-NoSwitch`, `-NoLogin`, `-Json`). Replaces the removed per-environment `Invoke-OctoCliLogin{Local,Production,Staging,Test2}` helpers.
+- `Register-OctoCliContext` - Unified login for all installations defined under `installations[]` in `~/.config/octo-tools/installations.json` (`-Installation <name>`, `-IncludeReporting`, `-IncludeAi`, `-UriSuffix`, `-NoSwitch`, `-NoLogin`, `-Json`). The cmdlet looks the installation up by name and builds the service URIs from the configured `services.*` URL templates (`{0}` is substituted with `-$UriSuffix`). See `docs/installations-config.md` for the config schema. Replaces the removed per-environment `Invoke-OctoCliLogin{Local,Production,Staging,Test2}` helpers.
 
 ### Identity Overlays (AB#4209 Step 4)
 - `Apply-IdentityOverlay` - Fans `octo-cli -c ApplyClientOverlay` across the blueprint-managed clients listed in an overlay YAML file (default: `overlays/identity-local-dev.yaml`). Idempotent — re-running on the same DB is a no-op (server dedupes against existing URIs). Per-client log lines show Added/SkippedDuplicate counts. Add `-DryRun` to print the invocations without calling out. Uses the active octo-cli context (login first with `Register-OctoCliContext -Installation local` or similar). Standalone today; Start-Octo wiring (`-SkipOverlay` opt-out) lands in a follow-up. Concept: `octo-platform-services/docs/concepts/phase-3-followup-identity-local-dev-overlay.md` §4.3.
 
 ### Cluster Access (Rancher / Break-Glass)
-Two paths for Kubernetes access to managed clusters (test-2, staging-1, prod-1, prod-2, infra, local):
-- `Get-RancherKubeConfig -Cluster <name>` - Routine read-only access. Fetches a kubeconfig via the Rancher v3 API using your personal `RANCHER_API_TOKEN` and merges it into `~/.kube/config`. The resulting kubeconfig inherits whatever permissions the token user has — for AD users this is the read-only role set (no secrets, no exec, no write). Requires `RANCHER_URL` (set in `profile.ps1`) and `RANCHER_API_TOKEN` (set in the private profile, format `token-xxxxx:secret`, created in Rancher UI -> Account & API Keys).
-- `Request-BreakGlassKubeConfig -Cluster <name> -Reason "..." -DurationHours <1-4>` - Write access for incidents. Triggers a Semaphore playbook that provisions a short-lived `cluster-admin` ServiceAccount token via Vault response-wrapping, with audit entries in Semaphore, Vault, K8s audit log, and the `ops-breakglass` Teams channel. Used for incident response only; the token TTL closes the window automatically and an hourly cleanup reaps the SA/CRB. Full runbook in `meshmakers-infrastructure/docs/BREAK-GLASS-ACCESS.md`.
+Two paths for Kubernetes access to Rancher-managed clusters:
+- `Get-RancherKubeConfig -Cluster <name>` - Routine read-only access. Fetches a kubeconfig via the Rancher v3 API using your personal `RANCHER_API_TOKEN` and merges it into `~/.kube/config`. The resulting kubeconfig inherits whatever permissions the token user has. Requires `RANCHER_URL` (populated from `rancher.url` in your octo-tools config, or set in the private profile) and `RANCHER_API_TOKEN` (always set in the private profile, format `token-xxxxx:secret`, created in Rancher UI -> Account & API Keys).
+- `Request-BreakGlassKubeConfig -Cluster <name> -Reason "..." -DurationHours <1-4>` - Write access for incidents. Triggers a Semaphore playbook that provisions a short-lived `cluster-admin` ServiceAccount token via Vault response-wrapping, with audit entries in Semaphore, Vault, the K8s audit log, and your operations chat channel. The token TTL closes the window automatically. Requires the `semaphore.*` and `vault.addr` blocks in your octo-tools config (see `docs/installations-config.md`).
 
-No persistent `cluster-owner` is bound to any AD group on the managed clusters — write access must always go through the break-glass flow.
+This cmdlet pair assumes your clusters do not bind a persistent `cluster-owner` to any AD group — write access goes through the break-glass flow only.
 
 ## Project Structure
 

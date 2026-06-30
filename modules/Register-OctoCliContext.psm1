@@ -1,28 +1,34 @@
 function Register-OctoCliContext {
     <#
     .SYNOPSIS
-        Registers an octo-cli context for one of the known OctoMesh installations.
+        Registers an octo-cli context for one of the OctoMesh installations defined
+        in your octo-tools config.
 
     .DESCRIPTION
-        Unified login for all OctoMesh installations (replaced the former
+        Unified login for every OctoMesh installation listed under `installations[]`
+        in `~/.config/octo-tools/installations.json` (replaced the former
         per-environment Invoke-OctoCliLogin{Local,Staging,Production,Test2} helpers).
-        Builds the service URIs for the chosen installation, calls 'octo-cli -c AddContext',
-        optionally switches to the new context and triggers an interactive login.
+
+        Looks the installation up by name, builds the service URIs from the
+        configured `services.*` templates (replacing the `{0}` placeholder with
+        `-$UriSuffix` if supplied), calls `octo-cli -c AddContext`, and optionally
+        switches to the new context and triggers an interactive login.
+
+        See `installations.example.json` in the repo root for the schema and
+        `docs/installations-config.md` for the full reference.
 
     .PARAMETER Installation
-        Target OctoMesh installation: local, test-2, staging-1, prod-1 or prod-2.
-        Cluster domain mapping:
-          local     -> localhost
-          test-2    -> *.test-2.mm.cloud
-          staging-1 -> *.staging.octo-mesh.com         (Azure AKS staging-1)
-          prod-1    -> *.prod-1.octo-mesh.com          (Exoscale SKS Vienna)
-          prod-2    -> *.prod-2.octo-mesh.com          (Azure AKS prod-2)
+        Name of an installation defined in your config (typical values:
+        `local`, your test cluster, your staging or prod clusters).
 
     .PARAMETER TenantId
         Tenant id to bind the context to (required).
 
     .PARAMETER UriSuffix
-        Optional URI suffix used for Test2 sub-environments (e.g. 'pr123' -> assets-pr123.test-2.mm.cloud).
+        Optional URI suffix used for sub-environments (e.g. 'pr123' becomes the
+        substitution for `{0}` in the configured service URL templates, so a
+        template like `https://assets{0}.test.example.com/` resolves to
+        `https://assets-pr123.test.example.com/`).
         Also appended to the context name to keep contexts distinct.
 
     .PARAMETER IncludeReporting
@@ -38,24 +44,15 @@ function Register-OctoCliContext {
         If set, skips the interactive 'Login -i' step (useful for CI / client-credentials flow).
 
     .EXAMPLE
-        Register-OctoCliContext -Installation staging-1 -TenantId meshtest
+        Register-OctoCliContext -Installation local -TenantId meshtest
 
     .EXAMPLE
-        Register-OctoCliContext -Installation test-2 -TenantId voest -UriSuffix pr123 -IncludeReporting
-
-    .EXAMPLE
-        Register-OctoCliContext -Installation prod-1 -TenantId meshmakers -NoLogin
-
-    .EXAMPLE
-        Register-OctoCliContext -Installation prod-2 -TenantId voest -IncludeReporting
-
-    .EXAMPLE
-        Register-OctoCliContext -Installation local -TenantId meshtest -IncludeAi
+        Register-OctoCliContext -Installation example-test -TenantId mytenant -UriSuffix pr123 -IncludeReporting
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('local', 'test-2', 'staging-1', 'prod-1', 'prod-2')]
+        [ValidateNotNullOrEmpty()]
         [string]$Installation,
 
         [Parameter(Mandatory = $true)]
@@ -71,56 +68,27 @@ function Register-OctoCliContext {
         [switch]$Json
     )
 
+    $inst = Get-OctoInstallation -Name $Installation
+
     $uriExtension = if ($UriSuffix) { "-$UriSuffix" } else { "" }
     $contextSuffix = if ($UriSuffix) { "_$UriSuffix" } else { "" }
+    $contextName = "${Installation}${contextSuffix}_$TenantId"
 
-    switch ($Installation) {
-        'local' {
-            $contextName = "local${contextSuffix}_$TenantId"
-            $asu = "https://localhost:5001/"
-            $isu = "https://localhost:5003/"
-            $bsu = "https://localhost:5009/"
-            $csu = "https://localhost:5015/"
-            $rsu = "https://localhost:5007/"
-            $aisu = "https://localhost:5019/"
+    function Resolve-ServiceUri {
+        param([string]$Key)
+        $template = $inst.services.$Key
+        if (-not $template) {
+            throw "Installation '$Installation' does not define a '$Key' service URL in your octo-tools config."
         }
-        'test-2' {
-            $contextName = "test-2${contextSuffix}_$TenantId"
-            $asu = "https://assets$uriExtension.test-2.mm.cloud/"
-            $isu = "https://connect$uriExtension.test-2.mm.cloud/"
-            $bsu = "https://bots$uriExtension.test-2.mm.cloud/"
-            $csu = "https://communication$uriExtension.test-2.mm.cloud/"
-            $rsu = "https://reporting$uriExtension.test-2.mm.cloud/"
-            $aisu = "https://ai$uriExtension.test-2.mm.cloud/"
-        }
-        'staging-1' {
-            $contextName = "staging-1${contextSuffix}_$TenantId"
-            $asu = "https://assets$uriExtension.staging.octo-mesh.com/"
-            $isu = "https://connect$uriExtension.staging.octo-mesh.com/"
-            $bsu = "https://bots$uriExtension.staging.octo-mesh.com/"
-            $csu = "https://communication$uriExtension.staging.octo-mesh.com/"
-            $rsu = "https://reporting$uriExtension.staging.octo-mesh.com/"
-            $aisu = "https://ai$uriExtension.staging.octo-mesh.com/"
-        }
-        'prod-1' {
-            $contextName = "prod-1${contextSuffix}_$TenantId"
-            $asu = "https://assets$uriExtension.prod-1.octo-mesh.com/"
-            $isu = "https://connect$uriExtension.prod-1.octo-mesh.com/"
-            $bsu = "https://bots$uriExtension.prod-1.octo-mesh.com/"
-            $csu = "https://communication$uriExtension.prod-1.octo-mesh.com/"
-            $rsu = "https://reporting$uriExtension.prod-1.octo-mesh.com/"
-            $aisu = "https://ai$uriExtension.prod-1.octo-mesh.com/"
-        }
-        'prod-2' {
-            $contextName = "prod-2${contextSuffix}_$TenantId"
-            $asu = "https://assets$uriExtension.prod-2.octo-mesh.com/"
-            $isu = "https://connect$uriExtension.prod-2.octo-mesh.com/"
-            $bsu = "https://bots$uriExtension.prod-2.octo-mesh.com/"
-            $csu = "https://communication$uriExtension.prod-2.octo-mesh.com/"
-            $rsu = "https://reporting$uriExtension.prod-2.octo-mesh.com/"
-            $aisu = "https://ai$uriExtension.prod-2.octo-mesh.com/"
-        }
+        return $template -f $uriExtension
     }
+
+    $asu  = Resolve-ServiceUri 'assets'
+    $isu  = Resolve-ServiceUri 'identity'
+    $bsu  = Resolve-ServiceUri 'bots'
+    $csu  = Resolve-ServiceUri 'communication'
+    $rsu  = if ($IncludeReporting) { Resolve-ServiceUri 'reporting' } else { $null }
+    $aisu = if ($IncludeAi)        { Resolve-ServiceUri 'ai' }        else { $null }
 
     $addArgs = @(
         '-c', 'AddContext',
