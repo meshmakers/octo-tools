@@ -113,6 +113,16 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$aiService = $true,
         [Parameter()] [Boolean]$aiWorker = $false
     )
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Error "docker is not on PATH. Install Docker before running Start-Octo."
+        return
+    }
+    & docker info 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Docker daemon is not running. Start Docker (e.g. Docker Desktop) before running Start-Octo."
+        return
+    }
+
     if ($identityOnly) {
         $botService = $false;
         $assetRepoService = $false;
