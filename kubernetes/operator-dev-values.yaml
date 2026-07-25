@@ -12,9 +12,10 @@ image:
   # this back to IfNotPresent for offline/pre-loaded (-SkipRegistryCheck) deploys.
   pullPolicy: Always
   # Pull the operator's own image from the dev registry, same place the adapter / app
-  # images come from. Replace `your-dev-registry.example.com` with your registry host
-  # (or leave empty to pull from Docker Hub instead of a private registry).
-  privateRegistry: your-dev-registry.example.com
+  # images come from. Deploy-OctoOperator injects `registry.url` from your octo-tools
+  # config (~/.config/octo-tools/installations.json) here. Set a host to override the
+  # config for this checkout; keep empty to use the config (empty config = Docker Hub).
+  privateRegistry: ""
   tag: ""            # set via --set image.tag=... (Install-OctoKubernetes uses main-latest)
 
 operator:
@@ -29,8 +30,10 @@ operator:
   # registry to be reachable + pullable from the cluster (anon pull, else add a
   # docker-registry secret + imagePullSecrets per adapter — the operator's
   # adapterImagePullSecretName is currently a no-op).
-  # Replace with your registry host (same value as image.privateRegistry above).
-  imageRegistry: your-dev-registry.example.com
+  # Injected by Deploy-OctoOperator alongside image.privateRegistry (same host,
+  # from `registry.url` in the octo-tools config) unless privateRegistry above
+  # is set — then set this to the same value here.
+  imageRegistry: ""
   adapterIgnoreCertificateValidation: true
   communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
   # Cluster-wide ingress defaults the operator projects into EVERY deployed

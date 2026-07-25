@@ -66,7 +66,7 @@ they need is missing.
 
 | Field | Description |
 | --- | --- |
-| `url` | Default dev container registry. Used by `Install-OctoKubernetes -DevRegistry` and the `image.privateRegistry` lookup in `Deploy-OctoOperator`. |
+| `url` | Default dev container registry. Used by `Install-OctoKubernetes -DevRegistry` and injected by `Deploy-OctoOperator` into the operator deploy (`image.privateRegistry` + `operator.imageRegistry`), unless `operator-dev-values.yaml` sets a non-empty `image.privateRegistry` of its own. |
 
 ### `rancher`
 

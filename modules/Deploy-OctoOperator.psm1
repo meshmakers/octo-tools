@@ -91,7 +91,8 @@ Returns $true if the kind node can resolve a DNS name from inside the node.
 
 .DESCRIPTION
 Used as a Deploy-OctoOperator pre-flight. The node's kubelet pulls the operator image
-from the dev registry (image.privateRegistry in your operator-dev-values.yaml). If that
+from the dev registry (registry.url in the octo-tools config, overridable via
+image.privateRegistry in operator-dev-values.yaml). If that
 registry resolves only over a VPN/split-DNS and the node can't resolve it the pull
 ImagePullBackOff's and the rollout sits for the full timeout before erroring — so we
 check first and fail fast with an actionable message. `getent hosts` exits 0 only when
@@ -135,7 +136,9 @@ Helm release name. Defaults to "octo-operator".
 .PARAMETER ImageTag
 Operator image tag to deploy. Defaults to "main-latest" — the rolling tag CI
 publishes to the dev registry on every main build. The image is pulled from the
-dev registry configured under `image.privateRegistry` in operator-dev-values.yaml.
+dev registry resolved from `registry.url` in the octo-tools config
+(~/.config/octo-tools/installations.json); a non-empty `image.privateRegistry`
+in operator-dev-values.yaml overrides it.
 
 .PARAMETER ControllerHost
 Host/IP of the host-side Communication Controller. When empty, resolved from
@@ -150,7 +153,9 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         [string]$ControllerHost = "",
         # Skip the pre-flight that verifies the dev registry resolves from the kind
         # node. Use when the operator image is already on the node (kind load) and you
-        # deploy offline, so an unreachable registry must not block the deploy.
+        # deploy offline, so an unreachable registry must not block the deploy. Also
+        # skips the config-registry injection so the image reference stays
+        # registry-less and matches the pre-loaded image.
         [switch]$SkipRegistryCheck,
         [switch]$Json
     )
@@ -168,18 +173,36 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         return
     }
 
+    # === Resolve the dev registry. ===
+    # The registry host is environment-specific config (registry.url in
+    # ~/.config/octo-tools/installations.json), not a repo value — the tracked
+    # operator-dev-values.yaml deliberately ships without one. A non-empty
+    # privateRegistry in the values file still wins so a deliberate local
+    # override keeps working; the retired your-dev-registry.example.com
+    # placeholder is ignored so stale checkouts don't deploy a dead host.
+    # When resolved non-empty the value is injected into the helm deploy
+    # (image.privateRegistry + operator.imageRegistry) below; empty means the
+    # images come from Docker Hub and the resolve pre-flight is skipped.
+    $registry = $(try { (Get-OctoToolsConfig).registry.url } catch { "" })
+    $registryFromValues = $false
+    $m = Select-String -Path $values -Pattern '^\s*privateRegistry:\s*(\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($m) {
+        $valuesRegistry = $m.Matches[0].Groups[1].Value.Trim('"').Trim("'")
+        if (-not [string]::IsNullOrWhiteSpace($valuesRegistry) -and $valuesRegistry -ne 'your-dev-registry.example.com') {
+            $registry = $valuesRegistry
+            $registryFromValues = $true
+        }
+    }
+
     # === Pre-flight: fail fast if the operator image can't be pulled. ===
-    # The node's kubelet pulls the operator image from the dev registry
-    # (image.privateRegistry in the values). If the registry resolves only over VPN/
-    # split-DNS and the node can't resolve it the pull ImagePullBackOff's and the
-    # rollout waits out the full --timeout (180s) before failing — so check now and
-    # tell the user exactly what to fix. Skipped when privateRegistry is empty
-    # (locally-built images) or via -SkipRegistryCheck (image pre-loaded with kind load).
+    # The node's kubelet pulls the operator image from the dev registry. If the
+    # registry resolves only over VPN/split-DNS and the node can't resolve it the
+    # pull ImagePullBackOff's and the rollout waits out the full --timeout (180s)
+    # before failing — so check now and tell the user exactly what to fix. Skipped
+    # when the resolved registry is empty (locally-built / Docker Hub images) or
+    # via -SkipRegistryCheck (image pre-loaded with kind load).
     if (-not $SkipRegistryCheck) {
         $node = "$ClusterName-control-plane"
-        $registry = $(try { (Get-OctoToolsConfig).registry.url } catch { "" })
-        $m = Select-String -Path $values -Pattern '^\s*privateRegistry:\s*(\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($m) { $registry = $m.Matches[0].Groups[1].Value.Trim('"') }
         if (-not [string]::IsNullOrWhiteSpace($registry)) {
             $nodeRunning = (& docker inspect -f '{{.State.Running}}' $node 2>$null)
             if ($nodeRunning -ne 'true') {
@@ -297,13 +320,28 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # already on the node via 'kind load') keep IfNotPresent so kubelet uses the
         # cached image instead of trying to pull. Overrides image.pullPolicy in the values.
         $pullPolicy = if ($SkipRegistryCheck) { "IfNotPresent" } else { "Always" }
-        if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', pullPolicy '$pullPolicy', controller '$controllerUri')" -ForegroundColor Green }
+        # Inject the resolved config registry into the deploy unless the values
+        # file pins its own — then the file rules (it may deliberately differ,
+        # e.g. a local registry mirror). operator.imageRegistry gets the same
+        # host so deployed adapter/app workloads pull from the same place.
+        # Skipped for -SkipRegistryCheck (offline/pre-loaded) deploys: the image
+        # reference must stay registry-less so kubelet matches the image loaded
+        # into the node via 'kind load' / Import-OctoImageToKind.
+        $registryArgs = @()
+        if (-not $SkipRegistryCheck -and -not $registryFromValues -and -not [string]::IsNullOrWhiteSpace($registry)) {
+            $registryArgs = @(
+                "--set", "image.privateRegistry=$registry",
+                "--set", "operator.imageRegistry=$registry"
+            )
+        }
+        if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', registry '$registry', pullPolicy '$pullPolicy', controller '$controllerUri')" -ForegroundColor Green }
 
         $helmOut = & helm upgrade --install $ReleaseName $chart `
             --kube-context $kubeContext `
             --namespace $Namespace `
             --create-namespace `
             --values $values `
+            @registryArgs `
             --set "octo-mesh-crds.enabled=false" `
             --set "image.tag=$ImageTag" `
             --set "image.pullPolicy=$pullPolicy" `

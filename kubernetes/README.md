@@ -78,11 +78,13 @@ Install-OctoKubernetes
 ```
 
 The Communication Operator is deployed by `Install-OctoKubernetes` itself, pulled from the dev
-registry (`your-dev-registry.example.com/meshmakers/octo-communication-operator:main-latest`, the rolling tag
-CI publishes on every main build) — the same registry the adapter/app images come from.
+registry (`<registry.url>/meshmakers/octo-communication-operator:main-latest`, the rolling tag
+CI publishes on every main build) — the same registry the adapter/app images come from. The
+registry host comes from `registry.url` in your octo-tools config (`installations.json`); a
+non-empty `image.privateRegistry` in `operator-dev-values.yaml` overrides it for this checkout.
 `-SkipOperator` skips it. `Deploy-OctoOperator` is still available to (re)deploy it standalone:
-- `-ImageTag <tag>` — operator image tag (default `main-latest`; pulled from the dev registry via
-  `image.privateRegistry` in `operator-dev-values.yaml`).
+- `-ImageTag <tag>` — operator image tag (default `main-latest`; pulled from the dev registry
+  resolved as above).
 - `-ControllerHost <ip>` — override the host address the operator/adapters use to reach the
   controller. By default the cmdlet uses the kind node's Docker host-gateway
   (`host.docker.internal`, e.g. `192.168.65.254`) — a **stable** address that does not change with
@@ -145,11 +147,12 @@ containerd to `skip_verify` TLS for the dev registry (its cert is typically sign
 internal CA the node doesn't trust) via `kind-cluster.yaml`'s `containerdConfigPatches` +
 `/etc/containerd/certs.d/<registry>/hosts.toml`. The registry is the `-DevRegistry` parameter
 (default: the `registry.url` value from your octo-tools config — see `installations.example.json`;
-pass `""` to skip). With the same value set under `operator.imageRegistry` in
-`operator-dev-values.yaml`, adapters then pull `<your-registry>/meshmakers/octo-mesh-adapter:<tag>`.
+pass `""` to skip). `Deploy-OctoOperator` injects the same value as `operator.imageRegistry`,
+so adapters then pull `<your-registry>/meshmakers/octo-mesh-adapter:<tag>`.
 
-**Locally-built workload images:** set `image.privateRegistry=""`, `image.repository/tag` to
-your local build with `pullPolicy: IfNotPresent`, then load it into the node:
+**Locally-built workload images:** pass `-SkipRegistryCheck` to `Deploy-OctoOperator` (keeps the
+image reference registry-less and the pull policy `IfNotPresent`), set `image.repository/tag` to
+your local build, then load it into the node:
 ```powershell
 Import-OctoImageToKind -Image my-adapter:dev
 ```
