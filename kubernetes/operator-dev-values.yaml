@@ -36,6 +36,12 @@ operator:
   imageRegistry: ""
   adapterIgnoreCertificateValidation: true
   communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
+  # Identity authority the operator projects into every workload it deploys. Adapters
+  # validate bearer tokens against it, so without this a secured FromHttpRequest@2
+  # route rejects every caller: the adapter falls back to its compiled-in loopback
+  # default, refuses to use it, and disables JWT authentication altogether. Same host
+  # as the controller above — identity runs beside it as a host process.
+  authUri: ""                      # set via --set to https://<host-LAN-IP>:5003
   # Cluster-wide ingress defaults the operator projects into EVERY deployed
   # workload's ingress — match this to the issuer set up by Install-OctoKubernetes
   # so deployed workloads get a cert-manager-issued, trusted cert with no per-app

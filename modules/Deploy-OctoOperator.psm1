@@ -314,6 +314,10 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # Docker Desktop on macOS resolves host.docker.internal to IPv6 only.
         $uriHost = if ($ControllerHost -match ':' -and $ControllerHost -notmatch '^\[') { "[$ControllerHost]" } else { $ControllerHost }
         $controllerUri = "https://${uriHost}:5015"
+        # Identity runs beside the controller as a host process. The operator projects this
+        # into every workload it deploys; an adapter without it disables JWT authentication
+        # and refuses every caller of a secured FromHttpRequest@2 route.
+        $authUri = "https://${uriHost}:5003"
         # The operator runs the rolling :main-latest tag, so the image content changes
         # under a fixed tag. Force a fresh pull on every deploy (Always) for the normal
         # registry path; for an offline/pre-loaded deploy (-SkipRegistryCheck, image
@@ -334,7 +338,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
                 "--set", "operator.imageRegistry=$registry"
             )
         }
-        if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', registry '$registry', pullPolicy '$pullPolicy', controller '$controllerUri')" -ForegroundColor Green }
+        if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', registry '$registry', pullPolicy '$pullPolicy', controller '$controllerUri', identity '$authUri')" -ForegroundColor Green }
 
         $helmOut = & helm upgrade --install $ReleaseName $chart `
             --kube-context $kubeContext `
@@ -346,6 +350,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
             --set "image.tag=$ImageTag" `
             --set "image.pullPolicy=$pullPolicy" `
             --set "operator.communicationControllerUri=$controllerUri" `
+            --set "operator.authUri=$authUri" `
             --set-file "serviceHooks.caKey=$certDir/ca-key.pem" `
             --set-file "serviceHooks.caCrt=$certDir/ca.pem" `
             --set-file "serviceHooks.svcKey=$certDir/svc-key.pem" `
