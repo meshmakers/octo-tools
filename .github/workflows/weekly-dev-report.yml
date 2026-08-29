@@ -1,0 +1,114 @@
+name: Weekly Dev Report
+
+on:
+  schedule:
+    # Montag 05:00 UTC -> Report liegt vor Arbeitsbeginn bereit
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Zeitfenster in Tagen'
+        required: false
+        default: '7'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-dev-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout octo-tools
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Collect metrics
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          ORG=$(python3 -c "import json;print(json.load(open('metrics/config.json'))['org'])")
+          EX=$(python3 -c "import json;print(','.join(json.load(open('metrics/config.json'))['automation_repos']))")
+          DAYS="${{ github.event.inputs.days || '7' }}"
+          WEEK=$(date -u +%G-W%V)
+          echo "WEEK=$WEEK" >> "$GITHUB_ENV"
+
+          # Erstlauf: Vorwoche einmalig nachbilden, damit der erste Report
+          # echte Delta-Werte zeigt statt ueberall "neu".
+          if [ ! -f metrics/data/latest.json ]; then
+            AT=$(date -u -d "-$DAYS days" +%Y-%m-%d)
+            PREV_WEEK=$(date -u -d "-$DAYS days" +%G-W%V)
+            echo "Bootstrap: Snapshot zum Stand $AT"
+            python3 metrics/collect_metrics.py \
+              --org "$ORG" --mode clone --days "$DAYS" --until "$AT" --at "$AT" \
+              --exclude "$EX" --jobs 8 --out "metrics/data/$PREV_WEEK.json"
+            cp "metrics/data/$PREV_WEEK.json" metrics/data/latest.json
+          fi
+
+          PREV="--previous metrics/data/latest.json"
+
+          python3 metrics/collect_metrics.py \
+            --org "$ORG" --mode clone --days "$DAYS" --exclude "$EX" --jobs 8 \
+            $PREV --out "metrics/data/$WEEK.json"
+
+          cp "metrics/data/$WEEK.json" metrics/data/latest.json
+          python3 metrics/render_report.py \
+            --snapshot "metrics/data/$WEEK.json" \
+            --out "metrics/reports/$WEEK.html"
+          cp "metrics/reports/$WEEK.html" metrics/reports/latest.html
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-report-${{ env.WEEK }}
+          path: |
+            metrics/reports/${{ env.WEEK }}.html
+            metrics/data/${{ env.WEEK }}.json
+          retention-days: 90
+
+      - name: Commit snapshot and report
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add metrics/data metrics/reports
+          if git diff --cached --quiet; then
+            echo "Keine Aenderung."
+            exit 0
+          fi
+          git commit -m "chore(metrics): Wochenreport $WEEK"
+          for i in 1 2 3; do
+            if git push; then exit 0; fi
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          done
+          echo "Push nach 3 Versuchen fehlgeschlagen." >&2
+          exit 1
+
+      - name: Summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          s = json.load(open(f"metrics/data/{os.environ['WEEK']}.json"))
+          t = s["totals"]
+          print(f"## Wochenreport {s['window']['iso_week']}\n")
+          print(f"- **{t['commits']}** Commits von **{t['authors']}** Autoren "
+                f"in **{t['repos_active']}** von {t['repos_scanned']} Repos")
+          print(f"- **+{t['added']:,}** / **-{t['deleted']:,}** Zeilen "
+                f"(zusaetzlich {t['commits_automation']} Automation-Commits)")
+          print(f"- Bestand: **{t['code_loc']:,}** Code-Zeilen, "
+                f"{t['decisions']:,} Entscheidungspunkte\n")
+          print("| Repo | Commits | +/- | Wer |")
+          print("|---|---:|---:|---|")
+          for r in [x for x in s["repos"] if x["commits"] and not x["automation"]][:10]:
+              print(f"| `{r['name']}` | {r['commits']} | +{r['added']:,}/-{r['deleted']:,} | "
+                    f"{', '.join(r['authors'][:3])} |")
+          PY

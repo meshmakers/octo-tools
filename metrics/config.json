@@ -1,0 +1,12 @@
+{
+  "org": "meshmakers",
+  "window_days": 7,
+  "automation_repos": [
+    "meshmakers.github.io",
+    "construction-kit-libraries-build",
+    "blueprint-libraries-build",
+    "helm-chart-build",
+    "dockerimages"
+  ],
+  "_comment": "automation_repos werden weiterhin gescannt, aber aus Commit-, Autoren- und Rhythmus-Zahlen herausgerechnet, damit CI-Bots die Statistik nicht dominieren."
+}
