@@ -30,12 +30,22 @@ octo-cli                                       CRDs + communication-operator (ce
   change** (they already run with `OCTO_SYSTEM__USEDIRECTCONNECTION=true`).
 - **Cluster → host controller:** the operator and adapter pods reach the host-process
   Communication Controller via the kind node's **Docker host-gateway** (`host.docker.internal`,
-  e.g. `192.168.65.254`) — a stable address that does *not* change with your LAN/VPN/Tailscale IP —
-  with TLS validation bypassed (`adapterIgnoreCertificateValidation: true`) because the host serves a `localhost`
-  dev cert. **On Docker CE / Linux** the node has no `host.docker.internal` entry, so
+  e.g. `192.168.65.254`) — a stable address that does *not* change with your LAN/VPN/Tailscale IP.
+  **On Docker CE / Linux** the node has no `host.docker.internal` entry, so
   `Deploy-OctoOperator` falls back to the node's default-route gateway (the kind bridge gateway,
   e.g. `172.18.0.1`) — equally stable for the cluster's lifetime and routes to the host. For this
   to work the host services must listen on all interfaces (they bind `*:5015` etc., so they do).
+- **Controller TLS — the operator has no bypass.** `adapterIgnoreCertificateValidation: true`
+  reaches *adapter* pods only; the operator validates the controller's certificate like any other
+  client, and locally that fails twice over: the host serves a self-signed ASP.NET dev certificate
+  nothing in the cluster trusts, *and* the host-gateway address is not one of its SANs, so even
+  trusting it leaves hostname validation failing. `Deploy-OctoOperator` handles both automatically —
+  it reads the certificate off the running controller (by definition the one it will present),
+  hands it to the chart as `secrets.rootCa`, and connects by a hostname the certificate actually
+  names, mapping that name onto the reachable address with a pod `hostAlias`. It says which name it
+  chose. Pass `-SkipControllerTlsTrust` where the controller already serves a trusted certificate.
+  Start the controller **before** deploying the operator, otherwise there is no certificate to read
+  and the operator will not connect (the cmdlet warns rather than failing).
 
 ### In-cluster DNS + host-port contract
 
@@ -150,14 +160,20 @@ internal CA the node doesn't trust) via `kind-cluster.yaml`'s `containerdConfigP
 pass `""` to skip). `Deploy-OctoOperator` injects the same value as `operator.imageRegistry`,
 so adapters then pull `<your-registry>/meshmakers/octo-mesh-adapter:<tag>`.
 
-**Locally-built workload images:** pass `-SkipRegistryCheck` to `Deploy-OctoOperator` (keeps the
-image reference registry-less and the pull policy `IfNotPresent`), set `image.repository/tag` to
-your local build, then load it into the node:
+**Pre-loaded images (offline deploy):** pass `-SkipRegistryCheck` to `Deploy-OctoOperator`. It skips
+the registry-resolves-from-the-node pre-flight and sets pull policy `IfNotPresent`, then loads the
+image into the node yourself:
 ```powershell
 Import-OctoImageToKind -Image my-adapter:dev
 ```
 (`Import-OctoImageToKind` uses `kind load`, and automatically falls back to `docker save | ctr import`
 on hosts running Docker's containerd image store, where `kind load` produces an incomplete image.)
+
+Kubelet matches a pre-loaded image by its **full reference, registry prefix included** — a mismatch
+is `ErrImageNeverPull`, not a fallback — and both shapes occur: an image pulled from the dev registry
+and loaded keeps its `<registry>/meshmakers/...` prefix, a locally built one has none. So rather than
+assuming either, the cmdlet asks the node which reference it actually holds and sets
+`image.privateRegistry` to match, reporting its choice.
 
 ## Web exposure (ingress-nginx + cert-manager)
 
@@ -225,6 +241,18 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
     does by default — and (b) a host firewall (ufw/firewalld) isn't dropping traffic from the kind
     bridge subnet to host port 5015 (Docker usually adds the allow rule; a locked-down host may
     need one for the `172.18.0.0/16` kind subnet → `:5015`).
+- **Operator logs a TLS error against the controller** (`RemoteCertificateNameMismatch`,
+  `RemoteCertificateChainErrors`, or "The SSL connection could not be established") — it validates
+  that certificate and has no bypass, so the deploy has to wire trust up. Usually the controller
+  wasn't running when you deployed, so there was no certificate to read: start it with `Start-Octo`
+  and re-run `Deploy-OctoOperator`. Confirm the result on the pod — the spec should carry a
+  `hostAliases` entry and `operator.communicationControllerUri` should use the certificate's
+  hostname, not the raw gateway IP:
+  `kubectl -n octo-operator-system get pod -o jsonpath='{.items[0].spec.hostAliases}'`.
+- **Operator pod `ErrImageNeverPull` after `-SkipRegistryCheck`** — the image on the node is under
+  a different reference than the deploy asks for. List what the node actually holds with
+  `docker exec kind-control-plane crictl images | grep operator` and load the missing reference
+  (`Import-OctoImageToKind`); the prefix must match exactly.
 - **Operator/adapter version mismatch** — the operator runs the dev registry's rolling
   `:main-latest` image, which may lag/lead a controller you built from this branch. If pool
   registration misbehaves, re-run `Deploy-OctoOperator` to pull the newest `:main-latest`.

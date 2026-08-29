@@ -64,7 +64,7 @@ helper sets a safe `-Depth` so nested data isn't silently truncated).
 ### Local Kubernetes (Kind) dev environment
 An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, the CRDs, and the Communication Operator run inside a local [kind](https://kind.sigs.k8s.io/) cluster (the core .NET services still run as host processes via `Start-Octo`). The two infra modes share the same host ports and **cannot run at the same time**. Full runbook: `kubernetes/README.md`; from-scratch setup: `kubernetes/QUICKSTART.md`.
 - `Install-OctoKubernetes` - Create the kind cluster + CRDs + namespaces + in-cluster infra + ingress-nginx/cert-manager, then deploy the operator (idempotent; refuses while the docker-compose infra is up)
-- `Deploy-OctoOperator` - (Re)deploy the Communication Operator standalone from the dev registry (`:main-latest`)
+- `Deploy-OctoOperator` - (Re)deploy the Communication Operator standalone from the dev registry (`:main-latest`). Wires up trust for the host controller's TLS certificate on its own (the operator validates it and has no bypass — see `kubernetes/README.md`); `-SkipControllerTlsTrust` opts out. `-SkipRegistryCheck` deploys against an image already loaded into the node.
 - `Get-OctoKubernetesStatus` - Show pods, Helm releases, and host-port reachability for the kind cluster
 - `Uninstall-OctoKubernetes` - Delete the kind cluster and its data (also removes the local CA trust unless `-KeepCaTrust`)
 - `Add-OctoLocalCaTrust` / `Remove-OctoLocalCaTrust` - Trust/untrust the local root CA ("OctoMesh Local Dev Root CA") in the OS trust store

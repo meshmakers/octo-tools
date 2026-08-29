@@ -106,6 +106,114 @@ the name resolves.
     return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($out))
 }
 
+function Test-OctoNodeHasImage {
+    <#
+.SYNOPSIS
+True when the kind node already holds an image under exactly this reference.
+
+.DESCRIPTION
+Kubelet matches a pre-loaded image by its full reference, registry prefix
+included. `docker.mm.cloud/meshmakers/x:tag` and `meshmakers/x:tag` are two
+different references to it even when they name the same layers, so guessing
+wrong yields ErrImageNeverPull rather than a fallback. Ask the node instead of
+assuming.
+#>
+    param(
+        [Parameter(Mandatory)] [string]$Node,
+        [Parameter(Mandatory)] [string]$Reference
+    )
+    $listed = & docker exec $Node crictl images 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $listed) { return $false }
+    $repo, $tag = $Reference -split ':', 2
+    return [bool]($listed | Where-Object { $_ -match "^\s*$([regex]::Escape($repo))\s+$([regex]::Escape($tag))\s" })
+}
+
+function Get-OctoControllerTlsProfile {
+    <#
+.SYNOPSIS
+Works out how an in-cluster pod can reach a host-run Communication Controller
+over HTTPS: which hostname to use, whether an /etc/hosts alias is needed, and
+which certificate has to be trusted.
+
+.DESCRIPTION
+The operator validates the controller's TLS certificate like any other client —
+there is no bypass for its own SignalR hub connection (the chart's
+`adapterIgnoreCertificateValidation` only reaches adapter pods). Locally that
+breaks twice over:
+
+  * the controller presents a self-signed ASP.NET development certificate, which
+    nothing in the cluster trusts, and
+  * the only address a pod can actually reach the host on (the Docker host
+    gateway, e.g. host.docker.internal / 192.168.65.254) is normally NOT one of
+    that certificate's subject alternative names, so even a trusted certificate
+    fails hostname validation.
+
+This reads the certificate straight off the running controller — that is by
+definition the one it will present — and picks a SAN hostname to connect by. If
+that hostname does not already resolve to the reachable address, the caller maps
+it with a pod hostAlias. The certificate itself is self-signed, so it is its own
+trust anchor and can be handed to the chart as `secrets.rootCa`.
+
+Returns $null when the controller cannot be reached or presents no usable name;
+the caller then falls back to connecting by address.
+
+.PARAMETER Address
+Address the CLUSTER can reach the host on (IP or hostname) — the alias target.
+
+.PARAMETER ProbeAddress
+Address THIS machine reads the certificate on. Defaults to 127.0.0.1, and that
+default matters: the cluster-facing address is typically the Docker host gateway
+(192.168.65.254), which pods can reach but the host itself cannot — probing it
+would fail and silently skip the trust wiring. Same listener either way, so the
+certificate is identical.
+
+.PARAMETER Port
+Controller HTTPS port. Defaults to 5015.
+
+.PARAMETER OutFile
+Path the certificate PEM is written to, for `helm --set-file`.
+#>
+    param(
+        [Parameter(Mandatory)] [string]$Address,
+        [Parameter()] [string]$ProbeAddress = "127.0.0.1",
+        [Parameter()] [int]$Port = 5015,
+        [Parameter(Mandatory)] [string]$OutFile
+    )
+
+    # -servername is deliberately omitted: we want whatever the controller serves
+    # by default, which is what the operator will be handed too.
+    $handshake = "" | & openssl s_client -connect "${ProbeAddress}:${Port}" 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($handshake)) { return $null }
+
+    $pem = $handshake | & openssl x509 -outform PEM 2>$null
+    if ([string]::IsNullOrWhiteSpace($pem)) { return $null }
+    Set-Content -Path $OutFile -Value $pem -Encoding ascii
+
+    $text = & openssl x509 -in $OutFile -noout -text 2>$null
+    $sanLine = ($text | Select-String -Pattern 'DNS:|IP Address:' | Select-Object -First 1).ToString()
+    $dnsNames = [regex]::Matches($sanLine, 'DNS:([^,\s]+)') | ForEach-Object { $_.Groups[1].Value }
+    $ipNames  = [regex]::Matches($sanLine, 'IP Address:([^,\s]+)') | ForEach-Object { $_.Groups[1].Value }
+
+    # Already covered by an IP SAN? Then connect by address and skip the alias.
+    if ($ipNames -contains $Address) {
+        return [pscustomobject]@{ Hostname = $Address; NeedsAlias = $false; CertPath = $OutFile }
+    }
+
+    # Prefer a concrete name; a wildcard SAN (*.foo) is usable too, but only with a
+    # label substituted in — "*.foo" is not a hostname a client may connect to.
+    $name = $dnsNames | Where-Object { $_ -notmatch '^\*' -and $_ -ne 'localhost' } | Select-Object -First 1
+    if (-not $name) {
+        $wildcard = $dnsNames | Where-Object { $_ -match '^\*\.' } | Select-Object -First 1
+        if ($wildcard) { $name = $wildcard -replace '^\*', 'octo-controller' }
+    }
+    # 'localhost' is a SAN on every dev certificate but resolves to the pod itself,
+    # so it is only usable as a last resort with an alias overriding it — which
+    # would also break the pod's own loopback. Refuse instead.
+    if (-not $name) { return $null }
+
+    return [pscustomobject]@{ Hostname = $name; NeedsAlias = $true; CertPath = $OutFile }
+}
+
 function Deploy-OctoOperator {
     <#
 .SYNOPSIS
@@ -157,6 +265,12 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # skips the config-registry injection so the image reference stays
         # registry-less and matches the pre-loaded image.
         [switch]$SkipRegistryCheck,
+        # Skip reading the controller's TLS certificate and trusting it in the
+        # operator pod. Use when the controller serves a certificate the pod
+        # already trusts (a real cluster) — locally it is required, because the
+        # operator validates that certificate and has no bypass for its own hub
+        # connection.
+        [switch]$SkipControllerTlsTrust,
         [switch]$Json
     )
 
@@ -318,6 +432,38 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # into every workload it deploys; an adapter without it disables JWT authentication
         # and refuses every caller of a secured FromHttpRequest@2 route.
         $authUri = "https://${uriHost}:5003"
+
+        # === Make the controller's TLS reachable from inside the cluster. ===
+        # Two problems at once locally: the certificate is self-signed (nothing in
+        # the pod trusts it) and the address the pod can reach is not one of its
+        # SANs. Get-OctoControllerTlsProfile solves both — it hands back the
+        # certificate to trust and a hostname the certificate actually names, which
+        # we then point at the reachable address with a pod hostAlias.
+        $tlsArgs = @()
+        if (-not $SkipControllerTlsTrust) {
+            $tls = Get-OctoControllerTlsProfile -Address $ControllerHost -Port 5015 -OutFile "$certDir/controller-ca.pem"
+            if ($tls) {
+                $tlsArgs += @("--set-file", "secrets.rootCa=$certDir/controller-ca.pem")
+                if ($tls.NeedsAlias) {
+                    # Connect by the certificate's own name; the alias makes that name
+                    # resolve to the address the pod can actually reach.
+                    $controllerUri = "https://$($tls.Hostname):5015"
+                    $authUri = "https://$($tls.Hostname):5003"
+                    $tlsArgs += @(
+                        "--set", "hostAliases[0].ip=$ControllerHost",
+                        "--set", "hostAliases[0].hostnames[0]=$($tls.Hostname)"
+                    )
+                    if (-not $Json) { Write-Host "Controller TLS: trusting its certificate and reaching it as '$($tls.Hostname)' -> $ControllerHost (certificate does not name the address)" -ForegroundColor Cyan }
+                } else {
+                    if (-not $Json) { Write-Host "Controller TLS: trusting its certificate; the address is covered by a SAN" -ForegroundColor Cyan }
+                }
+            } elseif (-not $Json) {
+                # Not fatal: a controller that is not up yet, or one behind a publicly
+                # trusted certificate, both land here. Say so rather than failing —
+                # but the operator will not connect if the certificate is untrusted.
+                Write-Host "Could not read the controller's TLS certificate at ${ControllerHost}:5015 — deploying without trust wiring. If the operator cannot connect, start the controller first and re-run." -ForegroundColor Yellow
+            }
+        }
         # The operator runs the rolling :main-latest tag, so the image content changes
         # under a fixed tag. Force a fresh pull on every deploy (Always) for the normal
         # registry path; for an offline/pre-loaded deploy (-SkipRegistryCheck, image
@@ -328,15 +474,35 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # file pins its own — then the file rules (it may deliberately differ,
         # e.g. a local registry mirror). operator.imageRegistry gets the same
         # host so deployed adapter/app workloads pull from the same place.
-        # Skipped for -SkipRegistryCheck (offline/pre-loaded) deploys: the image
-        # reference must stay registry-less so kubelet matches the image loaded
-        # into the node via 'kind load' / Import-OctoImageToKind.
         $registryArgs = @()
-        if (-not $SkipRegistryCheck -and -not $registryFromValues -and -not [string]::IsNullOrWhiteSpace($registry)) {
-            $registryArgs = @(
-                "--set", "image.privateRegistry=$registry",
-                "--set", "operator.imageRegistry=$registry"
-            )
+        if (-not $registryFromValues -and -not [string]::IsNullOrWhiteSpace($registry)) {
+            # For a normal (pulling) deploy the registry always applies. For an
+            # offline deploy the reference has to match what is actually on the node
+            # byte for byte, and both shapes occur in practice: an image pulled from
+            # the dev registry and loaded keeps its `docker.mm.cloud/...` prefix,
+            # while a locally built one has none. Ask the node rather than guessing
+            # — a wrong guess is ErrImageNeverPull, not a fallback.
+            $injectRegistry = $true
+            if ($SkipRegistryCheck) {
+                $repository = "meshmakers/octo-communication-operator"
+                $m2 = Select-String -Path $values -Pattern '^\s*repository:\s*(\S+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($m2) { $repository = $m2.Matches[0].Groups[1].Value.Trim('"').Trim("'") }
+                $node = "$ClusterName-control-plane"
+                if (Test-OctoNodeHasImage -Node $node -Reference "$registry/${repository}:$ImageTag") {
+                    if (-not $Json) { Write-Host "Offline deploy: node holds '$registry/${repository}:$ImageTag' — keeping the registry prefix." -ForegroundColor DarkGray }
+                } elseif (Test-OctoNodeHasImage -Node $node -Reference "${repository}:$ImageTag") {
+                    $injectRegistry = $false
+                    if (-not $Json) { Write-Host "Offline deploy: node holds '${repository}:$ImageTag' without a registry prefix — omitting it." -ForegroundColor DarkGray }
+                } else {
+                    if (-not $Json) { Write-Host "Offline deploy: neither '$registry/${repository}:$ImageTag' nor '${repository}:$ImageTag' is on node '$node'. Load it first (Import-OctoImageToKind); deploying with the registry prefix." -ForegroundColor Yellow }
+                }
+            }
+            if ($injectRegistry) {
+                $registryArgs = @(
+                    "--set", "image.privateRegistry=$registry",
+                    "--set", "operator.imageRegistry=$registry"
+                )
+            }
         }
         if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', registry '$registry', pullPolicy '$pullPolicy', controller '$controllerUri', identity '$authUri')" -ForegroundColor Green }
 
@@ -346,6 +512,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
             --create-namespace `
             --values $values `
             @registryArgs `
+            @tlsArgs `
             --set "octo-mesh-crds.enabled=false" `
             --set "image.tag=$ImageTag" `
             --set "image.pullPolicy=$pullPolicy" `
@@ -388,4 +555,4 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
     }
 }
 
-Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp')
+Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp', 'Get-OctoControllerTlsProfile', 'Test-OctoNodeHasImage')
