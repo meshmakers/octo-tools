@@ -65,8 +65,13 @@ alone does nothing.
 .PARAMETER httpActivatorWorkloadAddressTemplate
 Where the activator forwards a request once the workload is awake. The in-cluster default
 `http://{release}` is unreachable for a controller running as a host process (ClusterIPs are not
-routable from the host), so this defaults to `http://{release}.localhost`, which goes back in
-through the ingress. Consequence, and it is not cosmetic: while the workload's endpoint is not
+routable from the host), so this defaults to `https://{release}.localhost`, which goes back in
+through the ingress. HTTPS, not HTTP, for two independent reasons found the hard way: the
+Docker Desktop host-port-80 forward resets connections outright (443 works), and even where it
+worked, ingress-nginx answers plain HTTP with a 308 ssl-redirect it issues before reading the
+body - either way every forward failed while direct HTTPS calls succeeded. The local dev root CA
+must be trusted in the system keychain (Add-OctoLocalCaTrust) or the controller cannot validate
+the ingress certificate. Consequence, and it is not cosmetic: while the workload's endpoint is not
 ready yet, that path lands on the activator again, the loop guard fires and the caller gets an
 immediate 503 instead of the request being held. The first request after hibernation therefore
 wakes the workload but fails; a retry a few seconds later succeeds. Holding the request needs the
@@ -131,7 +136,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$aiService = $true,
         [Parameter()] [Boolean]$aiWorker = $false,
         [Parameter()] [Boolean]$httpActivator = $false,
-        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "http://{release}.localhost"
+        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "https://{release}.localhost"
     )
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Error "docker is not on PATH. Install Docker before running Start-Octo."
