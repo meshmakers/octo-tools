@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from collect_metrics import (LANG, CODE_LANGS, CONFIG_LANGS, DOC_LANGS,
                              is_generated, lang_of, scan_tree, git, gh_api,
-                             looks_minified, git_auth_env, redact)
+                             looks_minified, git_auth_env, redact, check_token)
 
 LFS_MAGIC = b"version https://git-lfs.github.com/spec/"
 
@@ -166,8 +166,7 @@ def main():
     else:
         import tempfile
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-        if not token:
-            sys.exit("GH_TOKEN/GITHUB_TOKEN required in clone mode")
+        check_token(token, args.org)
         repos = [r for r in gh_api(f"orgs/{args.org}/repos?per_page=100&type=all", token)
                  if not r.get("archived")]
         wd = tempfile.mkdtemp(prefix="devhistory-")

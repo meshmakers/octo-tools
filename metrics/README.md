@@ -38,9 +38,14 @@ aufzuintegrieren, wie es GitHubs Code-Frequency-Graph tut — lag am Ende
 ## Voraussetzung
 
 Repo-Secret **`REPO_ACCESS_TOKEN`** mit Leserechten auf alle Org-Repos
-(`contents: read`, `metadata: read`). Das Secret existiert bereits für
-`sync-eslint.yml`; reicht sein Scope nicht, meldet der Collector die
-fehlgeschlagenen Klone als `::warning::` und rechnet ohne sie weiter.
+(fine-grained: Contents + Metadata read-only; klassisch: `repo:read`).
+
+Das Secret existiert bereits für `sync-eslint.yml`, war beim ersten Lauf am
+29.08.2026 aber **abgelaufen** (HTTP 401). Der Collector prüft den Token
+deshalb vorab und bricht mit einer Klartextmeldung ab, statt später mit einem
+Traceback. Reicht nur der Scope nicht, meldet er die fehlgeschlagenen Klone
+als `::warning::` und rechnet ohne sie weiter — beim ersten Lauf nach einer
+Rotation also in die Warnungen schauen.
 
 ## Was gemessen wird
 
