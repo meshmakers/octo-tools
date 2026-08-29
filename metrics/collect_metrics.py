@@ -8,7 +8,7 @@ Two modes:
 Emits a single JSON snapshot. Deltas are computed against a previous snapshot
 (--previous), so LOC/complexity trends need at least two runs.
 """
-import argparse, json, os, re, subprocess, sys, tempfile, shutil
+import argparse, base64, json, os, re, subprocess, sys, tempfile, shutil
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -99,6 +99,32 @@ def decision_points(text: str, lang: str) -> int:
     elif key in ("python", "shell", "powershell"):
         body = re.sub(r"#[^\n]*", " ", body)
     return len(DECISION_RE[key].findall(body))
+
+# ------------------------------------------------------------------- git auth
+def git_auth_env(token):
+    """Environment for authenticated clones.
+
+    The token goes in via git's GIT_CONFIG_* env vars, never into the clone URL
+    and never onto the command line -- a CalledProcessError stringifies its argv,
+    so a tokenised URL would end up verbatim in the Action log.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_LFS_SKIP_SMUDGE"] = "1"     # LFS content is excluded anyway
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
+        env["GIT_CONFIG_VALUE_0"] = f"Authorization: Basic {basic}"
+    return env
+
+def redact(text, token):
+    """Second line of defence before anything git said reaches a log."""
+    text = str(text)
+    for secret in filter(None, (token, base64.b64encode(
+            f"x-access-token:{token}".encode()).decode() if token else None)):
+        text = text.replace(secret, "***")
+    return text
 
 # ------------------------------------------------------------------- git utils
 def git(repo, *args, timeout=300):
@@ -236,8 +262,13 @@ def main():
                          "Clone mode only -- never touches an existing working tree.")
     args = ap.parse_args()
 
-    until = (datetime.fromisoformat(args.until).replace(tzinfo=timezone.utc)
-             if args.until else datetime.now(timezone.utc))
+    if args.until:
+        parsed = datetime.fromisoformat(args.until)
+        # An explicit offset is honoured; only a naive timestamp defaults to UTC.
+        until = (parsed.astimezone(timezone.utc) if parsed.tzinfo
+                 else parsed.replace(tzinfo=timezone.utc))
+    else:
+        until = datetime.now(timezone.utc)
     since = until - timedelta(days=args.days)
     since_iso, until_iso = since.isoformat(), until.isoformat()
 
@@ -261,17 +292,24 @@ def main():
         if only:
             repos = [r for r in repos if r["name"] in only]
         workdir = tempfile.mkdtemp(prefix="devmetrics-")
+        genv = git_auth_env(token)
         targets = []
         def clone(r):
             dst = os.path.join(workdir, r["name"])
-            url = f"https://x-access-token:{token}@github.com/{args.org}/{r['name']}.git"
+            url = f"https://github.com/{args.org}/{r['name']}.git"
             try:
                 subprocess.run(["git", "clone", "--quiet", "--single-branch",
                                 "--depth", "400", url, dst],
-                               capture_output=True, check=True, timeout=900)
+                               capture_output=True, check=True, timeout=900, env=genv)
                 return (r["name"], dst)
+            except subprocess.CalledProcessError as e:
+                detail = redact(e.stderr.decode("utf-8", "replace")[:200], token)
+                print(f"::warning::clone failed {r['name']} (exit {e.returncode}): {detail}",
+                      file=sys.stderr)
+                return None
             except Exception as e:
-                print(f"::warning::clone failed {r['name']}: {str(e)[:200]}", file=sys.stderr)
+                print(f"::warning::clone failed {r['name']}: "
+                      f"{redact(type(e).__name__, token)}", file=sys.stderr)
                 return None
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
             targets = [t for t in ex.map(clone, repos) if t]

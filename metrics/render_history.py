@@ -228,6 +228,7 @@ def render(d):
             f"<td class='num strong'>{fmt(tot)}</td><td class='num'>{fmt(last12)}</td>"
             f"<td class='num quiet'>{esc(first)}</td></tr>")
 
+    growth12 = f"{T[-1]/T[i12]:.1f}\u00d7" if T[i12] else "neu"
     cal = d["calibration"]
     span = f"{MON[int(M[0][5:7])-1]} {M[0][:4]} bis {MON[int(M[-1][5:7])-1]} {M[-1][:4]}"
     peak_month = max(range(n), key=lambda i: C[i])
@@ -252,7 +253,7 @@ def render(d):
   <div class="tile"><span class="k">Zeilen heute</span><span class="v">{fmt(T[-1])}</span>
     <span class="s">aus {fmt(T[i12])} vor 12 Monaten</span></div>
   <div class="tile"><span class="k">Wachstum 12 M</span>
-    <span class="v">{T[-1]/T[i12]:.1f}×</span>
+    <span class="v">{growth12}</span>
     <span class="s">{signed(T[-1]-T[i12])} Zeilen</span></div>
   <div class="tile"><span class="k">Aktivster Monat</span>
     <span class="v">{C[peak_month]}</span>

@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Monthly history of commits and lines of code per language, across all repos.
 
-LOC over time is *integrated* from `git log --numstat` (running sum of added
-minus deleted per language) rather than measured by checking out every month.
-That is the same method GitHub's code-frequency graph uses. The script
-calibrates the result against the actually measured LOC at HEAD and reports
-the drift, so the approximation is visible instead of implied.
+With --exact (what the workflow uses) LOC is *measured*: for every month that
+had commits, the tree of that month's last commit is read straight from the git
+objects via ls-tree + cat-file --batch, with no checkout; quiet months carry the
+previous value forward.
+
+Without --exact it falls back to *integrating* `git log --numstat` (running sum
+of added minus deleted per language), the method GitHub's code-frequency graph
+uses. That variant came out +16.9% above the real line count on this org, so it
+is kept only as a cheap approximation.
+
+Either way the result is calibrated against the actually measured LOC at HEAD
+and the drift is reported, so the error is visible instead of implied.
 """
 import argparse, json, os, subprocess, sys
 from collections import defaultdict
@@ -14,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from collect_metrics import (LANG, CODE_LANGS, CONFIG_LANGS, DOC_LANGS,
                              is_generated, lang_of, scan_tree, git, gh_api,
-                             looks_minified)
+                             looks_minified, git_auth_env, redact)
 
 LFS_MAGIC = b"version https://git-lfs.github.com/spec/"
 
@@ -159,18 +166,27 @@ def main():
     else:
         import tempfile
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if not token:
+            sys.exit("GH_TOKEN/GITHUB_TOKEN required in clone mode")
         repos = [r for r in gh_api(f"orgs/{args.org}/repos?per_page=100&type=all", token)
                  if not r.get("archived")]
         wd = tempfile.mkdtemp(prefix="devhistory-")
+        genv = git_auth_env(token)
         def clone(r):
             dst = os.path.join(wd, r["name"])
-            url = f"https://x-access-token:{token}@github.com/{args.org}/{r['name']}.git"
+            url = f"https://github.com/{args.org}/{r['name']}.git"
             try:
                 subprocess.run(["git", "clone", "--quiet", "--single-branch", url, dst],
-                               capture_output=True, check=True, timeout=1800)
+                               capture_output=True, check=True, timeout=1800, env=genv)
                 return (r["name"], dst)
+            except subprocess.CalledProcessError as e:
+                print(f"::warning::clone {r['name']} (exit {e.returncode}): "
+                      f"{redact(e.stderr.decode('utf-8', 'replace')[:160], token)}",
+                      file=sys.stderr)
+                return None
             except Exception as e:
-                print(f"::warning::clone {r['name']}: {str(e)[:160]}", file=sys.stderr)
+                print(f"::warning::clone {r['name']}: {redact(type(e).__name__, token)}",
+                      file=sys.stderr)
                 return None
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
             targets = [t for t in ex.map(clone, repos) if t]
