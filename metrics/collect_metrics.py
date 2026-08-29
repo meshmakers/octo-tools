@@ -43,12 +43,19 @@ LOCK_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock
 GEN_PATTERNS = (".designer.cs", ".g.cs", ".generated.cs", ".g.ts", ".generated.ts",
                 "/generated/", "/gen/graphql", ".min.js", ".min.css",
                 "/dist/", "/node_modules/", "/wwwroot/templates/", "/wwwroot/lib/")
+# Published catalogs: one serialised file per released version of every CK model,
+# blueprint and chart, written by CI and never edited. They grow monotonically with
+# each release -- System.Communication alone carries 26 versions of ~2.900 lines --
+# and made up 91% of all "JSON" before being excluded.
+CATALOG_PREFIXES = ("ck-models/", "blueprints/v1/", "charts/", "apps/")
 GEN_BUNDLE_RE = re.compile(r"^(chunk|main|polyfills|runtime|vendor|styles|scripts|bundle)"
                            r"[-.][A-Za-z0-9]{6,}\.(js|css)$")
 
 def is_generated(path: str) -> bool:
     base = os.path.basename(path)
     if base in LOCK_NAMES:
+        return True
+    if path.startswith(CATALOG_PREFIXES):
         return True
     low = path.lower()
     if any(p in low for p in GEN_PATTERNS):

@@ -60,6 +60,14 @@ gesmudgete Inhalt (in `octo-plug-zenon` 67.000 Zeilen Zenon-Testdaten), im
 Objektspeicher nur ein 130-Byte-Pointer — würde man LFS nicht ausschließen,
 widersprächen sich Wochen- und Historienreport genau um diesen Betrag.
 
+Ebenfalls ausgeschlossen sind die **publizierten Kataloge** (`ck-models/`,
+`blueprints/v1/`, `charts/`, `apps/`): je eine serialisierte Datei pro
+veröffentlichter Version jedes CK-Modells, Blueprints und Charts, von der CI
+geschrieben und nie von Hand bearbeitet. Sie wachsen mit jedem Release monoton
+— `System.Communication` allein trägt 26 Versionen à ~2.900 Zeilen — und
+machten **91 % aller JSON-Zeilen** aus. Die handgeschriebenen Quellen
+(`src/CkModels/**/ckModel.yaml`) bleiben selbstverständlich gezählt.
+
 Zusätzlich greift eine **Inhaltsheuristik**: Dateien mit mehr als 300 Byte je
 Zeile gelten als Bundler-Output, egal wie sie heißen. Ohne sie schlug ein
 einzelnes ungetarntes webpack-Bundle unter `wwwroot/` mit 15.000
