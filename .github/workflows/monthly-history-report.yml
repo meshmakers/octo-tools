@@ -1,0 +1,90 @@
+name: Monthly History Report
+
+on:
+  schedule:
+    # 1. des Monats, 04:00 UTC
+    - cron: '0 4 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monthly-history-report
+  cancel-in-progress: false
+
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout octo-tools
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Collect history
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          ORG=$(python3 -c "import json;print(json.load(open('metrics/config.json'))['org'])")
+          EX=$(python3 -c "import json;print(','.join(json.load(open('metrics/config.json'))['automation_repos']))")
+          MONTH=$(date -u +%Y-%m)
+          echo "MONTH=$MONTH" >> "$GITHUB_ENV"
+
+          # Vollstaendige Klone: --exact vermisst jeden Monatsend-Baum aus den Git-Objekten.
+          python3 metrics/history_metrics.py \
+            --org "$ORG" --mode clone --exact --exclude "$EX" --jobs 8 \
+            --out "metrics/data/history-$MONTH.json"
+
+          cp "metrics/data/history-$MONTH.json" metrics/data/history-latest.json
+          python3 metrics/render_history.py \
+            --snapshot "metrics/data/history-$MONTH.json" \
+            --out "metrics/reports/history-$MONTH.html"
+          cp "metrics/reports/history-$MONTH.html" metrics/reports/history-latest.html
+
+      - name: Upload history artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-report-${{ env.MONTH }}
+          path: |
+            metrics/reports/history-${{ env.MONTH }}.html
+            metrics/data/history-${{ env.MONTH }}.json
+          retention-days: 365
+
+      - name: Commit history
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add metrics/data metrics/reports
+          if git diff --cached --quiet; then echo "Keine Aenderung."; exit 0; fi
+          git commit -m "chore(metrics): Historie $MONTH"
+          for i in 1 2 3; do
+            if git push; then exit 0; fi
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          done
+          exit 1
+
+      - name: Summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          d = json.load(open(f"metrics/data/history-{os.environ['MONTH']}.json"))
+          c = d["calibration"]
+          M, C, T = d["months"], d["commits"]["human"], d["loc_total"]
+          print(f"## Historie {M[0]} bis {M[-1]}\n")
+          print(f"- **{sum(C):,}** Commits von Menschen, "
+                f"{sum(d['commits']['automation']):,} von Bots")
+          print(f"- **{T[-1]:,}** Codezeilen heute, {T[max(len(T)-13,0)]:,} vor 12 Monaten")
+          print(f"- Gegenprobe gegen HEAD: Abweichung {c['drift']:+,} ({c['drift_pct']:+}%)\n")
+          print("| Sprache | Heute | vor 12 M |")
+          print("|---|---:|---:|")
+          i12 = max(len(T) - 13, 0)
+          for k, v in sorted(d["loc_cumulative"].items(), key=lambda kv: -kv[1][-1])[:8]:
+              print(f"| {k} | {v[-1]:,} | {v[i12]:,} |")
+          PY
