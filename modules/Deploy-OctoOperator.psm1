@@ -214,6 +214,102 @@ Path the certificate PEM is written to, for `helm --set-file`.
     return [pscustomobject]@{ Hostname = $name; NeedsAlias = $true; CertPath = $OutFile }
 }
 
+function Set-OctoControllerDnsAlias {
+    <#
+.SYNOPSIS
+Makes a hostname resolve cluster-wide to a given address by adding a `hosts`
+block to CoreDNS. Idempotent.
+
+.DESCRIPTION
+A pod hostAlias fixes name resolution for ONE pod. That is not enough here: the
+operator publishes its own `CommunicationControllerUri` into the Helm values of
+every workload it deploys (`WorkloadContextValuesBuilder`), so the name the
+operator connects by is also the name every adapter connects by — and adapters
+get no hostAlias. Left to normal DNS, `mac.local` resolves through the host's
+mDNS to whatever interface answers first (a Parallels/VPN address, in practice),
+which pods cannot reach; the adapters then sit at Unregistered forever while the
+operator itself is happily connected.
+
+Putting the mapping in CoreDNS instead fixes the name for the whole cluster at
+once, which is what the shared setting actually needs. `fallthrough` keeps every
+other name on the normal resolution path.
+
+.PARAMETER Hostname
+Name to map — the hostname taken from the controller certificate.
+
+.PARAMETER Address
+Address it should resolve to, reachable from inside the cluster.
+
+.PARAMETER KubeContext
+kubectl context of the cluster to patch.
+#>
+    param(
+        [Parameter(Mandatory)] [string]$Hostname,
+        [Parameter(Mandatory)] [string]$Address,
+        [Parameter(Mandatory)] [string]$KubeContext,
+        [switch]$Quiet
+    )
+
+    # Join explicitly: PowerShell hands back multi-line native output as a string
+    # ARRAY, and every regex/Insert below silently misbehaves on one of those.
+    $corefile = (& kubectl --context $KubeContext -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' 2>$null) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($corefile)) {
+        if (-not $Quiet) { Write-Host "Could not read the CoreDNS config; skipping the cluster-wide DNS alias. Workloads may not resolve '$Hostname'." -ForegroundColor Yellow }
+        return $false
+    }
+
+    $marker = "# octo-tools: controller alias"
+    $block = @"
+    $marker
+    hosts {
+       $Address $Hostname
+       fallthrough
+    }
+"@
+
+    # Replace our own previous block if present, else insert before the kubernetes
+    # plugin. Matching on the marker keeps us from touching a hosts block someone
+    # else added.
+    $pattern = [regex]::Escape($marker) + '\s*\r?\n\s*hosts\s*\{[^}]*\}'
+    if ([regex]::IsMatch($corefile, $pattern)) {
+        $updated = [regex]::Replace($corefile, $pattern, $block.TrimStart())
+    } else {
+        $anchor = [regex]::Match($corefile, '(?m)^\s*kubernetes\s')
+        if (-not $anchor.Success) {
+            if (-not $Quiet) { Write-Host "Unexpected CoreDNS config (no kubernetes plugin); skipping the DNS alias." -ForegroundColor Yellow }
+            return $false
+        }
+        $updated = $corefile.Insert($anchor.Index, $block + [Environment]::NewLine)
+    }
+
+    if ($updated -eq $corefile) {
+        if (-not $Quiet) { Write-Host "Cluster DNS already maps '$Hostname' to $Address." -ForegroundColor DarkGray }
+        return $true
+    }
+
+    $patchFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "coredns-patch-$([System.Guid]::NewGuid().ToString('N')).json")
+    try {
+        (@{ data = @{ Corefile = $updated } } | ConvertTo-Json -Depth 5 -Compress) | Set-Content -Path $patchFile -Encoding utf8
+        & kubectl --context $KubeContext -n kube-system patch configmap coredns --type merge --patch-file $patchFile | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            if (-not $Quiet) { Write-Host "Patching CoreDNS failed; workloads may not resolve '$Hostname'." -ForegroundColor Yellow }
+            return $false
+        }
+        # CoreDNS reloads the Corefile on its own within ~30s; restarting makes the
+        # change effective now so the deploy that follows does not race it. Both
+        # calls are best effort — the config is already patched, and a slow rollout
+        # only means the alias takes the reload interval to appear, so a timeout
+        # here must not read as a failure.
+        & kubectl --context $KubeContext -n kube-system rollout restart deploy/coredns 2>&1 | Out-Null
+        & kubectl --context $KubeContext -n kube-system rollout status deploy/coredns --timeout=120s 2>&1 | Out-Null
+        if (-not $Quiet) { Write-Host "Cluster DNS: '$Hostname' now resolves to $Address for every pod." -ForegroundColor Cyan }
+        return $true
+    }
+    finally {
+        Remove-Item -Path $patchFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Deploy-OctoOperator {
     <#
 .SYNOPSIS
@@ -454,6 +550,11 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
                         "--set", "hostAliases[0].hostnames[0]=$($tls.Hostname)"
                     )
                     if (-not $Json) { Write-Host "Controller TLS: trusting its certificate and reaching it as '$($tls.Hostname)' -> $ControllerHost (certificate does not name the address)" -ForegroundColor Cyan }
+                    # The pod alias alone is not enough. This URI is also projected into
+                    # every workload the operator deploys, and adapter pods get no alias
+                    # — so the name has to resolve for the whole cluster or the adapters
+                    # sit at Unregistered while the operator itself is connected.
+                    Set-OctoControllerDnsAlias -Hostname $tls.Hostname -Address $ControllerHost -KubeContext $kubeContext -Quiet:$Json | Out-Null
                 } else {
                     if (-not $Json) { Write-Host "Controller TLS: trusting its certificate; the address is covered by a SAN" -ForegroundColor Cyan }
                 }
@@ -555,4 +656,4 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
     }
 }
 
-Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp', 'Get-OctoControllerTlsProfile', 'Test-OctoNodeHasImage')
+Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp', 'Get-OctoControllerTlsProfile', 'Test-OctoNodeHasImage', 'Set-OctoControllerDnsAlias')

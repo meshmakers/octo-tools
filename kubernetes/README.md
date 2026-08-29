@@ -42,10 +42,20 @@ octo-cli                                       CRDs + communication-operator (ce
   trusting it leaves hostname validation failing. `Deploy-OctoOperator` handles both automatically —
   it reads the certificate off the running controller (by definition the one it will present),
   hands it to the chart as `secrets.rootCa`, and connects by a hostname the certificate actually
-  names, mapping that name onto the reachable address with a pod `hostAlias`. It says which name it
-  chose. Pass `-SkipControllerTlsTrust` where the controller already serves a trusted certificate.
-  Start the controller **before** deploying the operator, otherwise there is no certificate to read
-  and the operator will not connect (the cmdlet warns rather than failing).
+  names. It says which name it chose. Pass `-SkipControllerTlsTrust` where the controller already
+  serves a trusted certificate. Start the controller **before** deploying the operator, otherwise
+  there is no certificate to read and the operator will not connect (the cmdlet warns rather than
+  failing).
+- **That hostname has to resolve cluster-wide, not just in the operator pod.** The operator
+  publishes its own `communicationControllerUri` into the Helm values of every workload it deploys
+  (`WorkloadContextValuesBuilder`), so the name the operator connects by is also the name every
+  adapter connects by — and adapter pods get no `hostAlias`. Left to normal DNS, a name like
+  `mac.local` resolves through the host's mDNS to whichever interface answers first (a
+  Parallels/VPN address in practice), which pods cannot reach; the adapters then sit at
+  `Unregistered` forever while the operator itself is happily connected. `Deploy-OctoOperator`
+  therefore adds a `hosts` block to **CoreDNS** mapping the name to the reachable address for the
+  whole cluster (idempotent, marked `# octo-tools: controller alias`, with `fallthrough` so every
+  other name resolves normally), in addition to the operator pod's own `hostAlias`.
 
 ### In-cluster DNS + host-port contract
 
@@ -249,6 +259,30 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
   `hostAliases` entry and `operator.communicationControllerUri` should use the certificate's
   hostname, not the raw gateway IP:
   `kubectl -n octo-operator-system get pod -o jsonpath='{.items[0].spec.hostAliases}'`.
+- **Adapter deployed but stuck at `Unregistered`, operator itself connected** — the adapter pods
+  got a controller address they cannot reach. Check what the deployment was actually given and
+  whether it resolves to something reachable:
+  `kubectl -n octo get deploy <release> -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OCTO_ADAPTER__COMMUNICATIONCONTROLLERSERVICESURI")].value}'`,
+  then from inside the cluster
+  `kubectl -n octo run t --rm -i --restart=Never --image=curlimages/curl -- curl -sk -o /dev/null -w '%{http_code}' https://<name>:5015/`
+  (a `404` means the controller answered — that is success here). Re-running
+  `Deploy-OctoOperator` re-applies the CoreDNS alias.
+- **Pod `ErrImagePull` with `no match for platform in manifest`** — the image has no build for the
+  node's architecture (several adapter images ship `linux/amd64` only, and an Apple-Silicon kind
+  node is `arm64`). Check with
+  `docker manifest inspect <image>`. Docker Desktop on Apple Silicon registers **Rosetta** in the
+  VM kernel (`/proc/sys/fs/binfmt_misc/rosetta`, flags include `F`), which kind nodes inherit, so
+  the amd64 image does run once it is on the node — it just cannot be pulled. Load it by hand:
+  ```bash
+  docker pull --platform linux/amd64 <image>
+  docker save --platform linux/amd64 <image> | \
+    docker exec -i kind-control-plane ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs --platform linux/amd64 -
+  ```
+  Both `--platform` flags matter: without the one on `docker save` the export carries no layers
+  (an 856-byte index), and `ctr import` only takes native-platform content by default. `crictl
+  images` will **not** list a foreign-arch image even when it is complete — verify with
+  `ctr --namespace=k8s.io images check | grep <name>` (expect `complete`), and note the charts
+  default to `pullPolicy: IfNotPresent`, so kubelet then uses it instead of pulling.
 - **Operator pod `ErrImageNeverPull` after `-SkipRegistryCheck`** — the image on the node is under
   a different reference than the deploy asks for. List what the node actually holds with
   `docker exec kind-control-plane crictl images | grep operator` and load the missing reference
