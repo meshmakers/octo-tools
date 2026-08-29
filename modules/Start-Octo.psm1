@@ -54,6 +54,24 @@ The tenant ID to use for the Simulation Adapter. Defaults to "meshtest".
 .PARAMETER simulationAdapterId
 The adapter runtime ID to use for the Simulation Adapter. Defaults to "65d5c447b420da3fb12381bc".
 
+.PARAMETER httpActivator
+Enables the Communication Controller's HTTP activator (AB#4923), which wakes a hibernated
+on-demand workload when a request arrives for it. Off by default, matching the chart default.
+Only useful together with a kind cluster whose workload ingresses carry the
+`nginx.ingress.kubernetes.io/default-backend` annotation pointing at a Service that resolves to
+this host-run controller - the annotation is what routes a request to the activator; the flag
+alone does nothing.
+
+.PARAMETER httpActivatorWorkloadAddressTemplate
+Where the activator forwards a request once the workload is awake. The in-cluster default
+`http://{release}` is unreachable for a controller running as a host process (ClusterIPs are not
+routable from the host), so this defaults to `http://{release}.localhost`, which goes back in
+through the ingress. Consequence, and it is not cosmetic: while the workload's endpoint is not
+ready yet, that path lands on the activator again, the loop guard fires and the caller gets an
+immediate 503 instead of the request being held. The first request after hibernation therefore
+wakes the workload but fails; a retry a few seconds later succeeds. Holding the request needs the
+controller inside the cluster so it can forward straight to the workload Service.
+
 .PARAMETER nonInteractive
 If set to $true, the function will not wait for a keypress to exit. Instead it blocks until a job fails
 or a stop signal file is created. Use Stop-Octo to gracefully stop services in non-interactive mode.
@@ -111,7 +129,9 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$nonInteractive = $false,
         [Parameter()] [Boolean]$mcpService = $true,
         [Parameter()] [Boolean]$aiService = $true,
-        [Parameter()] [Boolean]$aiWorker = $false
+        [Parameter()] [Boolean]$aiWorker = $false,
+        [Parameter()] [Boolean]$httpActivator = $false,
+        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "http://{release}.localhost"
     )
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Error "docker is not on PATH. Install Docker before running Start-Octo."
@@ -225,6 +245,15 @@ Use this function to selectively start OctoMesh services based on your requireme
     # global.instanceSecretKey materialised into both env vars.
     $env:OCTO_AIENCRYPTION__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
     $env:OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
+
+    # HTTP activator (AB#4923). Set explicitly in both directions: the service processes are
+    # started as child processes and inherit this session's environment, so a value left over
+    # from an earlier Start-Octo in the same shell would otherwise keep the activator on after
+    # it was turned off.
+    $env:OCTO_COMMUNICATIONCONTROLLER__ACTIVATORENABLED = $httpActivator.ToString().ToLower()
+    if ($httpActivator) {
+        $env:OCTO_COMMUNICATIONCONTROLLER__ACTIVATORWORKLOADADDRESSTEMPLATE = $httpActivatorWorkloadAddressTemplate
+    }
 
     # Set environment to development, because so we get more information in the logs
     $env:ASPNETCORE_ENVIRONMENT = "Development"
