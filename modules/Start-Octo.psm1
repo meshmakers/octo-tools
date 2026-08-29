@@ -253,6 +253,12 @@ Use this function to selectively start OctoMesh services based on your requireme
     $env:OCTO_COMMUNICATIONCONTROLLER__ACTIVATORENABLED = $httpActivator.ToString().ToLower()
     if ($httpActivator) {
         $env:OCTO_COMMUNICATIONCONTROLLER__ACTIVATORWORKLOADADDRESSTEMPLATE = $httpActivatorWorkloadAddressTemplate
+        # The 30 s default forward budget is measured against test-2, where the endpoint gap after a
+        # wake is ~12 s. Locally the gap is 25-30 s (readiness initialDelay alone is 15 s, plus the
+        # kind pod boot), so the held request ran out of budget moments before the endpoint came up
+        # and the caller got a 503 for a workload that was already running. 90 s stays well under
+        # the 180 s proxy-read-timeout projected onto the workload ingresses.
+        $env:OCTO_COMMUNICATIONCONTROLLER__ACTIVATORFORWARDRETRYSECONDS = "90"
     }
 
     # Set environment to development, because so we get more information in the logs
