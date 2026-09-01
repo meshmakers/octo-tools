@@ -266,6 +266,34 @@ Use this function to selectively start OctoMesh services based on your requireme
         $env:OCTO_COMMUNICATIONCONTROLLER__ACTIVATORFORWARDRETRYSECONDS = "90"
     }
 
+    # AB#4884: platform-services' _configuration document only advertises optional services whose
+    # URL is announced here — its Reporting/AI/MCP defaults are empty ("not part of this
+    # installation"). Announce in both directions: the service processes inherit this session's
+    # environment, so a value left over from an earlier Start-Octo would otherwise advertise a
+    # service that is no longer running. The off-branch must Remove-Item (not assign ""), because
+    # PowerShell deletes an environment variable that is assigned an empty string. The
+    # will-actually-start decision for MCP/AI (switch AND built bin directory) is computed here,
+    # before PlatformServices starts, and reused by the start blocks below.
+    $mcpServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-mcp-service/bin/$configuration/$publishVersion/")
+    $mcpServiceAvailable = $mcpService -and (Test-Path $mcpServicePath)
+    $aiServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-ai-services/bin/$configuration/$publishVersion/")
+    $aiServiceAvailable = $aiService -and (Test-Path $aiServicePath)
+    if ($reportingService) {
+        $env:OCTO_PLATFORMSERVICES__REPORTINGSERVICEURL = "https://localhost:5007"
+    } else {
+        Remove-Item Env:OCTO_PLATFORMSERVICES__REPORTINGSERVICEURL -ErrorAction SilentlyContinue
+    }
+    if ($aiServiceAvailable) {
+        $env:OCTO_PLATFORMSERVICES__AISERVICESURL = "https://localhost:5019"
+    } else {
+        Remove-Item Env:OCTO_PLATFORMSERVICES__AISERVICESURL -ErrorAction SilentlyContinue
+    }
+    if ($mcpServiceAvailable) {
+        $env:OCTO_PLATFORMSERVICES__MCPSERVICEURL = "https://localhost:5017"
+    } else {
+        Remove-Item Env:OCTO_PLATFORMSERVICES__MCPSERVICEURL -ErrorAction SilentlyContinue
+    }
+
     # Set environment to development, because so we get more information in the logs
     $env:ASPNETCORE_ENVIRONMENT = "Development"
     
@@ -319,8 +347,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
 
     if ($mcpService) {
-        $mcpServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-mcp-service/bin/$configuration/$publishVersion/")
-        if (Test-Path $mcpServicePath) {
+        if ($mcpServiceAvailable) {
             Start-Service -branch $branch -workingDirectory "octo-mcp-service/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "McpServices.log" -cmdArguments @("Meshmakers.Octo.Backend.McpServices.dll", "--urls=https://0.0.0.0:5017;http://0.0.0.0:5016") -jobName "McpServices"
         } else {
             Write-Host "Skipping McpServices (directory not found: $mcpServicePath)" -ForegroundColor Yellow
@@ -328,8 +355,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
 
     if ($aiService) {
-        $aiServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-ai-services/bin/$configuration/$publishVersion/")
-        if (Test-Path $aiServicePath) {
+        if ($aiServiceAvailable) {
             # Main AI Adapter API + SignalR hub. Phase-1 default has the orchestrator spawn the
             # agent CLI as a subprocess (AiWorker:Mode=Subprocess), so the standalone AiWorker
             # below is not required for local end-to-end testing.
