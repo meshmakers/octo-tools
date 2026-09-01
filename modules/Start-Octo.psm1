@@ -270,15 +270,18 @@ Use this function to selectively start OctoMesh services based on your requireme
     # URL is announced here — its Reporting/AI/MCP defaults are empty ("not part of this
     # installation"). Announce in both directions: the service processes inherit this session's
     # environment, so a value left over from an earlier Start-Octo would otherwise advertise a
-    # service that is no longer running. The off-branch must Remove-Item (not assign ""), because
-    # PowerShell deletes an environment variable that is assigned an empty string. The
-    # will-actually-start decision for MCP/AI (switch AND built bin directory) is computed here,
-    # before PlatformServices starts, and reused by the start blocks below.
+    # service that is no longer running. The off-branch unsets the variable so platform-services
+    # falls back to its built-in empty default — PowerShell cannot represent an empty-string env
+    # var anyway (assigning "" deletes it), Remove-Item is just the explicit spelling. The
+    # will-actually-start decision (switch AND built bin directory) is computed here, before
+    # PlatformServices starts, and reused by the start blocks below.
+    $reportingServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-report-services/bin/$configuration/$publishVersion/")
+    $reportingServiceAvailable = $reportingService -and (Test-Path $reportingServicePath)
     $mcpServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-mcp-service/bin/$configuration/$publishVersion/")
     $mcpServiceAvailable = $mcpService -and (Test-Path $mcpServicePath)
     $aiServicePath = [System.IO.Path]::Combine($rootPath, $branch, "octo-ai-services/bin/$configuration/$publishVersion/")
     $aiServiceAvailable = $aiService -and (Test-Path $aiServicePath)
-    if ($reportingService) {
+    if ($reportingServiceAvailable) {
         $env:OCTO_PLATFORMSERVICES__REPORTINGSERVICEURL = "https://localhost:5007"
     } else {
         Remove-Item Env:OCTO_PLATFORMSERVICES__REPORTINGSERVICEURL -ErrorAction SilentlyContinue
@@ -330,7 +333,11 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -branch $branch -workingDirectory "octo-platform-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "PlatformServices.log" -cmdArguments @("Meshmakers.Octo.Backend.PlatformServices.dll", "--urls=https://0.0.0.0:5025;http://0.0.0.0:5024") -jobName "PlatformServices"
     }
     if ($reportingService) {
-        Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://0.0.0.0:5007;http://0.0.0.0:5006") -jobName "ReportingServices"
+        if ($reportingServiceAvailable) {
+            Start-Service -branch $branch -workingDirectory "octo-report-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "ReportingServices.log" -cmdArguments @("Meshmakers.Octo.Backend.ReportingServices.dll", "--urls=https://0.0.0.0:5007;http://0.0.0.0:5006") -jobName "ReportingServices"
+        } else {
+            Write-Host "Skipping ReportingServices (directory not found: $reportingServicePath)" -ForegroundColor Yellow
+        }
     }
     if ($simulationAdapter) {
         Write-Host "Starting SimulationAdapter (branch $( if ([string]::IsNullOrEmpty($branch)) { 'default' } else { $branch } )) -> TenantId=$simulationAdapterTenantId, AdapterId=$simulationAdapterId" -ForegroundColor Green
