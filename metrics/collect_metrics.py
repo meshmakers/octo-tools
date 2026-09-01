@@ -233,26 +233,25 @@ def scan_history(repo, since_iso, until_iso):
 
 # ---------------------------------------------------------------------- github
 def check_token(token, org):
-    """Fail loudly and usefully instead of a bare 401 traceback deep in the run."""
+    """Fail loudly and usefully instead of a bare 401/403 traceback deep in the run.
+
+    Deliberately does not call GET /user: that endpoint requires a user-bound
+    PAT and always 401s for a GitHub App installation token, which has no
+    associated user. Listing the org's repos works for both token kinds and
+    is the permission we actually need.
+    """
     if not token:
-        sys.exit("::error::No token. Set GH_TOKEN (workflow: secrets.REPO_ACCESS_TOKEN).")
-    try:
-        who = gh_api("user", token, paginate=False)[0].get("login", "?")
-    except Exception as e:
-        code = getattr(e, "code", None)
-        if code == 401:
-            sys.exit(f"::error::REPO_ACCESS_TOKEN is invalid or expired (HTTP 401 on /user). "
-                     f"Rotate the secret in repo Settings > Secrets and variables > Actions. "
-                     f"It needs read access to all {org} repositories "
-                     f"(fine-grained: Contents + Metadata, read-only; classic: repo:read).")
-        sys.exit(f"::error::Cannot reach the GitHub API: {type(e).__name__} {code or ''}")
+        sys.exit("::error::No token. Set GH_TOKEN (workflow: an app-token step's output, "
+                 "or secrets.REPO_ACCESS_TOKEN).")
     try:
         gh_api(f"orgs/{org}/repos?per_page=1&type=all", token, paginate=False)
     except Exception as e:
         code = getattr(e, "code", None)
-        sys.exit(f"::error::Token '{who}' cannot list repositories of org '{org}' "
-                 f"(HTTP {code}). Grant it organisation read access.")
-    print(f"Token ok (authenticated as {who})")
+        sys.exit(f"::error::GH_TOKEN cannot list repositories of org '{org}' (HTTP {code}). "
+                 f"For a GitHub App token: the app needs Contents + Metadata read access and "
+                 f"must be installed on {org}'s repositories. For a classic PAT: rotate it and "
+                 f"grant org read access (repo:read).")
+    print(f"Token ok (can list {org} repositories)")
 
 def gh_api(path, token, paginate=True):
     import urllib.request, urllib.error
