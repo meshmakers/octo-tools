@@ -38,6 +38,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          permission-contents: read
 
       - name: Generate GitHub App token (octo-metrics only)
         id: app-token-metrics
@@ -47,6 +48,7 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: octo-metrics
+          permission-contents: write
 
       - name: Checkout octo-metrics
         uses: actions/checkout@v4
@@ -55,6 +57,7 @@ jobs:
           token: ${{ steps.app-token-metrics.outputs.token }}
           path: octo-metrics
           ref: main
+          persist-credentials: false
 
       - name: Collect metrics
         env:
@@ -102,10 +105,14 @@ jobs:
 
       - name: Commit snapshot and report
         working-directory: octo-metrics
+        env:
+          GH_TOKEN: ${{ steps.app-token-metrics.outputs.token }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config http.https://github.com/.extraheader \
+            "Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git add data reports
           if git diff --cached --quiet; then
             echo "Keine Aenderung."
