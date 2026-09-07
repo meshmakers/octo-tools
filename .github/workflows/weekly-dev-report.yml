@@ -39,12 +39,22 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
+      - name: Generate GitHub App token (octo-metrics only)
+        id: app-token-metrics
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: octo-metrics
+
       - name: Checkout octo-metrics
         uses: actions/checkout@v4
         with:
           repository: meshmakers/octo-metrics
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token-metrics.outputs.token }}
           path: octo-metrics
+          ref: main
 
       - name: Collect metrics
         env:
