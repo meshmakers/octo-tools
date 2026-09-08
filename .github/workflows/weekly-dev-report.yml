@@ -12,7 +12,7 @@ on:
         default: '7'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: weekly-dev-report
@@ -38,6 +38,26 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Generate GitHub App token (octo-metrics only)
+        id: app-token-metrics
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: octo-metrics
+          permission-contents: write
+
+      - name: Checkout octo-metrics
+        uses: actions/checkout@v4
+        with:
+          repository: meshmakers/octo-metrics
+          token: ${{ steps.app-token-metrics.outputs.token }}
+          path: octo-metrics
+          ref: main
+          persist-credentials: false
 
       - name: Collect metrics
         env:
@@ -52,43 +72,48 @@ jobs:
 
           # Erstlauf: Vorwoche einmalig nachbilden, damit der erste Report
           # echte Delta-Werte zeigt statt ueberall "neu".
-          if [ ! -f metrics/data/latest.json ]; then
+          if [ ! -f octo-metrics/data/latest.json ]; then
             AT=$(date -u -d "-$DAYS days" +%Y-%m-%d)
             PREV_WEEK=$(date -u -d "-$DAYS days" +%G-W%V)
             echo "Bootstrap: Snapshot zum Stand $AT"
             python3 metrics/collect_metrics.py \
               --org "$ORG" --mode clone --days "$DAYS" --until "$AT" --at "$AT" \
-              --exclude "$EX" --jobs 8 --out "metrics/data/$PREV_WEEK.json"
-            cp "metrics/data/$PREV_WEEK.json" metrics/data/latest.json
+              --exclude "$EX" --jobs 8 --out "octo-metrics/data/$PREV_WEEK.json"
+            cp "octo-metrics/data/$PREV_WEEK.json" octo-metrics/data/latest.json
           fi
 
-          PREV="--previous metrics/data/latest.json"
+          PREV="--previous octo-metrics/data/latest.json"
 
           python3 metrics/collect_metrics.py \
             --org "$ORG" --mode clone --days "$DAYS" --exclude "$EX" --jobs 8 \
-            $PREV --out "metrics/data/$WEEK.json"
+            $PREV --out "octo-metrics/data/$WEEK.json"
 
-          cp "metrics/data/$WEEK.json" metrics/data/latest.json
+          cp "octo-metrics/data/$WEEK.json" octo-metrics/data/latest.json
           python3 metrics/render_report.py \
-            --snapshot "metrics/data/$WEEK.json" \
-            --out "metrics/reports/$WEEK.html"
-          cp "metrics/reports/$WEEK.html" metrics/reports/latest.html
+            --snapshot "octo-metrics/data/$WEEK.json" \
+            --out "octo-metrics/reports/$WEEK.html"
+          cp "octo-metrics/reports/$WEEK.html" octo-metrics/reports/latest.html
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
           name: dev-report-${{ env.WEEK }}
           path: |
-            metrics/reports/${{ env.WEEK }}.html
-            metrics/data/${{ env.WEEK }}.json
+            octo-metrics/reports/${{ env.WEEK }}.html
+            octo-metrics/data/${{ env.WEEK }}.json
           retention-days: 90
 
       - name: Commit snapshot and report
+        working-directory: octo-metrics
+        env:
+          GH_TOKEN: ${{ steps.app-token-metrics.outputs.token }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add metrics/data metrics/reports
+          git config http.https://github.com/.extraheader \
+            "Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git add data reports
           if git diff --cached --quiet; then
             echo "Keine Aenderung."
             exit 0
@@ -96,7 +121,7 @@ jobs:
           git commit -m "chore(metrics): Wochenreport $WEEK"
           for i in 1 2 3; do
             if git push; then exit 0; fi
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git pull --rebase --autostash origin main
           done
           echo "Push nach 3 Versuchen fehlgeschlagen." >&2
           exit 1
@@ -105,7 +130,7 @@ jobs:
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, os
-          s = json.load(open(f"metrics/data/{os.environ['WEEK']}.json"))
+          s = json.load(open(f"octo-metrics/data/{os.environ['WEEK']}.json"))
           t = s["totals"]
           print(f"## Wochenreport {s['window']['iso_week']}\n")
           print(f"- **{t['commits']}** Commits von **{t['authors']}** Autoren "

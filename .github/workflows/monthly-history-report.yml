@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: monthly-history-report
@@ -33,6 +33,26 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Generate GitHub App token (octo-metrics only)
+        id: app-token-metrics
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: octo-metrics
+          permission-contents: write
+
+      - name: Checkout octo-metrics
+        uses: actions/checkout@v4
+        with:
+          repository: meshmakers/octo-metrics
+          token: ${{ steps.app-token-metrics.outputs.token }}
+          path: octo-metrics
+          ref: main
+          persist-credentials: false
 
       - name: Collect history
         env:
@@ -47,34 +67,39 @@ jobs:
           # Vollstaendige Klone: --exact vermisst jeden Monatsend-Baum aus den Git-Objekten.
           python3 metrics/history_metrics.py \
             --org "$ORG" --mode clone --exact --exclude "$EX" --jobs 8 \
-            --out "metrics/data/history-$MONTH.json"
+            --out "octo-metrics/data/history-$MONTH.json"
 
-          cp "metrics/data/history-$MONTH.json" metrics/data/history-latest.json
+          cp "octo-metrics/data/history-$MONTH.json" octo-metrics/data/history-latest.json
           python3 metrics/render_history.py \
-            --snapshot "metrics/data/history-$MONTH.json" \
-            --out "metrics/reports/history-$MONTH.html"
-          cp "metrics/reports/history-$MONTH.html" metrics/reports/history-latest.html
+            --snapshot "octo-metrics/data/history-$MONTH.json" \
+            --out "octo-metrics/reports/history-$MONTH.html"
+          cp "octo-metrics/reports/history-$MONTH.html" octo-metrics/reports/history-latest.html
 
       - name: Upload history artifact
         uses: actions/upload-artifact@v4
         with:
           name: history-report-${{ env.MONTH }}
           path: |
-            metrics/reports/history-${{ env.MONTH }}.html
-            metrics/data/history-${{ env.MONTH }}.json
+            octo-metrics/reports/history-${{ env.MONTH }}.html
+            octo-metrics/data/history-${{ env.MONTH }}.json
           retention-days: 365
 
       - name: Commit history
+        working-directory: octo-metrics
+        env:
+          GH_TOKEN: ${{ steps.app-token-metrics.outputs.token }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add metrics/data metrics/reports
+          git config http.https://github.com/.extraheader \
+            "Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git add data reports
           if git diff --cached --quiet; then echo "Keine Aenderung."; exit 0; fi
           git commit -m "chore(metrics): Historie $MONTH"
           for i in 1 2 3; do
             if git push; then exit 0; fi
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git pull --rebase --autostash origin main
           done
           exit 1
 
@@ -82,7 +107,7 @@ jobs:
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, os
-          d = json.load(open(f"metrics/data/history-{os.environ['MONTH']}.json"))
+          d = json.load(open(f"octo-metrics/data/history-{os.environ['MONTH']}.json"))
           c = d["calibration"]
           M, C, T = d["months"], d["commits"]["human"], d["loc_total"]
           print(f"## Historie {M[0]} bis {M[-1]}\n")
