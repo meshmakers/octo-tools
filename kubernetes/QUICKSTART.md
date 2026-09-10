@@ -51,12 +51,6 @@ operator chart). It is a **sibling** of `octo-tools` in your workspace:
 git clone git@github.com:meshmakers/octo-helm-core.git
 ```
 
-**Branch:** the kind scripts currently live on the feature branch — switch `octo-tools` to it:
-
-```powershell
-git -C ./octo-tools switch dev/local-k8s-dev-env
-```
-
 **Dev registry:** `your-dev-registry.example.com` must be reachable (VPN) so the cluster can pull adapter images.
 `Install-OctoKubernetes` configures the node to skip TLS verification for it automatically (its cert
 is signed by an internal CA the node doesn't trust).
