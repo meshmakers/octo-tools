@@ -4,12 +4,13 @@ Wöchentlicher Entwicklungsreport über die GitHub-Org `meshmakers`: Commits,
 Commit- und Code-Komplexität, Autoren, Zeitverteilung, Codezeilen je Sprache
 und die Veränderung je Repository.
 
-## Zwei Reports
+## Drei Reports
 
 | Report | Workflow | Takt | Skripte |
 |---|---|---|---|
 | **Wochenpuls** — was ist diese Woche passiert | `weekly-dev-report.yml` | Mo 05:00 UTC | `collect_metrics.py` → `render_report.py` |
 | **Wachstum der Codebasis** — Monatshistorie seit dem ersten Commit | `monthly-history-report.yml` | 1. des Monats 04:00 UTC | `history_metrics.py --exact` → `render_history.py` |
+| **Qualitätspuls** — Schichttreue, Test-Anteil, Nacharbeit | `quality-report.yml` | Mo 05:40 UTC | `quality_metrics.py` → `render_quality.py` |
 
 ## Was läuft wann
 
@@ -91,6 +92,58 @@ Autoren- und Rhythmuszahlen herausgerechnet — sonst dominieren CI-Bots die Sta
 Die Komplexität ist eine **Näherung**, kein statischer Analysator. Ihr Wert
 liegt im Wochenvergleich, nicht im Absolutwert.
 
+## Qualitätspuls
+
+Volumen und Qualität sind bewusst getrennte Reports. Eine Seite, die beides zeigt,
+lädt dazu ein, Wachstum als Fortschritt zu lesen — bei 4,2× LOC-Wachstum im Jahr
+2026 und median 8 aktiven Autoren pro Monat ist das die falsche Lesart.
+
+**Schichtkonformität.** Die Schicht steckt im Projektnamen und wird durchgehalten:
+`*.Contracts` als Vertrag, `*.Engine` und `Infrastructure` als Implementierung,
+`*.Tests` darüber. Geprüft wird gegen den `.csproj`-Graphen:
+
+| Regel | Warum |
+|---|---|
+| `*.Contracts` referenziert keine Implementierung | Der Vertrag muss ohne sie übersetzbar bleiben |
+| Produktionscode referenziert kein Testprojekt | Fixtures gehören nicht ins Produkt |
+| keine Zyklen zwischen Projekten | Ein Zyklus macht jede Schichtaussage wertlos |
+| Persistenztypen nur hinter der Repository-Grenze | `MongoDB.*`, `Npgsql`, `CrateDb.*` |
+
+Erster Lauf (2026-09, 71 Repos, 201 Projekte): Contracts→Impl 0, Zyklen 0,
+Prod→Test 1, Persistenz 2. Der Wert liegt also nicht im Aufräumen — die Architektur
+ist in Ordnung — sondern darin, dass Verfall auffällt, bevor er sich festsetzt.
+
+Zwei Fallstricke, die beim Bau dieser Regeln aufgetreten sind und die das Skript
+deshalb gesondert behandelt:
+
+- **Tote Usings sind kein Schichtbruch.** Fünf Identity-Controller importierten
+  `MongoDB.Bson`, benutzten daraus aber nichts — alle 33 `ObjectId`-Treffer waren
+  der hauseigene `OctoObjectId` aus `ConstructionKit.Contracts`. Sie werden
+  getrennt gezählt; würden sie als Verletzung erscheinen, wäre die Zahl unbrauchbar.
+- **Die Persistenzschicht darf Persistenz.** `Runtime.Engine.MongoDb` an sich selbst
+  zu melden ergab im ersten Entwurf 15 Fehlalarme. Projekte, deren Name auf
+  `.MongoDb`, `.CrateDb`, `.Postgres`, `.Npgsql`, `.Sql` oder `.Persistence` endet,
+  sind ausgenommen, Testcode ebenfalls.
+
+**Test-Anteil** ist Test-LOC ÷ Produktions-LOC, erkannt an Pfad und Dateiname
+(`tests/`, `*.spec.ts`, `*Tests.cs`, `*_test.go`). Das misst Zeilen, nicht
+Abdeckung: viel Testcode beweist keine guten Tests, wenig Testcode ist aber ein
+belastbarer Hinweis auf fehlende.
+
+**Rework-Rate** ist der Anteil geänderter Zeilen in Dateien, die vor weniger als
+30 Tagen zuletzt angefasst wurden — ein Durchlauf durch die Historie, der je Datei
+den letzten Anfasszeitpunkt mitführt. Sie ersetzt die Bug-Statistik: wer einen
+Fehler bemerkt und sofort behebt, legt dafür kein Work Item an, aber der Fix ist
+ein Commit auf frischem Code.
+
+**Warum keine Bug-Kennzahlen.** Bugs werden hier selbst eingetragen und meist am
+selben Tag behoben (AB#4931: angelegt 09:46, geschlossen 21:30). Eine Laufzeit
+misst in diesem Arbeitsmodus die Tippgeschwindigkeit; eine Bug-Menge misst die
+Meldedisziplin — wer sauberer dokumentiert, sähe schlechter aus. Offen ist ein
+Bug-zu-Issue-Verhältnis, das beide Seiten derselben Disziplin unterwirft und sie
+damit herauskürzt; es fehlt noch, weil sich ohne Klärung der Area-Path-Konvention
+nicht erkennen lässt, wer einen Fehler gefunden hat.
+
 ## Bekannte Lücken
 
 - **Azure DevOps ist nicht abgedeckt.** 16 Repos (u.a. alle `*-deployment`,
@@ -107,6 +160,13 @@ python3 metrics/collect_metrics.py --mode local \
   --exclude "$(python3 -c "import json;print(','.join(json.load(open('metrics/config.json'))['automation_repos']))")" \
   --out /tmp/week.json
 python3 metrics/render_report.py --snapshot /tmp/week.json --out /tmp/week.html
+
+# Qualitätspuls, ebenfalls ohne GitHub-Zugriff
+python3 metrics/quality_metrics.py --mode local \
+  --local-root ~/RiderProjects/meshmakers/main --days 30 \
+  --exclude "$(python3 -c "import json;print(','.join(json.load(open('metrics/config.json'))['automation_repos']))")" \
+  --out /tmp/quality.json
+python3 metrics/render_quality.py --snapshot /tmp/quality.json --out /tmp/quality.html
 ```
 
 Im `--mode local` stammt der LOC-Stand immer aus dem aktuellen Arbeitsbaum —
