@@ -1,0 +1,151 @@
+name: Quality Report
+
+on:
+  schedule:
+    # Montag 05:40 UTC -- nach dem Wochenpuls (05:00), damit beide Laeufe nicht
+    # gleichzeitig 76 Repos klonen.
+    - cron: '40 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Fenster fuer die Rework-Rate in Tagen'
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-report
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout octo-tools
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Generate GitHub App token (octo-metrics only)
+        id: app-token-metrics
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: octo-metrics
+          permission-contents: write
+
+      - name: Checkout octo-metrics
+        uses: actions/checkout@v4
+        with:
+          repository: meshmakers/octo-metrics
+          token: ${{ steps.app-token-metrics.outputs.token }}
+          path: octo-metrics
+          ref: main
+          persist-credentials: false
+
+      - name: Collect quality metrics
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          ORG=$(python3 -c "import json;print(json.load(open('metrics/config.json'))['org'])")
+          EX=$(python3 -c "import json;print(','.join(json.load(open('metrics/config.json'))['automation_repos']))")
+          DAYS="${{ github.event.inputs.days || '30' }}"
+          WEEK=$(date -u +%G-W%V)
+          echo "WEEK=$WEEK" >> "$GITHUB_ENV"
+
+          PREV=""
+          if [ -f octo-metrics/data/quality-latest.json ]; then
+            PREV="--previous octo-metrics/data/quality-latest.json"
+          fi
+
+          # Die Rework-Rate braucht Historie, nicht nur den HEAD-Baum -- der
+          # Collector klont mit --depth 400 wie der Wochenpuls.
+          python3 metrics/quality_metrics.py \
+            --org "$ORG" --mode clone --exclude "$EX" --jobs 8 --days "$DAYS" \
+            $PREV --out "octo-metrics/data/quality-$WEEK.json"
+
+          cp "octo-metrics/data/quality-$WEEK.json" octo-metrics/data/quality-latest.json
+          python3 metrics/render_quality.py \
+            --snapshot "octo-metrics/data/quality-$WEEK.json" \
+            --out "octo-metrics/reports/quality-$WEEK.html"
+          cp "octo-metrics/reports/quality-$WEEK.html" octo-metrics/reports/quality-latest.html
+
+      - name: Upload quality artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report-${{ env.WEEK }}
+          path: |
+            octo-metrics/reports/quality-${{ env.WEEK }}.html
+            octo-metrics/data/quality-${{ env.WEEK }}.json
+          retention-days: 180
+
+      - name: Commit snapshot and report
+        working-directory: octo-metrics
+        env:
+          GH_TOKEN: ${{ steps.app-token-metrics.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config http.https://github.com/.extraheader \
+            "Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git add data reports
+          if git diff --cached --quiet; then
+            echo "Keine Aenderung."
+            exit 0
+          fi
+          git commit -m "chore(metrics): Qualitaetsreport $WEEK"
+          for i in 1 2 3; do
+            if git push; then exit 0; fi
+            git pull --rebase --autostash origin main
+          done
+          echo "Push nach 3 Versuchen fehlgeschlagen." >&2
+          exit 1
+
+      - name: Summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          s = json.load(open(f"octo-metrics/data/quality-{os.environ['WEEK']}.json"))
+          a, c = s["architecture"], s["code"]
+          v = a["violations"]
+          total = sum(len(x) for x in v.values())
+          print(f"## Qualitaetspuls {os.environ['WEEK']}\n")
+          print(f"- **{total}** Schichtverletzungen in {a['projects']} Projekten "
+                f"({a['project_refs']} Projektverweise)")
+          print(f"- Test-Anteil **{c['test_ratio']:.1%}** "
+                f"({c['test_loc']:,} zu {c['prod_loc']:,} Zeilen)")
+          print(f"- Rework **{c['rework_ratio']:.1%}** der geaenderten Zeilen "
+                f"in {s['window']['days']} Tagen")
+          print(f"- Komplexitaet **{c['complexity_density']}** je 1.000 Codezeilen")
+          print(f"- Fan-in Contracts zu Engine: {a['fanin_contracts']} zu {a['fanin_engine']}\n")
+          if total:
+              print("| Art | Repo | Fundstelle |")
+              print("|---|---|---|")
+              for kind, key in (("Contracts→Impl", "contracts_to_impl"),
+                                ("Prod→Test", "prod_to_test"),
+                                ("Persistenz", "persistence_leak")):
+                  for e in v[key][:10]:
+                      where = e.get("path") or f"{e.get('from')} → {e.get('to')}"
+                      print(f"| {kind} | `{e['repo']}` | `{where}` |")
+              for cyc in v["cycles"][:5]:
+                  print(f"| Zyklus | — | `{' → '.join(cyc)}` |")
+          PY
