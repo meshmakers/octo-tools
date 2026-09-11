@@ -121,6 +121,31 @@ def test_table(repos, limit=18):
 <tbody>{body}</tbody></table></div>"""
 
 
+def product_section(prod):
+    """Bug-Anteil und Escape je Monat. Bewusst keine Laufzeit, keine Bug-Menge."""
+    rows = ""
+    for m in prod["months"][-14:]:
+        esc_ratio = m["escape_ratio"]
+        rows += (f"<tr><th scope='row'>{esc(m['month'])}</th>"
+                 f"<td class='num'>{m['bugs']}</td>"
+                 f"<td class='num'>{m['issues']}</td>"
+                 f"<td class='num strong'>{pct(m['bug_ratio'], 0)}</td>"
+                 f"<td class='num'>{m['bugs_resolved']}</td>"
+                 f"<td class='num'>{m['escaped']}</td>"
+                 f"<td class='num strong'>{pct(esc_ratio, 0)}</td></tr>")
+    return f"""<p class="lede">{esc(prod['caveat'])}</p>
+<div class="scroll"><table class="grid">
+<thead><tr><th>Monat</th><th class="num">Bugs</th><th class="num">Issues</th>
+<th class="num">Bug-Anteil</th><th class="num">behoben</th>
+<th class="num">fremd gefunden</th><th class="num">Escape</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<p class="hint">Bug-Anteil = Bugs ÷ (Bugs + Issues) — beide Seiten unterliegen
+derselben Meldedisziplin, der Quotient kürzt sie heraus. Escape = Anteil der
+behobenen Bugs, bei denen <code>CreatedBy</code> ≠ <code>ResolvedBy</code>: jemand
+anderes hat den Fehler gefunden als der, der ihn behoben hat. Fällt beides
+zusammen, hat die Entwicklung ihn selbst bemerkt.</p>"""
+
+
 def render(snap):
     code, arch = snap["code"], snap["architecture"]
     gen = datetime.fromisoformat(snap["generated_at"])
@@ -151,6 +176,12 @@ def render(snap):
     tiles_html = "".join(
         f'<div class="tile"><span class="k">{esc(k)}</span><span class="v">{v}</span>'
         f'<span class="s">{esc(s)}</span></div>' for k, v, s in tiles)
+
+    prod = snap.get("product")
+    product_block = (f"""<section>
+  <h2>Produkt: Bug-Anteil und Escape</h2>
+  {product_section(prod)}
+</section>""" if prod and prod.get("months") else "")
 
     return f"""<title>OctoMesh Qualitätspuls</title>
 <style>{CSS}{EXTRA_CSS}</style>
@@ -184,6 +215,8 @@ def render(snap):
   <h2>Paket-Fan-in</h2>
   {fanin_section(arch)}
 </section>
+
+{product_block}
 
 <section>
   <h2>Test, Komplexität, Nacharbeit{dchip('test_ratio', good='up')}</h2>

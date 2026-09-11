@@ -136,13 +136,29 @@ den letzten Anfasszeitpunkt mitführt. Sie ersetzt die Bug-Statistik: wer einen
 Fehler bemerkt und sofort behebt, legt dafür kein Work Item an, aber der Fix ist
 ein Commit auf frischem Code.
 
-**Warum keine Bug-Kennzahlen.** Bugs werden hier selbst eingetragen und meist am
-selben Tag behoben (AB#4931: angelegt 09:46, geschlossen 21:30). Eine Laufzeit
-misst in diesem Arbeitsmodus die Tippgeschwindigkeit; eine Bug-Menge misst die
-Meldedisziplin — wer sauberer dokumentiert, sähe schlechter aus. Offen ist ein
-Bug-zu-Issue-Verhältnis, das beide Seiten derselben Disziplin unterwirft und sie
-damit herauskürzt; es fehlt noch, weil sich ohne Klärung der Area-Path-Konvention
-nicht erkennen lässt, wer einen Fehler gefunden hat.
+**Produktblock aus Azure DevOps** (`ado_metrics.py`, optional). Zwei Zahlen je
+Monat, keine dritte:
+
+| Kennzahl | Definition |
+|---|---|
+| Bug-Anteil | Bugs ÷ (Bugs + Issues) neu angelegter Work Items |
+| Escape | Anteil der behobenen Bugs mit `CreatedBy` ≠ `ResolvedBy` |
+
+Bewusst *keine* Bug-Laufzeit und *keine* absolute Bug-Menge: Bugs werden hier
+selbst eingetragen und meist am selben Tag behoben (AB#4931: angelegt 09:46,
+geschlossen 21:30). Die Laufzeit misst dann die Tippgeschwindigkeit, die Menge die
+Meldedisziplin — wer sauberer dokumentiert, sähe schlechter aus. Der Bug-Anteil
+unterwirft beide Seiten derselben Disziplin und kürzt sie heraus; der Escape
+trennt „selbst bemerkt" von „jemand anderes hat es gefunden", und Ersteres ist ein
+Qualitätsbeweis, kein Makel.
+
+`AreaPath` wird mitgeschrieben, aber nicht zur Unterscheidung benutzt: in einer
+Stichprobe vergleichbarer Bugs stand mal `OctoMesh`, mal `OctoMesh\Product Team`.
+
+Der Block braucht das Repo-Secret `ADO_PAT` mit **Work Items (Read)**. Fehlt es,
+wird er übersprungen und der Report läuft weiter — er ist die Zugabe, der Code-
+und Architekturteil die Hauptaussage. Vor der konsequenten Erfassung (etwa ab
+Mitte 2026) sind die Monatswerte nicht vergleichbar; der Report weist das aus.
 
 ## Bekannte Lücken
 

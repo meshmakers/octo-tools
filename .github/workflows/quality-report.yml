@@ -63,6 +63,9 @@ jobs:
       - name: Collect quality metrics
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Optional. Fehlt das Secret, laeuft der Report ohne den Produktblock
+          # weiter statt rot zu werden -- Work Items (Read) genuegt.
+          ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
           set -euo pipefail
           ORG=$(python3 -c "import json;print(json.load(open('metrics/config.json'))['org'])")
@@ -80,6 +83,7 @@ jobs:
           # Collector klont mit --depth 400 wie der Wochenpuls.
           python3 metrics/quality_metrics.py \
             --org "$ORG" --mode clone --exclude "$EX" --jobs 8 --days "$DAYS" \
+            --ado-project OctoMesh \
             $PREV --out "octo-metrics/data/quality-$WEEK.json"
 
           cp "octo-metrics/data/quality-$WEEK.json" octo-metrics/data/quality-latest.json
@@ -136,7 +140,17 @@ jobs:
           print(f"- Rework **{c['rework_ratio']:.1%}** der geaenderten Zeilen "
                 f"in {s['window']['days']} Tagen")
           print(f"- Komplexitaet **{c['complexity_density']}** je 1.000 Codezeilen")
-          print(f"- Fan-in Contracts zu Engine: {a['fanin_contracts']} zu {a['fanin_engine']}\n")
+          print(f"- Fan-in Contracts zu Engine: {a['fanin_contracts']} zu {a['fanin_engine']}")
+          prod = s.get("product")
+          if prod and prod.get("months"):
+              m = prod["months"][-1]
+              print(f"- Produkt {m['month']}: Bug-Anteil **{m['bug_ratio']:.0%}** "
+                    f"({m['bugs']} Bugs, {m['issues']} Issues), Escape "
+                    f"**{m['escape_ratio']:.0%}**" if m['escape_ratio'] is not None
+                    else f"- Produkt {m['month']}: Bug-Anteil {m['bug_ratio']:.0%}")
+          else:
+              print("- Produktblock uebersprungen (kein ADO_PAT)")
+          print()
           if total:
               print("| Art | Repo | Fundstelle |")
               print("|---|---|---|")

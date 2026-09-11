@@ -318,6 +318,10 @@ def main():
     ap.add_argument("--days", type=int, default=30, help="Fenster fuer die Rework-Rate")
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--only", default="")
+    ap.add_argument("--ado-project", default=None,
+                    help="Azure-DevOps-Projekt fuer den Produktblock. Ohne ADO_PAT "
+                         "in der Umgebung wird der Block uebersprungen, nicht rot.")
+    ap.add_argument("--ado-since", default=None, help="ISO-Datum, Default: vor 18 Monaten")
     args = ap.parse_args()
 
     until = datetime.now(timezone.utc)
@@ -394,6 +398,24 @@ def main():
     findings = check_rules(projects)
     fan, fan_contracts, fan_engine = package_fanin(projects)
 
+    # Produktblock ist optional: ohne PAT laeuft der Report weiter, statt rot zu
+    # werden. Der Code-Teil ist die Hauptaussage, ADO die Zugabe.
+    product = None
+    ado_pat = os.environ.get("ADO_PAT")
+    if args.ado_project and ado_pat:
+        try:
+            import ado_metrics
+            ado_since = args.ado_since or (until - timedelta(days=548)).isoformat()
+            product = ado_metrics.collect(args.org, args.ado_project, ado_pat, ado_since)
+        except SystemExit as e:
+            print(str(e), file=sys.stderr)
+        except Exception as e:
+            print(f"::warning::ADO-Block uebersprungen: {type(e).__name__}: "
+                  f"{str(e)[:200]}", file=sys.stderr)
+    elif args.ado_project:
+        print("::notice::ADO_PAT nicht gesetzt -- Produktblock uebersprungen.",
+              file=sys.stderr)
+
     snapshot = {
         "generated_at": until.isoformat(),
         "org": args.org,
@@ -428,6 +450,8 @@ def main():
         },
         "repos": dict(sorted(per_repo.items())),
     }
+    if product:
+        snapshot["product"] = product
 
     if args.previous and os.path.exists(args.previous):
         try:
