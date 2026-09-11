@@ -314,7 +314,11 @@ def main():
     else:
         check_token(token, args.org)
         repos = gh_api(f"orgs/{args.org}/repos?per_page=100&type=all", token)
-        repos = [r for r in repos if not r.get("archived")]
+        # Forks sind fremder Code. Der Fork von crutonjohn/external-dns-opnsense-webhook
+        # hat seit dem Fork keinen eigenen Commit, stellte aber 36% aller Go-Zeilen;
+        # crate-operator stellte 74% allen Pythons. Bei Sprachen, in denen die Org wenig
+        # eigenen Code hat, entscheidet sonst der Fork ueber die Statistik.
+        repos = [r for r in repos if not r.get("archived") and not r.get("fork")]
         only = {x.strip() for x in args.only.split(",") if x.strip()}
         if only:
             repos = [r for r in repos if r["name"] in only]

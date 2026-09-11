@@ -16,7 +16,7 @@ und die Veränderung je Repository.
 `.github/workflows/weekly-dev-report.yml` läuft **montags 05:00 UTC**
 (und per `workflow_dispatch` jederzeit) und tut drei Dinge:
 
-1. klont jedes nicht-archivierte Org-Repo flach (`--depth 400`, Default-Branch),
+1. klont jedes nicht-archivierte Org-Repo ausser Forks flach (`--depth 400`, Default-Branch),
 2. schreibt einen Snapshot nach `metrics/data/<ISO-Woche>.json` (plus `latest.json`),
 3. rendert `metrics/reports/<ISO-Woche>.html` und committet beides zurück.
 
@@ -64,6 +64,12 @@ und **Git-LFS-Dateien**. LFS ist nicht kosmetisch: im Arbeitsbaum steht der
 gesmudgete Inhalt (in `octo-plug-zenon` 67.000 Zeilen Zenon-Testdaten), im
 Objektspeicher nur ein 130-Byte-Pointer — würde man LFS nicht ausschließen,
 widersprächen sich Wochen- und Historienreport genau um diesen Betrag.
+
+Ausgeschlossen sind ausserdem **Forks**: sie enthalten fremden Code, der die
+Sprachstatistik dort kippt, wo die Org wenig Eigenes hat. Zum Stand 2026-W37
+stammten 74% allen Pythons aus `crate-operator` und 36% aller Go-Zeilen aus
+`external-dns-opnsense-webhook` -- einem Fork ohne einen einzigen eigenen
+Commit. Ueber alle Sprachen waren es 35.061 von 1.932.536 Zeilen (1,8%).
 
 Ebenfalls ausgeschlossen sind die **publizierten Kataloge** (`ck-models/`,
 `blueprints/v1/`, `charts/`, `apps/`): je eine serialisierte Datei pro
