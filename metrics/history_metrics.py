@@ -167,8 +167,9 @@ def main():
         import tempfile
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         check_token(token, args.org)
+        # Archivierte Repos und Forks bleiben draussen -- Begruendung in collect_metrics.py.
         repos = [r for r in gh_api(f"orgs/{args.org}/repos?per_page=100&type=all", token)
-                 if not r.get("archived")]
+                 if not r.get("archived") and not r.get("fork")]
         wd = tempfile.mkdtemp(prefix="devhistory-")
         genv = git_auth_env(token)
         def clone(r):
