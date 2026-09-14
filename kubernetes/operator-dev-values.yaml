@@ -34,7 +34,11 @@ operator:
   # from `registry.url` in the octo-tools config) unless privateRegistry above
   # is set — then set this to the same value here.
   imageRegistry: ""
-  adapterIgnoreCertificateValidation: true
+  # (adapterIgnoreCertificateValidation was removed here: it is a no-op — the operator
+  # never projects it and no workload chart consumes it. Workload TLS trust is
+  # delivered instead by Deploy-OctoOperator handing the host dev certificate to the
+  # chart as secrets.rootCa, which the operator projects into every workload, where
+  # the adapter chart's trust initContainer splices it into /etc/ssl/certs.)
   communicationControllerUri: ""   # set via --set to https://<host-LAN-IP>:5015
   # Identity authority the operator projects into every workload it deploys. Adapters
   # validate bearer tokens against it, so without this a secured FromHttpRequest@2
@@ -42,6 +46,17 @@ operator:
   # default, refuses to use it, and disables JWT authentication altogether. Same host
   # as the controller above — identity runs beside it as a host process.
   authUri: ""                      # set via --set to https://<host-LAN-IP>:5003
+  # Extra token issuers every deployed workload accepts on top of authUri (AB#5232).
+  # Locally, adapters reach identity via https://host.docker.internal:5003 (the SAN
+  # the dev certificate carries), but host-side callers (octo-cli, curl, E2E scripts)
+  # mint their tokens via https://localhost:5003 — so those tokens carry issuer
+  # https://localhost:5003/ and a secured FromHttpRequest route would answer 401
+  # issuer_invalid without this entry. Widens only the issuer string comparison;
+  # signing keys still come from authUri's discovery document. Requires an operator
+  # image with AB#5232 (OPERATOR__ADDITIONALVALIDISSUERS support); older images
+  # ignore the env var harmlessly.
+  additionalValidIssuers:
+    - "https://localhost:5003/"
   # Cluster-wide ingress defaults the operator projects into EVERY deployed
   # workload's ingress — match this to the issuer set up by Install-OctoKubernetes
   # so deployed workloads get a cert-manager-issued, trusted cert with no per-app

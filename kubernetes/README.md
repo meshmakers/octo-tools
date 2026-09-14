@@ -35,17 +35,33 @@ octo-cli                                       CRDs + communication-operator (ce
   `Deploy-OctoOperator` falls back to the node's default-route gateway (the kind bridge gateway,
   e.g. `172.18.0.1`) — equally stable for the cluster's lifetime and routes to the host. For this
   to work the host services must listen on all interfaces (they bind `*:5015` etc., so they do).
-- **Controller TLS — the operator has no bypass.** `adapterIgnoreCertificateValidation: true`
-  reaches *adapter* pods only; the operator validates the controller's certificate like any other
-  client, and locally that fails twice over: the host serves a self-signed ASP.NET dev certificate
-  nothing in the cluster trusts, *and* the host-gateway address is not one of its SANs, so even
-  trusting it leaves hostname validation failing. `Deploy-OctoOperator` handles both automatically —
-  it reads the certificate off the running controller (by definition the one it will present),
-  hands it to the chart as `secrets.rootCa`, and connects by a hostname the certificate actually
-  names. It says which name it chose. Pass `-SkipControllerTlsTrust` where the controller already
-  serves a trusted certificate. Start the controller **before** deploying the operator, otherwise
-  there is no certificate to read and the operator will not connect (the cmdlet warns rather than
-  failing).
+- **Controller TLS — neither the operator nor the adapters have a bypass.** (The former
+  `adapterIgnoreCertificateValidation` knob was a no-op — never projected into workloads, and no
+  workload chart consumes it — and has been dropped from `operator-dev-values.yaml`, AB#5232.)
+  Every in-cluster client validates the host's certificate, and locally that fails twice over: the
+  host serves a self-signed ASP.NET dev certificate nothing in the cluster trusts, *and* the
+  host-gateway address is not one of its SANs, so even trusting it leaves hostname validation
+  failing. `Deploy-OctoOperator` handles both automatically — it reads the certificate off the
+  running controller (by definition the one it will present) or, when the controller is not up
+  (the normal case during `Install-OctoKubernetes`, which runs before `Start-Octo`), exports the
+  same certificate from the local dev-cert store (`dotnet dev-certs https`, public part only).
+  Either way it hands the PEM to the chart as `secrets.rootCa` and connects by a hostname the
+  certificate actually names (`host.docker.internal` on a standard dev cert). It says which name
+  and source it chose. Pass `-SkipControllerTlsTrust` where the controller already serves a
+  trusted certificate.
+- **Workload identity: trust + issuer both flow from the operator (AB#5232).** The operator
+  projects `secrets.rootCa` into **every** workload it deploys (the adapter chart's trust
+  initContainer splices it into `/etc/ssl/certs`), and `authUri` — the same SAN hostname as
+  above, e.g. `https://host.docker.internal:5003` — becomes the adapter's
+  `OCTO_ADAPTER__AUTHORITYURL`/`ISSUERURI`. Host-side callers (octo-cli, curl, E2E scripts) mint
+  their tokens via `https://localhost:5003`, so those tokens carry issuer
+  `https://localhost:5003/`; `operator-dev-values.yaml` therefore sets
+  `operator.additionalValidIssuers: ["https://localhost:5003/"]`, which the operator projects as
+  the workload's `additionalValidIssuers` (→ `OCTO_ADAPTER__ADDITIONALVALIDISSUERS__0`). Only the
+  issuer string comparison is widened — signing keys still come from `authUri`'s discovery
+  document. Requires an operator image with AB#5232 support; older images ignore the env var.
+  Workloads deployed **before** the operator had correct values keep their old values until their
+  next deploy (redeploy the workload, or bounce it via Studio).
 - **That hostname has to resolve cluster-wide, not just in the operator pod.** The operator
   publishes its own `communicationControllerUri` into the Helm values of every workload it deploys
   (`WorkloadContextValuesBuilder`), so the name the operator connects by is also the name every
@@ -64,6 +80,16 @@ octo-cli                                       CRDs + communication-operator (ce
 | MongoDB | `mongodb-0.mongodb.octo-infra.svc.cluster.local:27017` (RS `rs`) | `localhost:27017` |
 | RabbitMQ | `rabbitmq.octo-infra.svc.cluster.local:5672` | `localhost:5672` (AMQP) / `15672` (mgmt) |
 | CrateDB | `cratedb.octo-infra.svc.cluster.local` (psql 5432 / http 4200) | `localhost:5432` (psql) / `4301` (http UI) |
+
+There is exactly **one** CrateDB — host-run services and in-cluster adapters share it. The host
+services connect as the built-in superuser `crate` (their compiled-in default), while deployed
+adapters connect as the application user **`octo-system`** (injected by the operator from
+`operator-dev-values.yaml`, mirroring the production octo-mesh chart). CrateDB's trust
+authentication requires that user to *exist*, so `Install-OctoKubernetes` seeds it idempotently
+after the CrateDB rollout (`Initialize-OctoKindCrateDbUser`: `CREATE USER "octo-system"` with the
+password from `clusterSecrets.streamDataPassword` + `GRANT ALL PRIVILEGES`; an existing user is
+left untouched). On a cluster created before this step existed, run
+`Initialize-OctoKindCrateDbUser` once (or re-run `Install-OctoKubernetes`).
 
 ## Prerequisites
 
@@ -253,12 +279,25 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
     need one for the `172.18.0.0/16` kind subnet → `:5015`).
 - **Operator logs a TLS error against the controller** (`RemoteCertificateNameMismatch`,
   `RemoteCertificateChainErrors`, or "The SSL connection could not be established") — it validates
-  that certificate and has no bypass, so the deploy has to wire trust up. Usually the controller
-  wasn't running when you deployed, so there was no certificate to read: start it with `Start-Octo`
-  and re-run `Deploy-OctoOperator`. Confirm the result on the pod — the spec should carry a
-  `hostAliases` entry and `operator.communicationControllerUri` should use the certificate's
-  hostname, not the raw gateway IP:
+  that certificate and has no bypass, so the deploy has to wire trust up. With the dev-cert
+  fallback this normally works even when the controller is down at deploy time; if it still
+  failed (e.g. no .NET SDK on PATH, or Kestrel serves a non-default certificate), start the
+  controller with `Start-Octo` and re-run `Deploy-OctoOperator`. Confirm the result on the pod —
+  the spec should carry a `hostAliases` entry and `operator.communicationControllerUri` should use
+  the certificate's hostname, not the raw gateway IP:
   `kubectl -n octo-operator-system get pod -o jsonpath='{.items[0].spec.hostAliases}'`.
+- **Secured `FromHttpRequest` route answers 401 (`issuer_invalid`) or the adapter logs a TLS
+  failure against identity** — the workload was deployed with stale identity values (raw gateway
+  IP `authUri`, no `secrets.rootCa`, no `additionalValidIssuers`); typical for workloads deployed
+  before the operator got the AB#5232 wiring. Re-run `Deploy-OctoOperator` (correct values +
+  operator image), then redeploy the workload so it picks up the new context values. Verify on the
+  pod: `OCTO_ADAPTER__AUTHORITYURL`/`ISSUERURI` should carry the certificate hostname
+  (e.g. `https://host.docker.internal:5003`) and `OCTO_ADAPTER__ADDITIONALVALIDISSUERS__0` should
+  be `https://localhost:5003/`.
+- **Archive writes from a deployed adapter fail with `trust authentication failed for user
+  "octo-system"`** — the CrateDB application user is missing (cluster created before the seeding
+  step existed). Run `Initialize-OctoKindCrateDbUser` (idempotent), or re-run
+  `Install-OctoKubernetes`. Host-run services are unaffected — they connect as `crate`.
 - **Adapter deployed but stuck at `Unregistered`, operator itself connected** — the adapter pods
   got a controller address they cannot reach. Check what the deployment was actually given and
   whether it resolves to something reachable:

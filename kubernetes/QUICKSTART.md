@@ -73,7 +73,9 @@ Stop-OctoInfrastructure
 
 ```powershell
 # Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
-# ingress-nginx + cert-manager (mm-cloud-issuer, CA trusted) + the Communication Operator.
+# CrateDB app user (octo-system, for deployed adapters) + ingress-nginx + cert-manager
+# (mm-cloud-issuer, CA trusted) + the Communication Operator (workload identity/TLS is
+# wired from the ASP.NET dev certificate — the host services need not be running yet).
 # Also configures the node to skip TLS verification for the your-dev-registry.example.com dev registry.
 Install-OctoKubernetes
 ```
@@ -175,5 +177,7 @@ Start-OctoInfrastructure          # (optional) go back to the legacy docker-comp
 | Windows: `Get-OctoKubernetesStatus` shows host ports `closed` but infra pods are Running | Docker Desktop's port-proxy first-connect lag (fixed: probe now waits 2.5s). Confirm with `kind get clusters` + `docker port kind-control-plane`; the ports are mapped to `127.0.0.1` |
 | Operator Ready but pools "Unregistered" | host controller not running → `Start-Octo` |
 | Adapter `ImagePullBackOff` · `x509: certificate signed by unknown authority` | not on VPN, or node doesn't trust the dev registry → check VPN, re-run `Install-OctoKubernetes` |
+| Adapter archive writes fail: `trust authentication failed for user "octo-system"` | CrateDB app user missing (cluster predates the seeding step) → `Initialize-OctoKindCrateDbUser` |
+| Secured `FromHttpRequest` route answers 401 `issuer_invalid` / adapter TLS error vs identity | workload deployed with stale identity values → re-run `Deploy-OctoOperator`, then redeploy the workload (README → Troubleshooting) |
 
 See [`README.md`](./README.md) → *Troubleshooting* for the full list.

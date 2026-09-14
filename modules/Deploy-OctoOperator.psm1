@@ -189,14 +189,46 @@ Path the certificate PEM is written to, for `helm --set-file`.
     if ([string]::IsNullOrWhiteSpace($pem)) { return $null }
     Set-Content -Path $OutFile -Value $pem -Encoding ascii
 
-    $text = & openssl x509 -in $OutFile -noout -text 2>$null
-    $sanLine = ($text | Select-String -Pattern 'DNS:|IP Address:' | Select-Object -First 1).ToString()
+    return Resolve-OctoTlsProfileFromPem -CertPath $OutFile -Address $Address
+}
+
+function Resolve-OctoTlsProfileFromPem {
+    <#
+.SYNOPSIS
+Picks the hostname an in-cluster pod should connect to a host-run service by,
+from a certificate PEM already on disk.
+
+.DESCRIPTION
+Shared SAN-selection logic behind Get-OctoControllerTlsProfile (certificate read
+off the live listener) and Get-OctoAspNetDevCertProfile (certificate exported
+from the dev-cert store). If the reachable address is one of the certificate's
+IP SANs, pods connect by address and need no alias; otherwise the first concrete
+non-localhost DNS SAN is chosen and the caller maps it to the address (pod
+hostAlias + cluster DNS). Returns $null when the certificate names nothing a pod
+could use.
+
+.PARAMETER CertPath
+Path to the certificate PEM. Doubles as the returned CertPath (trust anchor).
+
+.PARAMETER Address
+Address the CLUSTER can reach the host on (IP or hostname) — the alias target.
+#>
+    param(
+        [Parameter(Mandatory)] [string]$CertPath,
+        [Parameter(Mandatory)] [string]$Address
+    )
+
+    $text = & openssl x509 -in $CertPath -noout -text 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $text) { return $null }
+    $sanMatch = $text | Select-String -Pattern 'DNS:|IP Address:' | Select-Object -First 1
+    if (-not $sanMatch) { return $null }
+    $sanLine = $sanMatch.ToString()
     $dnsNames = [regex]::Matches($sanLine, 'DNS:([^,\s]+)') | ForEach-Object { $_.Groups[1].Value }
     $ipNames  = [regex]::Matches($sanLine, 'IP Address:([^,\s]+)') | ForEach-Object { $_.Groups[1].Value }
 
     # Already covered by an IP SAN? Then connect by address and skip the alias.
     if ($ipNames -contains $Address) {
-        return [pscustomobject]@{ Hostname = $Address; NeedsAlias = $false; CertPath = $OutFile }
+        return [pscustomobject]@{ Hostname = $Address; NeedsAlias = $false; CertPath = $CertPath }
     }
 
     # Prefer a concrete name; a wildcard SAN (*.foo) is usable too, but only with a
@@ -211,7 +243,46 @@ Path the certificate PEM is written to, for `helm --set-file`.
     # would also break the pod's own loopback. Refuse instead.
     if (-not $name) { return $null }
 
-    return [pscustomobject]@{ Hostname = $name; NeedsAlias = $true; CertPath = $OutFile }
+    return [pscustomobject]@{ Hostname = $name; NeedsAlias = $true; CertPath = $CertPath }
+}
+
+function Get-OctoAspNetDevCertProfile {
+    <#
+.SYNOPSIS
+Builds the controller TLS profile from the ASP.NET dev certificate in the local
+dev-cert store, for when the controller is not running to be probed.
+
+.DESCRIPTION
+Install-OctoKubernetes deploys the operator while the host services are, by
+definition, not running yet — so Get-OctoControllerTlsProfile has no listener to
+read a certificate from, and the deploy used to fall back to connecting by the
+raw host-gateway IP with no trust wiring (AB#5232: every workload then got
+authUri/controllerUri = https://<gateway-ip>:5003/5015, an address the dev
+certificate does not name and nothing in the cluster trusts). Start-Octo
+services serve exactly the certificate `dotnet dev-certs https` manages, so
+exporting it from the store is equivalent to reading it off the listener.
+`--format PEM` without a password flag exports ONLY the public certificate — no
+private-key sidecar is written (a stray `.key` is removed defensively anyway).
+Returns $null when the .NET SDK is unavailable or the export fails; the caller
+then keeps the legacy address-based fallback.
+
+.PARAMETER Address
+Address the CLUSTER can reach the host on — the alias target.
+
+.PARAMETER OutFile
+Path the certificate PEM is written to, for `helm --set-file`.
+#>
+    param(
+        [Parameter(Mandatory)] [string]$Address,
+        [Parameter(Mandatory)] [string]$OutFile
+    )
+
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { return $null }
+    & dotnet dev-certs https --export-path $OutFile --format PEM 2>$null | Out-Null
+    Remove-Item ([System.IO.Path]::ChangeExtension($OutFile, '.key')) -Force -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutFile)) { return $null }
+
+    return Resolve-OctoTlsProfileFromPem -CertPath $OutFile -Address $Address
 }
 
 function Set-OctoControllerDnsAlias {
@@ -537,9 +608,21 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
         # we then point at the reachable address with a pod hostAlias.
         $tlsArgs = @()
         if (-not $SkipControllerTlsTrust) {
+            $tlsSource = "certificate read off the running controller"
             $tls = Get-OctoControllerTlsProfile -Address $ControllerHost -Port 5015 -OutFile "$certDir/controller-ca.pem"
+            if (-not $tls) {
+                # The controller is not up — the normal case during Install-OctoKubernetes,
+                # which creates the cluster before Start-Octo runs. Fall back to the ASP.NET
+                # dev certificate from the local dev-cert store: Start-Octo services serve
+                # exactly that certificate, so trusting it is equivalent to reading it off
+                # the listener. Without this fallback the deploy pinned the raw gateway IP
+                # into authUri/controllerUri of EVERY workload (AB#5232: adapters failed
+                # TLS + issuer validation on secured FromHttpRequest routes).
+                $tls = Get-OctoAspNetDevCertProfile -Address $ControllerHost -OutFile "$certDir/controller-ca.pem"
+                $tlsSource = "ASP.NET dev certificate from the local store (controller not running)"
+            }
             if ($tls) {
-                $tlsArgs += @("--set-file", "secrets.rootCa=$certDir/controller-ca.pem")
+                $tlsArgs += @("--set-file", "secrets.rootCa=$($tls.CertPath)")
                 if ($tls.NeedsAlias) {
                     # Connect by the certificate's own name; the alias makes that name
                     # resolve to the address the pod can actually reach.
@@ -549,20 +632,21 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
                         "--set", "hostAliases[0].ip=$ControllerHost",
                         "--set", "hostAliases[0].hostnames[0]=$($tls.Hostname)"
                     )
-                    if (-not $Json) { Write-Host "Controller TLS: trusting its certificate and reaching it as '$($tls.Hostname)' -> $ControllerHost (certificate does not name the address)" -ForegroundColor Cyan }
+                    if (-not $Json) { Write-Host "Controller TLS: trusting the $tlsSource and reaching the host as '$($tls.Hostname)' -> $ControllerHost (certificate does not name the address)" -ForegroundColor Cyan }
                     # The pod alias alone is not enough. This URI is also projected into
                     # every workload the operator deploys, and adapter pods get no alias
                     # — so the name has to resolve for the whole cluster or the adapters
                     # sit at Unregistered while the operator itself is connected.
                     Set-OctoControllerDnsAlias -Hostname $tls.Hostname -Address $ControllerHost -KubeContext $kubeContext -Quiet:$Json | Out-Null
                 } else {
-                    if (-not $Json) { Write-Host "Controller TLS: trusting its certificate; the address is covered by a SAN" -ForegroundColor Cyan }
+                    if (-not $Json) { Write-Host "Controller TLS: trusting the $tlsSource; the address is covered by a SAN" -ForegroundColor Cyan }
                 }
             } elseif (-not $Json) {
-                # Not fatal: a controller that is not up yet, or one behind a publicly
-                # trusted certificate, both land here. Say so rather than failing —
-                # but the operator will not connect if the certificate is untrusted.
-                Write-Host "Could not read the controller's TLS certificate at ${ControllerHost}:5015 — deploying without trust wiring. If the operator cannot connect, start the controller first and re-run." -ForegroundColor Yellow
+                # Not fatal: no listener AND no dev certificate (e.g. .NET SDK absent), or
+                # a controller behind a publicly trusted certificate. Say so rather than
+                # failing — but the operator will not connect if the certificate is
+                # untrusted, and workloads inherit the raw-address URIs.
+                Write-Host "Could not obtain a controller TLS certificate (listener at ${ControllerHost}:5015 unreachable and no ASP.NET dev certificate) — deploying without trust wiring. If the operator cannot connect, start the controller ('Start-Octo') and re-run Deploy-OctoOperator." -ForegroundColor Yellow
             }
         }
         # The operator runs the rolling :main-latest tag, so the image content changes
@@ -656,4 +740,4 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
     }
 }
 
-Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp', 'Get-OctoControllerTlsProfile', 'Test-OctoNodeHasImage', 'Set-OctoControllerDnsAlias')
+Export-ModuleMember -Function @('Deploy-OctoOperator', 'Get-HostLanIPv4', 'Get-KindHostGatewayIp', 'Get-OctoControllerTlsProfile', 'Get-OctoAspNetDevCertProfile', 'Resolve-OctoTlsProfileFromPem', 'Test-OctoNodeHasImage', 'Set-OctoControllerDnsAlias')

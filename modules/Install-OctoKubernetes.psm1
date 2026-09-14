@@ -302,6 +302,19 @@ server = "https://$DevRegistry"
         finally {
             Remove-Item $mongoErr -ErrorAction SilentlyContinue
         }
+
+        # 6) Seed the CrateDB application user workloads connect with (AB#5232).
+        #    The operator injects clusterDependencies.streamDataUser ("octo-system",
+        #    mirroring the production octo-mesh values) into every deployed adapter, but
+        #    CrateDB's trust authentication still requires the user to EXIST — without
+        #    this every archive write from a kind-deployed adapter fails with
+        #    "trust authentication failed for user octo-system". Host-run services are
+        #    unaffected: they connect as the built-in superuser "crate".
+        Write-Host "Seeding CrateDB application user" -ForegroundColor Green
+        if (-not (Initialize-OctoKindCrateDbUser)) {
+            Write-Error "CrateDB application-user seeding failed. Aborting — kind-deployed adapters could not write stream data archives."
+            return
+        }
     }
 
     $caTrustNote = $null
@@ -406,6 +419,119 @@ server = "https://$DevRegistry"
     }
 }
 
+function Initialize-OctoKindCrateDbUser {
+    <#
+.SYNOPSIS
+Seeds the CrateDB application user that kind-deployed workloads connect with.
+Idempotent — an already-existing user is left in place.
+
+.DESCRIPTION
+The local kind CrateDB (octo-infra/cratedb-0) is the ONE stream-data store both
+sides share: host-run services reach it via the NodePort on 127.0.0.1:5432 and
+connect as the built-in superuser "crate" (their compiled-in default), while the
+Communication Operator injects clusterDependencies.streamDataUser — "octo-system",
+mirroring the production octo-mesh chart values — into every adapter it deploys.
+CrateDB's trust authentication accepts any password but the user must EXIST, so
+without this seed every archive write from a kind-deployed adapter fails with
+"trust authentication failed for user octo-system" (AB#5232).
+
+User name and password default to what kubernetes/operator-dev-values.yaml
+carries (clusterDependencies.streamDataUser / clusterSecrets.streamDataPassword),
+so the seeded user always matches what the operator hands the workloads.
+The password is set for consistency with the projected secret; local CrateDB
+runs trust-authenticated and never checks it. GRANT ALL PRIVILEGES is re-applied
+on every run (idempotent).
+
+.PARAMETER CrateHttpUri
+CrateDB HTTP endpoint. Defaults to http://127.0.0.1:4301 — the kind
+extraPortMapping for the CrateDB HTTP NodePort (see kubernetes/kind-cluster.yaml).
+
+.PARAMETER UserName
+User to ensure. Empty (default) reads streamDataUser from operator-dev-values.yaml,
+falling back to "octo-system".
+
+.PARAMETER Password
+Password to set on creation. Empty (default) reads streamDataPassword from
+operator-dev-values.yaml, falling back to "OctoStream1".
+
+.PARAMETER RetrySeconds
+How long to retry reaching CrateDB before giving up. Defaults to 60.
+#>
+    param(
+        [Parameter()] [string]$CrateHttpUri = "http://127.0.0.1:4301",
+        [Parameter()] [string]$UserName = "",
+        [Parameter()] [string]$Password = "",
+        [Parameter()] [int]$RetrySeconds = 60
+    )
+
+    $valuesFile = Join-Path $kubernetesPath "operator-dev-values.yaml"
+    if ([string]::IsNullOrWhiteSpace($UserName)) {
+        $m = Select-String -Path $valuesFile -Pattern '^\s*streamDataUser:\s*"?([^"\s]+)"?' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $UserName = if ($m) { $m.Matches[0].Groups[1].Value } else { "octo-system" }
+    }
+    if ([string]::IsNullOrWhiteSpace($Password)) {
+        $m = Select-String -Path $valuesFile -Pattern '^\s*streamDataPassword:\s*"?([^"\s]+)"?' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $Password = if ($m) { $m.Matches[0].Groups[1].Value } else { "OctoStream1" }
+    }
+
+    $invokeSql = {
+        param([string]$Stmt)
+        Invoke-RestMethod -Method Post -Uri "$CrateHttpUri/_sql" -ContentType 'application/json' `
+            -Body (@{ stmt = $Stmt } | ConvertTo-Json -Compress) -TimeoutSec 15
+    }
+    # Single quotes in SQL string literals are escaped by doubling; identifiers are
+    # double-quoted verbatim (dev values contain no quotes, this is defensive only).
+    $userEsc = $UserName -replace '"', ''
+    $pwEsc = $Password -replace "'", "''"
+
+    # CrateDB just passed its rollout, but the HTTP endpoint can lag a moment — retry.
+    $deadline = (Get-Date).AddSeconds($RetrySeconds)
+    $existsResult = $null
+    while ($true) {
+        try {
+            $existsResult = & $invokeSql "SELECT count(*) FROM sys.users WHERE name = '$($userEsc -replace "'", "''")'"
+            break
+        }
+        catch {
+            if ((Get-Date) -gt $deadline) {
+                Write-Warning "CrateDB at $CrateHttpUri is not reachable: $($_.Exception.Message)"
+                return $false
+            }
+            Start-Sleep -Seconds 3
+        }
+    }
+
+    if ([int]$existsResult.rows[0][0] -gt 0) {
+        Write-Host "CrateDB: user '$UserName' already exists — leaving it untouched." -ForegroundColor DarkGray
+    }
+    else {
+        try {
+            & $invokeSql "CREATE USER `"$userEsc`" WITH (password = '$pwEsc')" | Out-Null
+            Write-Host "CrateDB: created user '$UserName'." -ForegroundColor Cyan
+        }
+        catch {
+            # Tolerate a concurrently/pre-created user; anything else is a real failure.
+            $msg = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+            if ($msg -notmatch 'already exists') {
+                Write-Warning "CrateDB: creating user '$UserName' failed: $msg"
+                return $false
+            }
+            Write-Host "CrateDB: user '$UserName' already exists — leaving it untouched." -ForegroundColor DarkGray
+        }
+    }
+
+    try {
+        & $invokeSql "GRANT ALL PRIVILEGES TO `"$userEsc`"" | Out-Null
+        Write-Host "CrateDB: GRANT ALL PRIVILEGES ensured for '$UserName'." -ForegroundColor DarkGray
+    }
+    catch {
+        $msg = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+        Write-Warning "CrateDB: granting privileges to '$UserName' failed: $msg"
+        return $false
+    }
+    return $true
+}
+
 # Common name of the local root CA — matches `commonName` in kubernetes/cluster-issuer.yaml.
 # Used as the identifiable handle for trust/untrust in the OS store, and the on-disk filename.
 $Script:OctoLocalCaName = "OctoMesh Local Dev Root CA"
@@ -476,5 +602,6 @@ function Remove-OctoLocalCaTrust {
 }
 
 Export-ModuleMember -Function @('Install-OctoKubernetes')
+Export-ModuleMember -Function @('Initialize-OctoKindCrateDbUser')
 Export-ModuleMember -Function @('Add-OctoLocalCaTrust')
 Export-ModuleMember -Function @('Remove-OctoLocalCaTrust')
