@@ -71,6 +71,13 @@ spec:
               command: ["sh", "-c", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"]
             initialDelaySeconds: 10
             periodSeconds: 10
+            # An exec probe without timeoutSeconds gets Kubernetes' default of 1 s. Measured on an
+            # idle local cluster this command takes ~0.25-0.42 s, so the default leaves under a
+            # factor of three of headroom — and a machine under load reaches that easily. When it
+            # does, the probe does not report a sick database: it CUTS OFF a healthy one, the pod
+            # leaves the Service endpoints, and every client sees END_OF_STREAM at once. Observed
+            # exactly that on 2026-09-14/15 while the host was saturated.
+            timeoutSeconds: 5
       volumes:
         - { name: keyfile-secret, secret: { secretName: mongodb-keyfile } }
         - { name: keyfile, emptyDir: {} }
