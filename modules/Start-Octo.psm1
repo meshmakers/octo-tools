@@ -321,7 +321,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://0.0.0.0:5000;https://0.0.0.0:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
+        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021", "--Adapter:DedicatedTenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
     }
     if ($botService) {
         Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://0.0.0.0:5009;http://0.0.0.0:5008") -jobName "BotServices"
@@ -342,13 +342,13 @@ Use this function to selectively start OctoMesh services based on your requireme
     if ($simulationAdapter) {
         Write-Host "Starting SimulationAdapter (branch $( if ([string]::IsNullOrEmpty($branch)) { 'default' } else { $branch } )) -> TenantId=$simulationAdapterTenantId, AdapterId=$simulationAdapterId" -ForegroundColor Green
         $simBranchRootPath = [System.IO.Path]::Combine($rootPath, $branch)
-        $simWorkingDirectory = [System.IO.Path]::Combine($simBranchRootPath, "octo-sdk/src/Sdk.Plug.Simulation/bin/$configuration/$publishVersion/")
+        $simWorkingDirectory = [System.IO.Path]::Combine($simBranchRootPath, "octo-communication-sdk/src/Sdk.Plug.Simulation/bin/$configuration/$publishVersion/")
         $simLogFile = [System.IO.Path]::Combine($simBranchRootPath, $logDir, "SimulationAdapter.log")
         $job = Start-Job -ScriptBlock {
             param($workDir, $logPath, $tenantId, $adapterId)
             Set-Location $workDir
             $env:ASPNETCORE_ENVIRONMENT = "Development"
-            & dotnet "Sdk.Plug.Simulation.dll" "--Adapter:TenantId=$tenantId" "--Adapter:AdapterRtId=$adapterId" 2>&1 >> $logPath
+            & dotnet "Sdk.Plug.Simulation.dll" "--Adapter:DedicatedTenantId=$tenantId" "--Adapter:AdapterRtId=$adapterId" 2>&1 >> $logPath
         } -ArgumentList $simWorkingDirectory, $simLogFile, $simulationAdapterTenantId, $simulationAdapterId -Name "SimulationAdapter"
         $jobs.Add($job) | Out-Null
     }
