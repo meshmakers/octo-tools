@@ -145,7 +145,9 @@ function Invoke-BuildAll {
         # Each lane restores into its own package cache (<lane>/.nuget-packages via RestorePackagesPath in
         # <lane>/Octo.User.props); clean only that one so the other lane's 999.0.0 packages stay intact.
         $laneNugetCachePath = Join-Path -Path $branchRootPath -ChildPath ".nuget-packages"
-        Remove-GlobalNuGetPackages -path $laneNugetCachePath
+        # Forward -Json and swallow the nested emit: in JSON mode this command owes the caller ONE
+        # machine-readable document, and the helper's Write-Host would break it (review).
+        if ($Json) { Remove-GlobalNuGetPackages -path $laneNugetCachePath -Json | Out-Null } else { Remove-GlobalNuGetPackages -path $laneNugetCachePath }
     }
 
 

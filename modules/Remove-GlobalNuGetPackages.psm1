@@ -8,11 +8,16 @@ function Remove-GlobalNuGetPackages {
         [switch]$Json
     )
 
-    if (!(Test-Path $path)) {
+    # -PathType Container on purpose: a bare Test-Path also accepts a FILE. Measured on pwsh 7.6,
+    # Get-ChildItem -Directory on a file does NOT throw - it quietly returns nothing - so the old
+    # guard let a non-cache path through and this command then reported removedCount = 0 as if it
+    # had inspected a cache. The container check makes the outcome honest instead of plausible
+    # (review of the lane-local cache change).
+    if (!(Test-Path $path -PathType Container)) {
         if ($Json) {
-            Write-OctoJson -Command 'Remove-GlobalNuGetPackages' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{ removedCount = 0; skipped = "path $path does not exist" })
+            Write-OctoJson -Command 'Remove-GlobalNuGetPackages' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{ removedCount = 0; skipped = "path $path is not an existing directory" })
         } else {
-            Write-Host "Package cache $path does not exist yet - nothing to remove" -ForegroundColor Yellow
+            Write-Host "Package cache $path is not an existing directory - nothing to remove" -ForegroundColor Yellow
         }
         return;
     }
