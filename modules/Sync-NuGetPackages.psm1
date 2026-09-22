@@ -31,7 +31,8 @@ function Sync-NuGetPackages {
     Invoke-KillDotnet
 
     if ($Json) { Copy-AllNuGetPackages -Json | Out-Null } else { Copy-AllNuGetPackages }
-    Remove-GlobalNuGetPackages
+    # Lane-local package cache (<lane>/.nuget-packages via RestorePackagesPath in <lane>/Octo.User.props).
+    Remove-GlobalNuGetPackages -path (Join-Path -Path $rootPath -ChildPath ".nuget-packages")
 
     # Get all directories starting with "octo-" and "mm-""
     $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"

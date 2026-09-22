@@ -82,7 +82,7 @@ An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, t
 ### Cleanup
 - `Remove-BinAndObjFolders` - Remove all bin/obj folders
 - `Invoke-KillDotnet` - Kill all dotnet processes (Windows only)
-- `Remove-GlobalNuGetPackages` - Clean global NuGet cache
+- `Remove-GlobalNuGetPackages [-path <cache>]` - Remove the local 999.0.0 Meshmakers packages from a NuGet package cache (default `~/.nuget/packages`). Each lane restores into its own cache, `<lane>/.nuget-packages`, configured via `RestorePackagesPath` in `<lane>/Octo.User.props`; `Invoke-BuildAll`/`Sync-NuGetPackages` clean only that lane cache so dev and main never share 999.0.0 packages
 
 ### Infrastructure Backup (MongoDB + CrateDB)
 Backups operate on the Docker volumes; stop the infrastructure first (`Stop-OctoInfrastructure`). Stored under `infrastructure/backups/`.
