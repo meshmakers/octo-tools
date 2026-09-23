@@ -19,9 +19,9 @@ image:
   tag: ""            # set via --set image.tag=... (Install-OctoKubernetes uses main-latest)
 
 operator:
-  autoManagePools: true
-  poolNamespace: octo
-  defaultPoolName: default
+  autoManageDeploymentSites: true
+  deploymentSiteNamespace: octo
+  defaultDeploymentSiteName: default
   # Pull adapter / application images from the dev registry (where the multi-arch
   # images are published) instead of public Docker Hub. The operator projects this
   # as image.privateRegistry into EVERY deployed workload (operator-wide). NOTE the
