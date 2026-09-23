@@ -393,8 +393,12 @@ function Test-OctoAgentDocs {
             if ($line -match '^#{1,6}\s+(.*)$') {
                 # A link in a heading contributes its LABEL only: "## See [docs](x)" -> #see-docs.
                 $text = [regex]::Replace($Matches[1], '\[([^\]]*)\]\([^)]*\)', '$1')
-                $a = $text.ToLowerInvariant() -replace '[`*_]', ''
-                $a = $a -replace '[^\p{L}\p{N} \-]', ''
+                # GitHub strips markup but keeps punctuation that is part of a word, so
+                # '## applies_to' becomes #applies_to while '## _italic_' becomes #italic.
+                # Only underscore runs that sit at a word edge are emphasis markers.
+                $text = $text -replace '(?<![\p{L}\p{N}\p{M}])_+|_+(?![\p{L}\p{N}\p{M}])', ''
+                $a = $text.ToLowerInvariant() -replace '[`*]', ''
+                $a = $a -replace '[^\p{L}\p{N}\p{M} _\-]', ''
                 $a = ($a.Trim() -replace ' ', '-')
                 # Repeated headings: GitHub disambiguates with -1, -2, ... and a link to
                 # #configuration-1 is a WORKING link, so it must not be reported as broken.
@@ -567,8 +571,10 @@ function Test-OctoAgentDocs {
                     $stack.Push($e.FullName)
                 }
                 elseif ($e.Extension -eq '.md') {
-                    $out.Add($e)
+                    # Exactly Max files is a complete scan; only a file BEYOND the cap
+                    # means something went unread.
                     if ($out.Count -ge $Max) { $truncated = $true; break }
+                    $out.Add($e)
                 }
             }
         }
@@ -576,11 +582,21 @@ function Test-OctoAgentDocs {
     }
 
     $integrityFiles = @()
+    $scanTruncated = $false
     if ((Test-RuleOn 'no-invisible-characters') -or (Test-RuleOn 'link-hosts')) {
         $walk = Get-MarkdownTree -Root $repo -Ignore $ignoreSegments -Max $maxScan
         $integrityFiles = $walk.files
         if ($walk.truncated) {
-            Write-Warning "Stopped at scan.maxFiles ($maxScan) Markdown files under '$repo' - the rest were not scanned. Add the vendor folder to scan.ignore, or raise scan.maxFiles."
+            # An unfinished integrity scan is a failed integrity scan: a pull request
+            # could otherwise park a payload behind enough decoy files to fall outside
+            # the cap and pass enforce mode. So it is a finding under the rule(s) that
+            # went unchecked, not just a warning on the console.
+            $scanTruncated = $true
+            $why = "Integrity scan stopped at scan.maxFiles ($maxScan) - the remaining Markdown files were not checked. Add the vendor folder to scan.ignore, or raise scan.maxFiles"
+            Write-Warning "$why (repository '$repo')."
+            foreach ($rule in @('no-invisible-characters', 'link-hosts')) {
+                if (Test-RuleOn $rule) { Add-Finding $rule '' $why }
+            }
         }
     }
 
@@ -635,19 +651,42 @@ function Test-OctoAgentDocs {
             $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal' $true)
             $seenHosts = [System.Collections.Generic.HashSet[string]]::new()
             foreach ($m in [regex]::Matches($content, '(?i)\bhttps?://([^\s/<>)"''`\]]+)')) {
-                $linkHost = $m.Groups[1].Value.TrimEnd('.', ',')
-                if ($linkHost.Contains('@')) { $linkHost = ($linkHost -split '@')[-1] }   # userinfo
-                $linkHost = ($linkHost -split ':')[0]                                      # port
+                # The host is whatever a BROWSER would connect to. Browsers follow the
+                # WHATWG rule that '\' is '/' in http(s), so in
+                # 'https://evil.example\@docs.claude.com/' the authority ends at the
+                # backslash and the host is evil.example, whatever follows the '@'.
+                # System.Uri does not mimic that - it rejects the host outright - so the
+                # authority is cut at the first backslash here, and only then handed to
+                # System.Uri for userinfo, port and IDN handling. A string .NET still
+                # refuses falls back to the textual host so that a malformed link is
+                # checked rather than silently skipped.
+                $authority = ($m.Groups[1].Value -split '\\')[0].TrimEnd('.', ',')
+                if (-not $authority) { continue }
+                $uri = $null
+                if ([System.Uri]::TryCreate("http://$authority", [System.UriKind]::Absolute, [ref]$uri) -and $uri.IdnHost) {
+                    $linkHost = $uri.IdnHost
+                }
+                else {
+                    $linkHost = $authority
+                    if ($linkHost.Contains('@')) { $linkHost = ($linkHost -split '@')[-1] }   # userinfo
+                    $linkHost = ($linkHost -split ':')[0]                                      # port
+                }
                 if (-not $linkHost) { continue }
                 if (-not $seenHosts.Add($linkHost.ToLowerInvariant())) { continue }        # once per file
                 # A host nobody outside the machine or the LAN can answer for is not the
                 # threat this rule is about, and flagging every `http://localhost:5000` in a
                 # run command is how a rule gets switched off. Single-label names cannot be
-                # public domains; the rest are the reserved ranges and suffixes.
+                # public domains; the rest are the reserved ranges and suffixes. The range
+                # test applies to IPv4 LITERALS only - '10.attacker.example' is a public
+                # domain that merely starts with '10.'.
+                $ip = $null
+                $isPrivateIp = [System.Net.IPAddress]::TryParse($linkHost, [ref]$ip) -and
+                    $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+                    $linkHost -match '^(127|10|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.'
                 if ($skipLocal -and (
                         -not $linkHost.Contains('.') -or
                         $linkHost -match '(?i)\.(local|localhost|internal|invalid)$' -or
-                        $linkHost -match '^(127|10|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.'
+                        $isPrivateIp
                     )) { continue }
                 if (-not ($allowed | Where-Object { $linkHost -eq $_ -or $linkHost.EndsWith(".$_") })) {
                     Add-Finding 'link-hosts' $rel "Link to '$linkHost' is not on the allowlist"
@@ -832,8 +871,11 @@ function Test-OctoAgentDocs {
                 }
                 else { [void]$sb.AppendLine("| $globs | ``$($r.file)`` |") }
             }
-            $generated = $sb.ToString().TrimEnd("`r", "`n")
+            # AppendLine emits CRLF on Windows and the marker block is compared against an
+            # LF template, so both sides are normalised or a current table reads as stale.
+            $generated = ($sb.ToString() -replace "`r`n", "`n").TrimEnd("`n")
 
+            $entry = $entry -replace "`r`n", "`n"
             $si = $entry.IndexOf($startMarker)
             $ei = $entry.IndexOf($endMarker)
             if ($si -lt 0 -or $ei -lt 0 -or $ei -lt $si) {
@@ -863,7 +905,7 @@ function Test-OctoAgentDocs {
             entryPoint   = $entryName
             canonical    = if ($hasAgents) { 'AGENTS.md' } else { 'CLAUDE.md' }
             mode         = $config.mode
-            filesScanned = [ordered]@{ routed = $checkFiles.Count; integrity = $integrityFiles.Count }
+            filesScanned = [ordered]@{ routed = $checkFiles.Count; integrity = $integrityFiles.Count; truncated = $scanTruncated }
             filesWritten = @($written)
             routes       = $routes
             findings     = $findings

@@ -776,3 +776,82 @@ Describe 'the shipped ruleset' {
         ($declared -join ',') | Should -Be ($configured -join ',')
     }
 }
+
+Describe 'fifth review pass' {
+    It 'keeps an underscore inside a heading word in the anchor' {
+        # GitHub renders '## applies_to' as #applies_to; stripping every underscore
+        # produced #appliesto and reported a working link as broken.
+        $r = New-Fixture
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "`n## applies_to`n`nsee [x](#applies_to)`n"
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'still strips emphasis underscores from a heading' {
+        $r = New-Fixture
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "`n## _Italic_ heading`n`nsee [x](#italic-heading)`n"
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'accepts a current routing table written with CRLF line endings' {
+        # AppendLine emits CRLF on Windows while the template is LF, so a Windows
+        # checkout reported its own freshly generated table as stale.
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $entryPath = Join-Path $r 'CLAUDE.md'
+        $crlf = ([System.IO.File]::ReadAllText($entryPath) -replace "`r?`n", "`r`n")
+        [System.IO.File]::WriteAllText($entryPath, $crlf, [System.Text.UTF8Encoding]::new($false))
+        (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 0
+    }
+    It 'reports a truncated integrity scan as a finding, not just a warning' {
+        # Otherwise decoy Markdown files ahead of a payload push it past the cap and
+        # enforce mode passes with the payload unread.
+        $org = New-OrgFixture
+        $rulesPath = Join-Path $org 'agent-docs.rules.json'
+        $rules = Get-Content -LiteralPath $rulesPath -Raw | ConvertFrom-Json -AsHashtable
+        $rules.scan.maxFiles = 3
+        $rules | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $rulesPath
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        foreach ($n in 'a', 'b', 'c', 'd', 'e') { "# $n" | Set-Content -LiteralPath (Join-Path $r "docs/$n.md") -NoNewline }
+        $res = Invoke-InOrgFixture -ModuleDir $org -Repo $r
+        $res.data.filesScanned.truncated | Should -BeTrue
+        $res.data.filesScanned.integrity | Should -Be 3
+        $f = Get-Rules $res 'no-invisible-characters'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'maxFiles'
+        $res.data.summary.success | Should -BeFalse
+    }
+    It 'does not call a scan of exactly maxFiles files truncated' {
+        $org = New-OrgFixture
+        $rulesPath = Join-Path $org 'agent-docs.rules.json'
+        $rules = Get-Content -LiteralPath $rulesPath -Raw | ConvertFrom-Json -AsHashtable
+        $rules.scan.maxFiles = 2
+        $rules | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $rulesPath
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $res = Invoke-InOrgFixture -ModuleDir $org -Repo $r
+        $res.data.filesScanned.truncated | Should -BeFalse
+        $res.data.filesScanned.integrity | Should -Be 2
+        (Get-Rules $res 'no-invisible-characters').Count | Should -Be 0
+    }
+    It 'flags a public domain that merely starts with a private-range prefix' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see http://10.attacker.example/x and http://192.168.evil.example/y'
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $hosts = (Get-Rules (Get-Result $r) 'link-hosts').message -join ' '
+        $hosts | Should -Match '10\.attacker\.example'
+        $hosts | Should -Match '192\.168\.evil\.example'
+    }
+    It 'reads the host a browser would use when a backslash precedes the userinfo' {
+        # Browsers treat '\' as '/' in http(s), so the userinfo trick with a backslash
+        # in front actually sends the reader to evil.example.
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see https://evil.example\@docs.claude.com/pwn'
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'link-hosts'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'evil\.example'"
+    }
+}
