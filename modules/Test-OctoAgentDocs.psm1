@@ -433,7 +433,9 @@ function Test-OctoAgentDocs {
 
     if ($hasAgents -and (Test-RuleOn 'shim-valid')) {
         $expected = ((Get-Opt 'shim-valid' 'content' @('@AGENTS.md')) -join "`n")
-        $current = if ($hasClaude) { Read-Text $claudePath } else { $null }
+        # A Windows checkout with core.autocrlf reads the two-line shim as CRLF; the
+        # template is LF, so both are normalised or every migrated repo fails on Windows.
+        $current = if ($hasClaude) { (Read-Text $claudePath) -replace "`r`n", "`n" } else { $null }
         if (($null -eq $current) -or ($current.Trim() -ne $expected)) {
             $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
             if ($Fix -and $safe) {
@@ -645,12 +647,16 @@ function Test-OctoAgentDocs {
             # Every http(s) URL, however it is written: inline link, reference definition,
             # autolink, or bare text in a code block. An agent can follow any of them, so
             # matching only the []() form would leave the other four spellings unchecked.
+            # The slashes after the scheme are optional and may be backslashes: WHATWG
+            # parsing of special schemes accepts 'https:\\evil.example', 'https:/evil.example'
+            # and 'https:evil.example' alike, so a browser reaches evil.example from all of
+            # them and the rule has to see them too.
             # NB: not $host - that is an automatic variable, and writing to it is an error
             # outside module scope.
             $allowed = @(Get-Opt 'link-hosts' 'allow' @())
             $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal' $true)
             $seenHosts = [System.Collections.Generic.HashSet[string]]::new()
-            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?://([^\s/<>)"''`\]]+)')) {
+            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?:[/\\]*([^\s/\\<>)"''`\]]+)')) {
                 # The host is whatever a BROWSER would connect to. Browsers follow the
                 # WHATWG rule that '\' is '/' in http(s), so in
                 # 'https://evil.example\@docs.claude.com/' the authority ends at the

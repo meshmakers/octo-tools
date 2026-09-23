@@ -855,3 +855,34 @@ Describe 'fifth review pass' {
         $f[0].message | Should -Match "'evil\.example'"
     }
 }
+
+Describe 'sixth review pass' {
+    It 'accepts the two-line shim written with CRLF line endings' {
+        # core.autocrlf=true reads the shim back as CRLF; the template is LF, and Trim()
+        # removes only the trailing pair, so every migrated repo failed shim-valid on
+        # Windows and -Fix rewrote CLAUDE.md on every run.
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $shim = Join-Path $r 'CLAUDE.md'
+        $crlf = ([System.IO.File]::ReadAllText($shim) -replace "`r?`n", "`r`n")
+        [System.IO.File]::WriteAllText($shim, $crlf, [System.Text.UTF8Encoding]::new($false))
+        $res = Get-Result $r -Extra @{ Fix = $true }
+        (Get-Rules $res 'shim-valid').Count | Should -Be 0
+        $res.data.filesWritten.Count | Should -Be 0
+    }
+    It 'sees the slash spellings a browser accepts after the scheme' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value @(
+            'a https:\\back.example/x'
+            'b https:/single.example/y'
+            'c https:bare.example/z'
+        )
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $hosts = (Get-Rules (Get-Result $r) 'link-hosts').message -join ' '
+        $hosts | Should -Match "'back\.example'"
+        $hosts | Should -Match "'single\.example'"
+        $hosts | Should -Match "'bare\.example'"
+    }
+}
