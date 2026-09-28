@@ -667,6 +667,13 @@ function Test-OctoAgentDocs {
             # link exists. The text is decoded the same way before it is scanned, so the
             # scheme and host the reader would follow are the ones checked.
             $decoded = [System.Net.WebUtility]::HtmlDecode($content)
+            # Inside a QUOTED href value a line break is not the end of the URL either: the
+            # attribute runs to the closing quote and the URL parser drops LF along with tab
+            # and CR. So line breaks are removed within href="..." / href='...' only, which
+            # keeps the LF rule above for prose while an href split across lines is checked
+            # as the single URL the reader would follow.
+            $decoded = [regex]::Replace($decoded, '(?is)(href\s*=\s*)(["''])(.*?)\2',
+                { param($x) $x.Groups[1].Value + $x.Groups[2].Value + ($x.Groups[3].Value -replace '[\t\r\n]', '') + $x.Groups[2].Value })
             foreach ($m in [regex]::Matches($decoded, '(?i)\bhttps?:[/\\]*((?:[^\s/\\<>)"''`\]]|[\t\r])+)')) {
                 # The host is whatever a BROWSER would connect to. Browsers follow the
                 # WHATWG rule that '\' is '/' in http(s), so in

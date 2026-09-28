@@ -934,3 +934,26 @@ Describe 'eighth review pass' {
         $hosts | Should -Match "'also\.example'"
     }
 }
+
+Describe 'ninth review pass' {
+    It 'reads an href split across lines as one URL' {
+        # A quoted attribute value runs to the closing quote, and the URL parser drops the
+        # LF, so the reader lands on evil.example while a line-bound match saw docs.claude.com.
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "<a href=`"https://docs.claude.com`n@evil.example/x`">link</a>"
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'link-hosts'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'evil\.example'"
+    }
+    It 'still ends a prose URL at the line break' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "see https://docs.claude.com`n@evil.example is a handle, not a host"
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
+    }
+}
