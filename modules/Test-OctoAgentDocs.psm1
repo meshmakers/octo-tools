@@ -652,29 +652,31 @@ function Test-OctoAgentDocs {
             # The slashes after the scheme are optional and may be backslashes: WHATWG
             # parsing of special schemes accepts 'https:\\evil.example', 'https:/evil.example'
             # and 'https:evil.example' alike, so a browser reaches evil.example from all of
-            # them and the rule has to see them too. An HTML href may also carry a literal
-            # tab or CR inside the URL, which the WHATWG parser strips before it looks for
-            # the host, so both are let through the match and removed before the host is
-            # read. LF is NOT: a URL ending a line is the common case in prose, and running
-            # the match across the line break would glue the next word onto the host.
+            # them and the rule has to see them too. A literal tab or CR inside a URL is
+            # dropped the way the URL parser drops it.
             # NB: not $host - that is an automatic variable, and writing to it is an error
             # outside module scope.
             $allowed = @(Get-Opt 'link-hosts' 'allow' @())
             $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal' $true)
             $seenHosts = [System.Collections.Generic.HashSet[string]]::new()
-            # Raw HTML is legal in Markdown, and an href may spell any character as an HTML
-            # character reference ('&#104;ttps://…'), which the renderer decodes before the
-            # link exists. The text is decoded the same way before it is scanned, so the
-            # scheme and host the reader would follow are the ones checked.
+            # Two kinds of text carry a URL, and they are read differently. Raw HTML is legal
+            # in Markdown, so an href is taken WHOLE from the raw text first - its quotes
+            # delimit it - and only then decoded: '&#104;ttps://' becomes a scheme, '&#34;'
+            # becomes a literal quote INSIDE the value rather than the end of it, and tab,
+            # CR and LF are dropped the way the URL parser drops them. Everything else is
+            # decoded as a whole and scanned for URLs, and there a URL ends at whitespace:
+            # a URL closing a line is the common case in prose, and matching across the
+            # line break would glue the next word onto the host.
+            $candidates = [System.Collections.Generic.List[string]]::new()
+            foreach ($h in [regex]::Matches($content, '(?is)\bhref\s*=\s*(["''])(.*?)\1')) {
+                $v = ([System.Net.WebUtility]::HtmlDecode($h.Groups[2].Value)) -replace '[\t\r\n]', ''
+                if ($v -match '(?i)^\s*https?:[/\\]*([^/\\?#]+)') { $candidates.Add($Matches[1]) }
+            }
             $decoded = [System.Net.WebUtility]::HtmlDecode($content)
-            # Inside a QUOTED href value a line break is not the end of the URL either: the
-            # attribute runs to the closing quote and the URL parser drops LF along with tab
-            # and CR. So line breaks are removed within href="..." / href='...' only, which
-            # keeps the LF rule above for prose while an href split across lines is checked
-            # as the single URL the reader would follow.
-            $decoded = [regex]::Replace($decoded, '(?is)(href\s*=\s*)(["''])(.*?)\2',
-                { param($x) $x.Groups[1].Value + $x.Groups[2].Value + ($x.Groups[3].Value -replace '[\t\r\n]', '') + $x.Groups[2].Value })
             foreach ($m in [regex]::Matches($decoded, '(?i)\bhttps?:[/\\]*((?:[^\s/\\<>)"''`\]]|[\t\r])+)')) {
+                $candidates.Add(($m.Groups[1].Value -replace '[\t\r]', ''))
+            }
+            foreach ($candidate in $candidates) {
                 # The host is whatever a BROWSER would connect to. Browsers follow the
                 # WHATWG rule that '\' is '/' in http(s), so in
                 # 'https://evil.example\@docs.claude.com/' the authority ends at the
@@ -684,7 +686,7 @@ function Test-OctoAgentDocs {
                 # System.Uri for userinfo, port and IDN handling. A string .NET still
                 # refuses falls back to the textual host so that a malformed link is
                 # checked rather than silently skipped.
-                $authority = (($m.Groups[1].Value -replace '[\t\r]', '') -split '\\')[0].TrimEnd('.', ',')
+                $authority = ($candidate -split '\\')[0].TrimEnd('.', ',')
                 if (-not $authority) { continue }
                 $uri = $null
                 if ([System.Uri]::TryCreate("http://$authority", [System.UriKind]::Absolute, [ref]$uri) -and $uri.IdnHost) {

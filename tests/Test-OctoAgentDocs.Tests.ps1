@@ -957,3 +957,18 @@ Describe 'ninth review pass' {
         (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
     }
 }
+
+Describe 'tenth review pass' {
+    It 'takes an href whole before decoding, so an encoded quote does not end it' {
+        # '&#34;' is part of the attribute value for the HTML parser; decoding first turned
+        # it into the closing quote and the check stopped at docs.claude.com.
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "<a href=`"https://docs.claude.com&#34;`n@evil.example/x`">link</a>"
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'link-hosts'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'evil\.example'"
+    }
+}
