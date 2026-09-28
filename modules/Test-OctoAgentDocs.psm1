@@ -435,7 +435,9 @@ function Test-OctoAgentDocs {
         $expected = ((Get-Opt 'shim-valid' 'content' @('@AGENTS.md')) -join "`n")
         # A Windows checkout with core.autocrlf reads the two-line shim as CRLF; the
         # template is LF, so both are normalised or every migrated repo fails on Windows.
-        $current = if ($hasClaude) { (Read-Text $claudePath) -replace "`r`n", "`n" } else { $null }
+        # A lone CR is normalised too, and BEFORE Test-IsShimLike sees the text, or a
+        # CR-separated shim reads as one line of real content that -Fix refuses to touch.
+        $current = if ($hasClaude) { ((Read-Text $claudePath) -replace "`r`n", "`n") -replace "`r", "`n" } else { $null }
         if (($null -eq $current) -or ($current.Trim() -ne $expected)) {
             $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
             if ($Fix -and $safe) {
@@ -650,13 +652,17 @@ function Test-OctoAgentDocs {
             # The slashes after the scheme are optional and may be backslashes: WHATWG
             # parsing of special schemes accepts 'https:\\evil.example', 'https:/evil.example'
             # and 'https:evil.example' alike, so a browser reaches evil.example from all of
-            # them and the rule has to see them too.
+            # them and the rule has to see them too. An HTML href may also carry a literal
+            # tab or CR inside the URL, which the WHATWG parser strips before it looks for
+            # the host, so both are let through the match and removed before the host is
+            # read. LF is NOT: a URL ending a line is the common case in prose, and running
+            # the match across the line break would glue the next word onto the host.
             # NB: not $host - that is an automatic variable, and writing to it is an error
             # outside module scope.
             $allowed = @(Get-Opt 'link-hosts' 'allow' @())
             $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal' $true)
             $seenHosts = [System.Collections.Generic.HashSet[string]]::new()
-            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?:[/\\]*([^\s/\\<>)"''`\]]+)')) {
+            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?:[/\\]*((?:[^\s/\\<>)"''`\]]|[\t\r])+)')) {
                 # The host is whatever a BROWSER would connect to. Browsers follow the
                 # WHATWG rule that '\' is '/' in http(s), so in
                 # 'https://evil.example\@docs.claude.com/' the authority ends at the
@@ -666,7 +672,7 @@ function Test-OctoAgentDocs {
                 # System.Uri for userinfo, port and IDN handling. A string .NET still
                 # refuses falls back to the textual host so that a malformed link is
                 # checked rather than silently skipped.
-                $authority = ($m.Groups[1].Value -split '\\')[0].TrimEnd('.', ',')
+                $authority = (($m.Groups[1].Value -replace '[\t\r]', '') -split '\\')[0].TrimEnd('.', ',')
                 if (-not $authority) { continue }
                 $uri = $null
                 if ([System.Uri]::TryCreate("http://$authority", [System.UriKind]::Absolute, [ref]$uri) -and $uri.IdnHost) {

@@ -886,3 +886,36 @@ Describe 'sixth review pass' {
         $hosts | Should -Match "'bare\.example'"
     }
 }
+
+Describe 'seventh review pass' {
+    It 'accepts and does not rewrite a shim separated by lone CR characters' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $shim = Join-Path $r 'CLAUDE.md'
+        $cr = ([System.IO.File]::ReadAllText($shim) -replace "`r?`n", "`r")
+        [System.IO.File]::WriteAllText($shim, $cr, [System.Text.UTF8Encoding]::new($false))
+        $res = Get-Result $r -Extra @{ Fix = $true }
+        (Get-Rules $res 'shim-valid').Count | Should -Be 0
+        $res.data.filesWritten.Count | Should -Be 0
+    }
+    It 'reads the host past a literal tab inside an href' {
+        # The WHATWG parser strips tab and CR from a URL before it looks for the host,
+        # so the tab hides the real host from a check that stops at whitespace.
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ('<a href="https://docs.claude.com' + "`t" + '@evil.example/x">x</a>')
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'link-hosts'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'evil\.example'"
+    }
+    It 'does not glue the next line onto a URL that ends a line' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "see https://docs.claude.com`nfoo bar"
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
+    }
+}
