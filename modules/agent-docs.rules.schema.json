@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "octo agent-docs ruleset",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "rules"
+  ],
+  "additionalProperties": false,
+  "patternProperties": {
+    "^_": {
+      "type": "string",
+      "description": "Note key. Underscore-prefixed properties carry the reasoning behind a threshold and are ignored by the loader."
+    }
+  },
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "logOnly",
+        "enforce"
+      ]
+    },
+    "nonRelaxable": {
+      "description": "Rules a repository's own .agent-docs.json may raise but not lower. Honoured only in the org ruleset shipped with the module.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "scan": {
+      "description": "Scan surface for the integrity rules.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ignore": {
+          "description": "Path SEGMENTS (not globs) excluded from the recursive Markdown scan.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxFiles": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "entry-point-lines",
+          "entry-point-characters",
+          "line-length",
+          "doc-size",
+          "frontmatter-present",
+          "doc-reachable",
+          "reference-resolves",
+          "routing-current",
+          "docs-count",
+          "shim-valid",
+          "required-sections",
+          "no-invisible-characters",
+          "link-hosts"
+        ]
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "off",
+              "warn",
+              "error"
+            ]
+          },
+          {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "prefixItems": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "warn",
+                  "error"
+                ]
+              },
+              {
+                "type": "object"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

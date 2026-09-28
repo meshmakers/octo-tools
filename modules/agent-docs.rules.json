@@ -1,0 +1,127 @@
+{
+  "$schema": "./agent-docs.rules.schema.json",
+  "schemaVersion": 1,
+  "mode": "logOnly",
+  "nonRelaxable": [
+    "no-invisible-characters"
+  ],
+  "scan": {
+    "ignore": [
+      ".git",
+      "node_modules",
+      "bin",
+      "obj",
+      "packages",
+      "dist",
+      ".vs",
+      ".idea"
+    ],
+    "maxFiles": 500
+  },
+  "rules": {
+    "entry-point-lines": [
+      "warn",
+      {
+        "max": 200
+      }
+    ],
+    "entry-point-characters": [
+      "error",
+      {
+        "max": 20000,
+        "warnAt": 12000
+      }
+    ],
+    "line-length": [
+      "warn",
+      {
+        "max": 120,
+        "tables": 200,
+        "scope": "entryPoint",
+        "ignoreCodeBlocks": true,
+        "ignoreNoWhitespace": true,
+        "maxReported": 5
+      }
+    ],
+    "doc-size": [
+      "warn",
+      {
+        "maxCharacters": 25000,
+        "charactersPerToken": 4.0
+      }
+    ],
+    "frontmatter-present": [
+      "error",
+      {
+        "maxDescription": 160
+      }
+    ],
+    "doc-reachable": [
+      "error",
+      {}
+    ],
+    "reference-resolves": [
+      "error",
+      {
+        "siblingRepoPattern": "^(octo|mm)-[^/]+/"
+      }
+    ],
+    "routing-current": [
+      "error",
+      {
+        "includeDescriptions": false
+      }
+    ],
+    "docs-count": [
+      "warn",
+      {
+        "max": 12
+      }
+    ],
+    "shim-valid": [
+      "error",
+      {
+        "content": [
+          "<!-- Claude Code loads this file. AGENTS.md is the source of truth - edit that, not this. -->",
+          "@AGENTS.md"
+        ]
+      }
+    ],
+    "required-sections": [
+      "error",
+      {
+        "sections": [
+          "Read before you change",
+          "Build & test",
+          "Before you commit",
+          "Rules"
+        ]
+      }
+    ],
+    "no-invisible-characters": [
+      "error",
+      {}
+    ],
+    "link-hosts": [
+      "off",
+      {
+        "ignoreLocal": true,
+        "allow": [
+          "docs.claude.com",
+          "github.com",
+          "learn.microsoft.com",
+          "docs.meshmakers.cloud",
+          "kubernetes.io",
+          "sigs.k8s.io"
+        ]
+      }
+    ]
+  },
+  "_charactersPerToken_note": "A fixed yardstick, not a per-model calibration: 4 characters per token is OpenAI's published English rule of thumb, chosen so a document reports the same size on every model. Anthropic publish no ratio and newer tokenizers run ~30% heavier, so treat the figure as an order of magnitude, not a bill.",
+  "_maxCharacters_note": "A POLICY CHOICE, not a measurement. No study covers reference-document size for agents. 25000 borrows the order of magnitude from Anthropic's 25KB MEMORY.md load limit - a different file type, and the only first-party size number in this domain. Set it where it fires occasionally rather than never.",
+  "_required_sections_note": "Heading text is matched case-insensitively and at level 2 (## ) only.",
+  "_mode_note": "Mode is a property of the CALLER, not of a repository: a person who typed the command has already asked to be told, a pipeline reads nothing but the exit code. So this stays logOnly and CI passes -Mode enforce, or a repository opts up once clean. To flip: get every repo clean at error severity, change this key, drop the now-redundant per-repo 'mode'. A repo added after the flip is unblocked with -Mode logOnly in its pipeline, never with a line in its own file.",
+  "_severity_note": "error = decidable (a character either is U+200B or it is not). warn = a budget whose right number is a judgement. off = not decidable, so not a gate. Never soften a security rule to 'warn' to keep it from breaking a build - that is what logOnly is for, and a warning is a thing people scroll past.",
+  "_nonRelaxable_note": "A repository's own .agent-docs.json may RAISE these rules but never lower them, because that file lives in the branch under review and the pull request carrying a payload can carry the opt-out with it. -ConfigPath is exempt: it comes from whoever runs the tool. To change one of these, change this file.",
+  "_scan_note": "The integrity rules (no-invisible-characters, link-hosts) read every *.md in the repository, dotfolders included, minus these path segments - a nested AGENTS.md or a .claude/ rule is loaded by an agent without appearing in any routing table. The structural rules stay on the routed set."
+}
