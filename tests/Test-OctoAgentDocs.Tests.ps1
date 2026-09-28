@@ -919,3 +919,18 @@ Describe 'seventh review pass' {
         (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
     }
 }
+
+Describe 'eighth review pass' {
+    It 'decodes HTML character references before looking for a URL' {
+        # '&#104;ttps://' renders as 'https://' - the link exists for the reader but not
+        # for a regex over the raw text.
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value '<a href="&#104;ttps://evil.example/x">x</a> and <a href="https&#58;//also.example/y">y</a>'
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $hosts = (Get-Rules (Get-Result $r) 'link-hosts').message -join ' '
+        $hosts | Should -Match "'evil\.example'"
+        $hosts | Should -Match "'also\.example'"
+    }
+}

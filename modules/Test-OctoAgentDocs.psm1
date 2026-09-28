@@ -662,7 +662,12 @@ function Test-OctoAgentDocs {
             $allowed = @(Get-Opt 'link-hosts' 'allow' @())
             $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal' $true)
             $seenHosts = [System.Collections.Generic.HashSet[string]]::new()
-            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?:[/\\]*((?:[^\s/\\<>)"''`\]]|[\t\r])+)')) {
+            # Raw HTML is legal in Markdown, and an href may spell any character as an HTML
+            # character reference ('&#104;ttps://…'), which the renderer decodes before the
+            # link exists. The text is decoded the same way before it is scanned, so the
+            # scheme and host the reader would follow are the ones checked.
+            $decoded = [System.Net.WebUtility]::HtmlDecode($content)
+            foreach ($m in [regex]::Matches($decoded, '(?i)\bhttps?:[/\\]*((?:[^\s/\\<>)"''`\]]|[\t\r])+)')) {
                 # The host is whatever a BROWSER would connect to. Browsers follow the
                 # WHATWG rule that '\' is '/' in http(s), so in
                 # 'https://evil.example\@docs.claude.com/' the authority ends at the
