@@ -17,6 +17,7 @@ BeforeAll {
         return ((Initialize-OctoAgentDocs -Path $Root -Json @Extra 3>$null 6>$null) | ConvertFrom-Json)
     }
     function Get-Check { param([string]$Root) (Test-OctoAgentDocs -Path $Root -Json 3>$null) | ConvertFrom-Json }
+    function Get-Row { param($Result, [string]$Item) @($Result.data.checklist | Where-Object { $_.item -eq $Item })[0] }
     $script:Rules = Get-Content -LiteralPath (Join-Path $ModuleDir 'agent-docs.rules.json') -Raw | ConvertFrom-Json -AsHashtable
 }
 
@@ -55,12 +56,27 @@ Describe 'greenfield repository' {
         $res.data.state | Should -Be 'migrated'
         $res.data.filesWritten.Count | Should -Be 0
         Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw | Should -Be $agents
-        $res.data.status.claudeMd | Should -Be 'shim'
-        $res.data.status.brief | Should -Be 'absent'
-        $res.data.status.check | Should -Be 'clean'
-        # A current repository must not be told to -Fix anything.
-        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Migration complete'
-        ($res.data.nextSteps | ForEach-Object { $_.command }) -join ' ' | Should -Not -Match '-Fix'
+        (Get-Row $res 'CLAUDE.md').fact | Should -Be 'shim'
+        (Get-Row $res 'AGENTS-MIGRATION.md').done | Should -BeTrue
+        (Get-Row $res 'check').fact | Should -Be 'clean'
+        # A finished repository has nothing open, so there is nothing to suggest.
+        @($res.data.nextSteps).Count | Should -Be 0
+    }
+    It 'always shows the same five rows, in order' {
+        foreach ($setup in 'empty', 'legacy', 'migrated') {
+            $r = New-Repo
+            if ($setup -eq 'legacy') { '# Legacy' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') }
+            if ($setup -eq 'migrated') { Get-Init $r | Out-Null }
+            $res = Get-Init $r -Extra @{ WhatIf = $true }
+            @($res.data.checklist | ForEach-Object { $_.item }) | Should -Be @('AGENTS.md', 'CLAUDE.md', 'docs/', 'AGENTS-MIGRATION.md', 'check') -Because "setup '$setup'"
+        }
+    }
+    It 'marks what -WhatIf would write as not-yet rather than as missing' {
+        $r = New-Repo
+        $res = Get-Init $r -Extra @{ WhatIf = $true }
+        (Get-Row $res 'AGENTS.md').done | Should -BeNullOrEmpty
+        (Get-Row $res 'AGENTS.md').fact | Should -Be 'would be written'
+        (Get-Row $res 'check').fact | Should -Match 'not run'
     }
     It 'reports migrating while CLAUDE.md still has real content beside AGENTS.md' {
         $r = New-Repo
@@ -68,7 +84,8 @@ Describe 'greenfield repository' {
         '# still the old file' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
         $res = Get-Init $r
         $res.data.state | Should -Be 'migrating'
-        $res.data.status.claudeMd | Should -Be 'real content'
+        (Get-Row $res 'CLAUDE.md').done | Should -BeFalse
+        (Get-Row $res 'CLAUDE.md').fact | Should -Be 'real content'
         $res.data.filesWritten.Count | Should -Be 0
         ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'remaining content out of CLAUDE.md'
         ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Not -Match 'Migration complete'
@@ -79,7 +96,8 @@ Describe 'greenfield repository' {
         '# brief' | Set-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md')
         $res = Get-Init $r
         $res.data.state | Should -Be 'migrating'
-        $res.data.status.brief | Should -Be 'present'
+        (Get-Row $res 'AGENTS-MIGRATION.md').done | Should -BeFalse
+        (Get-Row $res 'AGENTS-MIGRATION.md').fact | Should -Be 'present'
         ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'delete it'
     }
     It 'suggests -Fix for an initialised repository only when a generated region is stale' {
@@ -120,6 +138,8 @@ Describe 'repository with a hand-written CLAUDE.md' {
         $res = Get-Init $r
         $res.data.state | Should -Be 'migration'
         @($res.data.filesWritten) | Should -Be @('AGENTS-MIGRATION.md')
+        (Get-Row $res 'AGENTS-MIGRATION.md').done | Should -BeNullOrEmpty   # just written: in progress, not open
+        (Get-Row $res 'AGENTS.md').done | Should -BeFalse
         Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw | Should -Be $before
         Test-Path (Join-Path $r 'AGENTS.md') | Should -BeFalse
     }
