@@ -207,6 +207,8 @@ function Test-OctoAgentDocs {
     if ($Explain -and -not $Rule -and $Path -ne '.') {
         if ($script:AgentDocsRuleIds -contains $Path) { $Rule = @($Path); $Path = '.' }
         elseif (-not (Resolve-OctoAgentDocsRepository -Path $Path -AsNullIfMissing)) {
+            # A file has its own diagnosis - the throwing resolver gives it.
+            if (Test-Path -LiteralPath $Path -PathType Leaf) { $null = Resolve-OctoAgentDocsRepository -Path $Path }
             throw "'$Path' is neither a repository path nor a rule id. Rules: $($script:AgentDocsRuleIds -join ', ')"
         }
     }
@@ -538,7 +540,7 @@ function Test-OctoAgentDocs {
     # to a hyphen, so runs of whitespace must not be collapsed.
     function Get-Anchors {
         param([string]$Content)
-        $set = [System.Collections.Generic.HashSet[string]]::new()
+        $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $seen = @{}
         $inCode = $false
         foreach ($line in ($Content -split "`r?`n")) {
@@ -561,7 +563,9 @@ function Test-OctoAgentDocs {
                 else { $seen[$a] = 0; [void]$set.Add($a) }
             }
         }
-        return $set
+        # Comma-wrapped: a collection returned bare is enumerated into an array and the
+        # case-insensitive comparer is lost with it.
+        return , $set
     }
 
     # A CLAUDE.md is safe to replace with the shim when it holds nothing but HTML
@@ -668,7 +672,7 @@ function Test-OctoAgentDocs {
                 Add-Finding 'frontmatter-present' $rel "No 'description' in frontmatter"
             }
             else {
-                $maxDesc = Get-Opt 'frontmatter-present' 'maxDescription' 160
+                $maxDesc = Get-Opt 'frontmatter-present' 'maxDescription'
                 if ($fm['description'].Length -gt $maxDesc) {
                     Add-Finding 'frontmatter-present' $rel "description is $($fm['description'].Length) characters, limit $maxDesc - shorten it to one scannable line"
                 }
@@ -683,10 +687,10 @@ function Test-OctoAgentDocs {
 
         if (Test-RuleOn 'doc-size') {
             $maxL = Get-Opt 'doc-size' 'maxLines' 0
-            $maxC = Get-Opt 'doc-size' 'maxCharacters' 25000
+            $maxC = Get-Opt 'doc-size' 'maxCharacters'
             # One finding per file, not one per dimension, and it must say what to do:
             # a warning nobody can act on is a warning people learn to scroll past.
-            $charsPerToken = Get-Opt 'doc-size' 'charactersPerToken' 4.0
+            $charsPerToken = Get-Opt 'doc-size' 'charactersPerToken'
             $over = @()
             # Characters lead: tokens are the cost. Lines are the human-readability proxy.
             if ($charCount -gt $maxC) { $over += "$charCount characters (limit $maxC)" }
@@ -723,7 +727,7 @@ function Test-OctoAgentDocs {
     }
 
     if (Test-RuleOn 'docs-count') {
-        $maxDocs = Get-Opt 'docs-count' 'max' 12
+        $maxDocs = Get-Opt 'docs-count' 'max'
         if ($routes.Count -gt $maxDocs) {
             Add-Finding 'docs-count' 'docs/' "$($routes.Count) routed docs (limit $maxDocs) - the routing table needs grouping"
         }
@@ -750,8 +754,10 @@ function Test-OctoAgentDocs {
     # 'rules' and nothing else - so a repository cannot add its own docs folder to the
     # ignore list and disappear from the integrity scan.
     $scan = if ($config['scan'] -is [hashtable]) { $config['scan'] } else { @{} }
+    # The list lives in the ruleset's scan.ignore; a ruleset without it scans everything
+    # and says so, rather than falling back to a second copy of the list here.
     $ignoreSegments = @(if ($scan['ignore'] -is [System.Collections.IEnumerable] -and $scan['ignore'] -isnot [string]) { $scan['ignore'] }
-        else { @('.git', 'node_modules', 'bin', 'obj', 'packages', 'dist', '.vs', '.idea') })
+        else { Write-Warning 'Built-in ruleset has no scan.ignore - every folder is scanned'; @() })
     $maxScan = if ($scan['maxFiles']) { [int]$scan['maxFiles'] } else { 500 }
     if ($maxScan -lt 1) { Write-Warning "scan.maxFiles is $maxScan - using 500"; $maxScan = 500 }
 
@@ -824,7 +830,7 @@ function Test-OctoAgentDocs {
             # ever does needs the ORG ruleset changed, not a local opt-out.
             $bad = [ordered]@{
                 'Unicode Tag character'  = '\uDB40[\uDC00-\uDC7F]'
-                'zero-width character'   = '[\u200B\u200C\u2060\uFEFF]'
+                'invisible character'    = '[\u00AD\u034F\u061C\u180E\u200B\u200C\u200E\u200F\u2060-\u2064\uFEFF]'
                 'stray zero-width joiner' = '(?<![\p{So}\uFE0F\uDC00-\uDFFF])\u200D|\u200D(?![\p{So}\uFE0F\uD800-\uDBFF])'
                 'bidirectional override' = '[\u202A-\u202E\u2066-\u2069]'
             }
@@ -849,7 +855,7 @@ function Test-OctoAgentDocs {
             # NB: not $host - that is an automatic variable, and writing to it is an error
             # outside module scope.
             $allowed = @(Get-Opt 'link-hosts' 'allow' @())
-            $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal' $true)
+            $skipLocal = [bool](Get-Opt 'link-hosts' 'ignoreLocal')
             $seenHosts = [System.Collections.Generic.HashSet[string]]::new()
             # Two kinds of text carry a URL, and they are read differently. Raw HTML is legal
             # in Markdown, so an href is taken WHOLE from the raw text first - its quotes
@@ -914,7 +920,7 @@ function Test-OctoAgentDocs {
     }
 
     # ------------------------------------------------- references + line length
-    $siblingPattern = Get-Opt 'reference-resolves' 'siblingRepoPattern' '^(octo|mm)-[^/]+/'
+    $siblingPattern = Get-Opt 'reference-resolves' 'siblingRepoPattern'
     $anchorCache = @{}
 
     # A reference to a CLAUDE.md that has become the shim still RESOLVES, so nothing
@@ -950,10 +956,14 @@ function Test-OctoAgentDocs {
         if ((Test-RuleOn 'reference-resolves') -or (Test-RuleOn 'reference-to-shim')) {
             # Fenced code is illustration, not navigation: a link in a ```markdown example is
             # never followed, so it is not checked. Get-Anchors applies the same rule.
-            $prose = [regex]::Replace($content, '(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$', '')
+            $prose = ConvertTo-OctoAgentDocsProse $content
+            # An inline code span is quoted syntax, not a link to follow; the backtick
+            # references below need the spans, so only the link scan drops them.
+            $linkText = [regex]::Replace($prose, '`[^`\n]*`', '')
             # Destination, optionally in <...>, optionally followed by a "title".
-            foreach ($m in [regex]::Matches($prose, '\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
-                $target = $m.Groups[1].Value
+            foreach ($m in [regex]::Matches($linkText, '\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
+                # Percent-encoding is how a space travels in a link; the file is unencoded.
+                $target = [System.Uri]::UnescapeDataString($m.Groups[1].Value)
                 if ($target -match '^[A-Za-z][A-Za-z0-9+.-]*:') { continue }   # any URI scheme
                 $parts = $target -split '#', 2
                 $filePart = $parts[0]
@@ -1004,14 +1014,14 @@ function Test-OctoAgentDocs {
             }
         }
 
-        $lineScope = Get-Opt 'line-length' 'scope' 'entryPoint'
+        $lineScope = Get-Opt 'line-length' 'scope'
         $inScope = ($lineScope -eq 'all') -or ($entryPath -and $f -eq $entryPath)
         if ((Test-RuleOn 'line-length') -and $inScope) {
-            $maxLine = Get-Opt 'line-length' 'max' 120
-            $maxTable = Get-Opt 'line-length' 'tables' 200
-            $listCap = Get-Opt 'line-length' 'maxReported' 5
-            $skipCode = [bool](Get-Opt 'line-length' 'ignoreCodeBlocks' $true)
-            $skipUnbroken = [bool](Get-Opt 'line-length' 'ignoreNoWhitespace' $true)
+            $maxLine = Get-Opt 'line-length' 'max'
+            $maxTable = Get-Opt 'line-length' 'tables'
+            $listCap = Get-Opt 'line-length' 'maxReported'
+            $skipCode = [bool](Get-Opt 'line-length' 'ignoreCodeBlocks')
+            $skipUnbroken = [bool](Get-Opt 'line-length' 'ignoreNoWhitespace')
             $inCode = $false
             $inFrontmatter = $false
             $hits = 0
@@ -1025,7 +1035,7 @@ function Test-OctoAgentDocs {
                 $isTable = $line.TrimStart().StartsWith('|')
                 $limit = if ($isTable) { $maxTable } else { $maxLine }
                 if ($line.Length -le $limit) { continue }
-                if ($skipUnbroken -and ($line.Substring($limit) -notmatch '\s')) { continue }
+                if ($skipUnbroken -and ($line.Trim() -notmatch '\s')) { continue }
                 $hits++
                 if ($hits -le $listCap) {
                     $kind = if ($isTable) { 'table row' } else { 'line' }
@@ -1052,14 +1062,14 @@ function Test-OctoAgentDocs {
         $entryChars = $entry.Length
 
         if (Test-RuleOn 'entry-point-lines') {
-            $maxL = Get-Opt 'entry-point-lines' 'max' 200
+            $maxL = Get-Opt 'entry-point-lines' 'max'
             if ($entryLines -gt $maxL) {
                 Add-Finding 'entry-point-lines' $entryName "$entryLines lines over the budget of $maxL - this file loads in every session. Move detail into docs/ and route it with applies_to"
             }
         }
         if (Test-RuleOn 'entry-point-characters') {
-            $maxC = Get-Opt 'entry-point-characters' 'max' 20000
-            $warnAt = Get-Opt 'entry-point-characters' 'warnAt' 12000
+            $maxC = Get-Opt 'entry-point-characters' 'max'
+            $warnAt = Get-Opt 'entry-point-characters' 'warnAt'
             if ($entryChars -gt $maxC) {
                 Add-Finding 'entry-point-characters' $entryName "$entryChars characters over the budget of $maxC - move detail into docs/, or shorten the longest lines"
             }
@@ -1073,7 +1083,7 @@ function Test-OctoAgentDocs {
             # here supplies default text, so an empty slot cannot be filled with filler.
             $required = Get-Opt 'required-sections' 'sections' @()
             $headings = @()
-            foreach ($l in (Get-Lines $entry)) {
+            foreach ($l in (Get-Lines (ConvertTo-OctoAgentDocsProse $entry))) {
                 if ($l -match '^##\s+(.*?)\s*$') { $headings += $Matches[1] }
             }
             # One finding for all missing sections: four lines for one problem is noise.
@@ -1083,7 +1093,7 @@ function Test-OctoAgentDocs {
         }
 
         if (Test-RuleOn 'routing-current') {
-            $withDesc = [bool](Get-Opt 'routing-current' 'includeDescriptions' $false)
+            $withDesc = [bool](Get-Opt 'routing-current' 'includeDescriptions')
             $sb = [System.Text.StringBuilder]::new()
             if ($withDesc) {
                 [void]$sb.AppendLine('| When you change | Read first | What it covers |')

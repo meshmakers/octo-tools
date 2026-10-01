@@ -8,8 +8,10 @@ BeforeAll {
     Import-Module (Join-Path $ModuleDir 'Test-OctoAgentDocs.psm1') -Force
     Import-Module (Join-Path $ModuleDir 'Initialize-OctoAgentDocs.psm1') -Force
 
+    $script:Fixtures = [System.Collections.Generic.List[string]]::new()
     function New-Repo {
         $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ainit-" + [guid]::NewGuid().ToString('N'))
+        $script:Fixtures.Add($root)
         New-Item -ItemType Directory -Path $root -Force | Out-Null
         return $root
     }
@@ -297,4 +299,8 @@ Describe 'review pass - action summary and brief command path' {
         $brief = Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw
         $brief | Should -Match ("Test-OctoAgentDocs -Path " + [regex]::Escape((Format-OctoAgentDocsArgument -Value $r)) + "``")
     }
+}
+
+AfterAll {
+    foreach ($p in $script:Fixtures) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }
 }

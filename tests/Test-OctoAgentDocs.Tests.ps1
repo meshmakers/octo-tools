@@ -9,10 +9,15 @@ BeforeAll {
     Import-Module (Join-Path $ModuleDir 'OctoAgentDocs.Common.psm1') -Force
     Import-Module (Join-Path $ModuleDir 'Test-OctoAgentDocs.psm1') -Force
 
+    # Every fixture root is remembered and removed in AfterAll, so a run leaves nothing
+    # behind in the temp directory.
+    $script:Fixtures = [System.Collections.Generic.List[string]]::new()
+    function Register-Fixture { param([string]$P) $script:Fixtures.Add($P); return $P }
+
     # A minimal, clean repository: entry point with markers, one routed doc.
     function New-Fixture {
         param([switch]$Agents)
-        $root = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N'))
+        $root = Register-Fixture (Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path (Join-Path $root 'docs') -Force | Out-Null
         $entry = if ($Agents) { 'AGENTS.md' } else { 'CLAUDE.md' }
         @(
@@ -57,9 +62,12 @@ BeforeAll {
     # in place by a test.
     function New-OrgFixture {
         param([string]$Mode, [string[]]$NonRelaxable)
-        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-org-" + [guid]::NewGuid().ToString('N'))
+        $dir = Register-Fixture (Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-org-" + [guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        Copy-Item -Path (Join-Path $ModuleDir '*') -Destination $dir -Force
+        # Only what the checker needs beside itself, not every module in the folder.
+        foreach ($n in 'OctoJsonOutput.psm1', 'OctoAgentDocs.Common.psm1', 'Test-OctoAgentDocs.psm1', 'agent-docs.rules.json', 'agent-docs.rules.schema.json') {
+            Copy-Item -Path (Join-Path $ModuleDir $n) -Destination $dir -Force
+        }
         $rulesPath = Join-Path $dir 'agent-docs.rules.json'
         $rules = Get-Content -LiteralPath $rulesPath -Raw | ConvertFrom-Json -AsHashtable
         if ($Mode) { $rules.mode = $Mode }
@@ -1216,7 +1224,7 @@ Describe 'tiered report - counts, precedence and JSON shape' {
     }
     It 'quotes a repository path with spaces in the commands it prints' {
         $r = New-Fixture
-        $spaced = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs sp " + [guid]::NewGuid().ToString('N'))
+        $spaced = Register-Fixture (Join-Path ([System.IO.Path]::GetTempPath()) ("adocs sp " + [guid]::NewGuid().ToString('N')))
         Move-Item -LiteralPath $r -Destination $spaced
         (Get-Content -LiteralPath (Join-Path $spaced 'CLAUDE.md') -Raw).Replace('## Rules', '## Other') |
             Set-Content -LiteralPath (Join-Path $spaced 'CLAUDE.md') -NoNewline
@@ -1288,7 +1296,7 @@ Describe 'review pass - gate, start-here and path edge cases' {
         { Test-OctoAgentDocs -Path $r -Explain 3>$null 6>$null } | Should -Not -Throw
     }
     It 'tells an empty repository that Initialize writes the entry point, not a brief' {
-        $r = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N'))
+        $r = Register-Fixture (Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $r -Force | Out-Null
         $sh = (Get-Result $r).data.startHere
         $sh | Should -Match 'no agent instructions yet'
@@ -1340,7 +1348,7 @@ Describe 'review pass - inputs the checker must survive' {
         (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
     }
     It 'files a repository without any entry point under the structural rule, honouring its severity' {
-        $r = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N'))
+        $r = Register-Fixture (Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $r -Force | Out-Null
         $f = Get-Rules (Get-Result $r) 'required-sections'
         $f.Count | Should -Be 1
@@ -1514,5 +1522,64 @@ Describe 'review pass - CRLF fences, quoted YAML, ordinal order, unterminated fr
         $r = New-Fixture
         $res = Get-Result $r
         $res.data.filesScanned.routed | Should -Be 2
+    }
+}
+
+AfterAll {
+    foreach ($p in $script:Fixtures) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Describe 'review pass - invisible characters, fences, links, line length' {
+    It 'catches the other invisible format characters too' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ("plain" + [char]0x2064 + [char]0x200E + [char]0x061C + [char]0x034F + [char]0x00AD)
+        $f = Get-Rules (Get-Result $r) 'no-invisible-characters'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match '^5 invisible character'
+    }
+    It 'does not count a heading inside a fenced block as a required section' {
+        $r = New-Fixture
+        (Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw).Replace("## Rules`n", "``````markdown`n## Rules`n```````n") |
+            Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        '{"schemaVersion":1,"rules":{"routing-current":["off"]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'required-sections'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'## Rules'"
+    }
+    It 'does not follow a link quoted in an inline code span' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value 'Use `[label](path.md)` syntax.'
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'decodes a percent-encoded link target and matches anchors without regard to case' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        '# My file' | Set-Content -LiteralPath (Join-Path $r 'docs/my file.md')
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value '[f](docs/my%20file.md) and [b](#Build--test)'
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'accepts a shim whose comment spans lines' {
+        Test-OctoAgentDocsShimLike "<!-- Claude Code loads this file.`n     AGENTS.md is the source of truth. -->`n@AGENTS.md`n" | Should -BeTrue
+    }
+    It 'exempts only lines without any whitespace from the line limit' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $prose = ((1..23 | ForEach-Object { 'word' }) -join ' ') + ' ' + ('x' * 25)   # whitespace before the limit only
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @($prose, ('https://example.invalid/' + ('a' * 130)))
+        $f = Get-Rules (Get-Result $r) 'line-length'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'line is'
+    }
+    It 'survives a repository override that empties the shim text' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        '{"schemaVersion":1,"rules":{"shim-valid":["error",{"content":[]}]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        { Test-OctoAgentDocs -Path $r -Json 3>$null } | Should -Not -Throw
+    }
+    It 'keeps the file diagnosis when -Explain is given a file path' {
+        $r = New-Fixture
+        { Test-OctoAgentDocs -Explain (Join-Path $r 'CLAUDE.md') 3>$null } | Should -Throw '*is a file*'
     }
 }

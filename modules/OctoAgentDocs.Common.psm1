@@ -98,6 +98,18 @@ function ConvertTo-OctoAgentDocsLf {
     return (($Text -replace "`r`n", "`n") -replace "`r", "`n")
 }
 
+function ConvertTo-OctoAgentDocsProse {
+    <#
+    .SYNOPSIS
+    The prose of a Markdown text: fenced code blocks (``` ... ```) removed. Fenced code is
+    illustration, not structure - a heading, link or reference inside it is never followed -
+    so every structural scan runs on the text this returns.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
+    return [regex]::Replace((ConvertTo-OctoAgentDocsLf $Text), '(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$', '')
+}
+
 function Test-OctoAgentDocsShimLike {
     <#
     .SYNOPSIS
@@ -110,8 +122,10 @@ function Test-OctoAgentDocsShimLike {
     #>
     param([AllowNull()][AllowEmptyString()][string]$Content)
     if ([string]::IsNullOrEmpty($Content)) { return $true }
-    $lines = @((ConvertTo-OctoAgentDocsLf $Content) -split "`n")
-    $meaningful = @($lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^<!--.*-->$' })
+    # Comments may span lines; they are removed as a whole before the lines are judged.
+    $stripped = [regex]::Replace((ConvertTo-OctoAgentDocsLf $Content), '(?s)<!--.*?-->', '')
+    $lines = @($stripped -split "`n")
+    $meaningful = @($lines | Where-Object { $_.Trim() -ne '' })
     if ($meaningful.Count -eq 0) { return $true }
     return ($meaningful.Count -eq 1 -and $meaningful[0].Trim() -match '^@\S+$')
 }
@@ -139,7 +153,7 @@ function Get-OctoAgentDocsShimVerdict {
     Whether a CLAUDE.md is the shim: 'ok' (exactly the expected lines, compared
     case-sensitively after line-ending normalisation), 'absent' (no text), or 'differs'.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string[]]$ExpectedLines)
+    param([AllowNull()][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ExpectedLines)
     if ($null -eq $Text) { return 'absent' }
     $expected = $ExpectedLines -join "`n"
     if ((ConvertTo-OctoAgentDocsLf $Text).Trim() -ceq $expected) { return 'ok' }
@@ -244,7 +258,7 @@ function Get-OctoAgentDocsTierHeading {
 Export-ModuleMember -Function @(
     'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList',
     'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
-    'ConvertTo-OctoAgentDocsLf', 'Test-OctoAgentDocsShimLike', 'Get-OctoAgentDocsShimVerdict', 'Invoke-OctoAgentDocsOrdinalSort',
+    'ConvertTo-OctoAgentDocsLf', 'ConvertTo-OctoAgentDocsProse', 'Test-OctoAgentDocsShimLike', 'Get-OctoAgentDocsShimVerdict', 'Invoke-OctoAgentDocsOrdinalSort',
     'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
     'ConvertTo-OctoAgentDocsRuleEntry', 'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
 )
