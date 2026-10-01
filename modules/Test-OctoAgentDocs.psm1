@@ -1,14 +1,12 @@
-# Plain import, not -Force: a forced import from inside a module re-homes the shared module
+# Plain imports, not -Force: a forced import from inside a module re-homes the shared module
 # into this module's scope and removes it from the session, which breaks the other callers.
+# Each cmdlet module imports what IT calls - a nested import is visible only to the module
+# that made it, so the JSON envelope helper cannot be inherited through the shared module.
+Import-Module (Join-Path $PSScriptRoot 'OctoJsonOutput.psm1')
 Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 
-$script:AgentDocsRuleIds = @(
-    'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
-    'frontmatter-present', 'doc-reachable', 'reference-resolves',
-    'routing-current', 'docs-count', 'shim-valid', 'required-sections',
-    'no-invisible-characters', 'link-hosts', 'migration-pending'
-)
-$script:AgentDocsSeverities = @('off', 'warn', 'error')
+$script:AgentDocsRuleIds = Get-OctoAgentDocsRuleIdList
+$script:AgentDocsSeverities = Get-OctoAgentDocsSeverityList
 $script:AgentDocsModes = @('logOnly', 'enforce')
 
 function Test-OctoAgentDocs {
@@ -201,11 +199,11 @@ function Test-OctoAgentDocs {
 
     $ErrorActionPreference = 'Stop'
 
-    # 'Test-OctoAgentDocs -Explain line-length' puts the rule id where -Path binds. A rule
-    # id is never a repository name, so when -Explain is on and the "path" is a known rule
-    # that resolves to nothing - neither as given nor under ROOTPATH, the same lookup the
-    # real path gets - it is the rule.
-    if ($Explain -and -not $Rule -and $Path -ne '.' -and ($script:AgentDocsRuleIds -contains $Path) -and -not (Resolve-OctoAgentDocsRepository -Path $Path -AsNullIfMissing)) {
+    # 'Test-OctoAgentDocs -Explain line-length' puts the rule id where -Path binds. When
+    # -Explain is on and the "path" resolves to nothing - neither as given nor under
+    # ROOTPATH, the same lookup the real path gets - it is a rule id, and a mistyped one
+    # gets the unknown-rule message with the valid ids rather than a missing-path error.
+    if ($Explain -and -not $Rule -and $Path -ne '.' -and -not (Resolve-OctoAgentDocsRepository -Path $Path -AsNullIfMissing)) {
         $Rule = @($Path)
         $Path = '.'
     }
@@ -216,18 +214,14 @@ function Test-OctoAgentDocs {
     # A broken built-in ruleset is a broken install and throws. A broken repository
     # override is the user's file: warn, skip it, carry on with what we have.
     function Read-RuleFile {
-        param([string]$P, [switch]$Required)
-        if (-not (Test-Path -LiteralPath $P)) {
-            if ($Required) { throw "Built-in ruleset missing at $P" }
-            return $null
-        }
-        try { return (Get-Content -LiteralPath $P -Raw | ConvertFrom-Json -AsHashtable) }
-        catch {
-            $msg = "Ruleset '$P' is not valid JSON: $($_.Exception.Message)"
-            if ($Required) { throw $msg }
-            Write-Warning "$msg - ignored"
-            return $null
-        }
+        param([string]$P)
+        if (-not (Test-Path -LiteralPath $P)) { return $null }
+        $parsed = try { Get-Content -LiteralPath $P -Raw | ConvertFrom-Json -AsHashtable }
+        catch { Write-Warning "Ruleset '$P' is not valid JSON: $($_.Exception.Message) - ignored"; return $null }
+        # Valid JSON that is not an object ("[1,2]", "42") is just as much the user's
+        # problem as a syntax error, and must be skipped the same way, not crash the check.
+        if ($parsed -isnot [hashtable]) { Write-Warning "Ruleset '$P' is not a JSON object - ignored"; return $null }
+        return $parsed
     }
 
     $config = Read-OctoAgentDocsBuiltInRuleset -RuleIds $script:AgentDocsRuleIds
@@ -556,13 +550,23 @@ function Test-OctoAgentDocs {
     $hasClaude = Test-Path -LiteralPath $claudePath
 
     if (-not $hasAgents -and -not $hasClaude) {
-        Add-Finding 'entry-point-lines' '' 'Neither AGENTS.md nor CLAUDE.md exists' 'error'
+        # No entry point at all is the extreme case of missing sections: structural, and
+        # reported under that rule's severity rather than forced past an 'off'.
+        Add-Finding 'required-sections' '' 'Neither AGENTS.md nor CLAUDE.md exists - the repository has no entry point'
         $entryPath = $null
     }
     else { $entryPath = if ($hasAgents) { $agentsPath } else { $claudePath } }
     $entryName = if ($entryPath) { Split-Path -Leaf $entryPath } else { '' }
 
-    if ($hasAgents -and (Test-RuleOn 'shim-valid')) {
+    # The shim VERDICT is computed whenever AGENTS.md is canonical, whatever severity the
+    # rule has - Initialize-OctoAgentDocs reads it from the JSON, and "no finding" must not
+    # be mistaken for "is the shim" in a repository that turned the rule off.
+    #   ok       CLAUDE.md is exactly the shim
+    #   absent   no CLAUDE.md
+    #   differs  CLAUDE.md exists and is something else
+    #   n/a      CLAUDE.md is the entry point itself
+    $shimVerdict = 'n/a'
+    if ($hasAgents) {
         $expected = ((Get-Opt 'shim-valid' 'content' @('@AGENTS.md')) -join "`n")
         # A Windows checkout with core.autocrlf reads the two-line shim as CRLF; the
         # template is LF, so both are normalised or every migrated repo fails on Windows.
@@ -571,7 +575,10 @@ function Test-OctoAgentDocs {
         $current = if ($hasClaude) { ((Read-Text $claudePath) -replace "`r`n", "`n") -replace "`r", "`n" } else { $null }
         # Case-sensitive: '@agents.md' does not resolve to AGENTS.md on a case-sensitive
         # checkout, so it is not the shim.
-        if (($null -eq $current) -or ($current.Trim() -cne $expected)) {
+        $shimVerdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -cne $expected) { 'differs' } else { 'ok' }
+    }
+    if ($hasAgents -and (Test-RuleOn 'shim-valid')) {
+        if ($shimVerdict -ne 'ok') {
             $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
             # A diff shows what -Fix WOULD write. For a CLAUDE.md with real content -Fix
             # writes nothing, so printing the whole file as removed lines would be a lie.
@@ -865,7 +872,7 @@ function Test-OctoAgentDocs {
                         $linkHost -match '(?i)\.(local|localhost|internal|invalid)$' -or
                         $isPrivateIp
                     )) { continue }
-                if (-not ($allowed | Where-Object { $linkHost -eq $_ -or $linkHost.EndsWith(".$_") })) {
+                if (-not ($allowed | Where-Object { $linkHost -eq $_ -or $linkHost.EndsWith(".$_", [System.StringComparison]::OrdinalIgnoreCase) })) {
                     Add-Finding 'link-hosts' $rel "Link to '$linkHost' is not on the allowlist"
                 }
             }
@@ -992,7 +999,13 @@ function Test-OctoAgentDocs {
     $endMarker = Get-OctoAgentDocsConstant RoutingEnd
 
     if ($entryPath) {
-        $entry = Read-Text $entryPath
+        # Checks run on a normalised copy (CRLF and lone CR become LF), so line counting,
+        # section matching and the routing comparison do not depend on how the file was
+        # saved. The ORIGINAL is kept for -Fix, which splices the new block into it with the
+        # file's own line endings rather than rewriting every line of a CRLF file.
+        $entryRaw = Read-Text $entryPath
+        $entry = ($entryRaw -replace "`r`n", "`n") -replace "`r", "`n"
+        $entryEol = if ($entryRaw.Contains("`r`n")) { "`r`n" } else { "`n" }
         $entryLines = (Get-Lines $entry).Count
         $entryChars = $entry.Length
 
@@ -1051,21 +1064,21 @@ function Test-OctoAgentDocs {
             # LF template, so both sides are normalised or a current table reads as stale.
             $generated = ($sb.ToString() -replace "`r`n", "`n").TrimEnd("`n")
 
-            $entry = $entry -replace "`r`n", "`n"
             $si = $entry.IndexOf($startMarker)
             $ei = $entry.IndexOf($endMarker)
             if ($si -lt 0 -or $ei -lt 0 -or $ei -lt $si) {
                 Add-Finding 'routing-current' $entryName "Add $startMarker and $endMarker around the routing table"
             }
             else {
-                $head = $entry.Substring(0, $si + $startMarker.Length)
-                $tail = $entry.Substring($ei)
                 $currentBlock = $entry.Substring($si + $startMarker.Length, $ei - $si - $startMarker.Length)
                 $desired = "`n$generated`n"
                 if ($currentBlock -cne $desired) {
                     Add-Diff $entryName 'routing' $currentBlock.Trim("`n") $generated
                     if ($Fix -and $PSCmdlet.ShouldProcess($entryName, 'Regenerate the routing table')) {
-                        Write-Text $entryPath ($head + $desired + $tail); $written.Add($entryName)
+                        $rsi = $entryRaw.IndexOf($startMarker); $rei = $entryRaw.IndexOf($endMarker)
+                        $desiredRaw = $entryEol + ($generated -replace "`n", $entryEol) + $entryEol
+                        Write-Text $entryPath ($entryRaw.Substring(0, $rsi + $startMarker.Length) + $desiredRaw + $entryRaw.Substring($rei))
+                        $written.Add($entryName)
                     }
                     elseif ($Fix) { Add-Finding 'routing-current' $entryName 'Generated routing table would be rewritten (run without -WhatIf)' }
                     else { Add-Finding 'routing-current' $entryName 'Generated routing table is out of date (run with -Fix)' }
@@ -1111,6 +1124,7 @@ function Test-OctoAgentDocs {
             repository   = Split-Path -Leaf $repo
             entryPoint   = $entryName
             canonical    = if ($hasAgents) { 'AGENTS.md' } else { 'CLAUDE.md' }
+            shim         = $shimVerdict
             mode         = $config.mode
             filesScanned = [ordered]@{ routed = $checkFiles.Count; integrity = $integrityFiles.Count; truncated = $scanTruncated }
             filesWritten = @($written)

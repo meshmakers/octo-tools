@@ -1,14 +1,11 @@
-# Plain import, not -Force: a forced import from inside a module re-homes the shared module
+# Plain imports, not -Force: a forced import from inside a module re-homes the shared module
 # into this module's scope and removes it from the session, which breaks the other callers.
+# Each cmdlet module imports what IT calls - a nested import is visible only to the module
+# that made it, so the JSON envelope helper cannot be inherited through the shared module.
+Import-Module (Join-Path $PSScriptRoot 'OctoJsonOutput.psm1')
 Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 
-# The rule ids the built-in ruleset must define; the same list Test-OctoAgentDocs checks.
-$script:AgentDocsRuleIds = @(
-    'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
-    'frontmatter-present', 'doc-reachable', 'reference-resolves',
-    'routing-current', 'docs-count', 'shim-valid', 'required-sections',
-    'no-invisible-characters', 'link-hosts', 'migration-pending'
-)
+$script:AgentDocsRuleIds = Get-OctoAgentDocsRuleIdList
 
 function Initialize-OctoAgentDocs {
     <#
@@ -94,15 +91,16 @@ function Initialize-OctoAgentDocs {
     $hasClaude = Test-Path -LiteralPath $claudePath
     $hasBrief = Test-Path -LiteralPath $briefPath
     # Four answers: absent; 'shim'; 'import' (thin - comments and one @import - but not the
-    # shim, so not done); 'real content'. Whether a file IS the shim is the checker's call,
-    # because a repository may override shim-valid.content; the built-in text is only the
-    # fallback for when the checker is not loaded.
+    # shim, so not done); 'real content'. Whether a file IS the shim is the checker's
+    # verdict (its JSON 'shim' field, computed whatever severity the rule has), because a
+    # repository may override shim-valid.content; the built-in text is only the fallback
+    # for when the checker is not loaded.
     $expectedShim = $shimLines -join "`n"
     function Get-ClaudeState {
         param($Check)
         if (-not (Test-Path -LiteralPath $claudePath)) { return 'absent' }
         $text = ((Read-OctoAgentDocsText $claudePath) -replace "`r`n", "`n") -replace "`r", "`n"
-        $isShim = if ($Check) { @($Check.data.findings | Where-Object { $_.rule -eq 'shim-valid' }).Count -eq 0 }
+        $isShim = if ($Check -and $Check.data.PSObject.Properties['shim']) { $Check.data.shim -eq 'ok' }
                   else { $text.Trim() -ceq $expectedShim }
         if ($isShim) { return 'shim' }
         if (Test-OctoAgentDocsShimLike $text) { return 'import' }

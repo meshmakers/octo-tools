@@ -11,6 +11,17 @@ $script:Constants = @{
     BriefName    = 'AGENTS-MIGRATION.md'
 }
 $script:Severities = @('off', 'warn', 'error')
+# Every rule the built-in ruleset must define, in report order within the tiers. The
+# schema's two enums mirror this list.
+$script:RuleIds = @(
+    'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
+    'frontmatter-present', 'doc-reachable', 'reference-resolves',
+    'routing-current', 'docs-count', 'shim-valid', 'required-sections',
+    'no-invisible-characters', 'link-hosts', 'migration-pending'
+)
+
+function Get-OctoAgentDocsRuleIdList { return @($script:RuleIds) }
+function Get-OctoAgentDocsSeverityList { return @($script:Severities) }
 
 function Get-OctoAgentDocsConstant {
     <#
@@ -52,6 +63,11 @@ function Resolve-OctoAgentDocsRepository {
     if (-not $repo -and $Global:ROOTPATH) {
         $underRoot = Join-Path $Global:ROOTPATH $Path
         $repo = try { (Resolve-Path -LiteralPath $underRoot -ErrorAction Stop).Path } catch { $null }
+    }
+    if ($repo -and -not (Test-Path -LiteralPath $repo -PathType Container)) {
+        # An easy tab-completion slip: the entry point instead of the folder it is in.
+        if ($AsNullIfMissing) { return $null }
+        throw "Path '$Path' is a file, not a repository folder. Pass the folder that holds AGENTS.md or CLAUDE.md."
     }
     if ($repo) { return $repo }
     if ($AsNullIfMissing) { return $null }
@@ -174,7 +190,8 @@ function Get-OctoAgentDocsTierHeading {
 }
 
 Export-ModuleMember -Function @(
-    'Get-OctoAgentDocsConstant', 'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
+    'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList', 'Get-OctoAgentDocsSeverityList',
+    'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
     'Test-OctoAgentDocsShimLike', 'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
     'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
 )

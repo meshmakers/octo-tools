@@ -1297,3 +1297,70 @@ Describe 'review pass - gate, start-here and path edge cases' {
         Format-OctoAgentDocsArgument -Value './octo-tools/' | Should -Be './octo-tools/'
     }
 }
+
+Describe 'review pass - inputs the checker must survive' {
+    It 'skips a repository override that is valid JSON but not an object' {
+        $r = New-Fixture
+        '[1,2]' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        { Test-OctoAgentDocs -Path $r -Json 3>$null } | Should -Not -Throw
+        $warn = Test-OctoAgentDocs -Path $r -Json 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        ($warn | Out-String) | Should -Match 'not a JSON object'
+    }
+    It 'keeps the file''s CRLF line endings when -Fix regenerates the routing table' {
+        $r = New-Fixture -Agents
+        $p = Join-Path $r 'AGENTS.md'
+        [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) -replace "`r?`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $after = [System.IO.File]::ReadAllText($p)
+        ([regex]::Matches($after, "`r`n")).Count | Should -BeGreaterThan 5
+        ([regex]::Matches($after, "(?<!`r)`n")).Count | Should -Be 0
+        (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 0
+    }
+    It 'reads a lone-CR entry point line by line' {
+        $r = New-Fixture
+        $p = Join-Path $r 'CLAUDE.md'
+        [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) -replace "`r?`n", "`r"), [System.Text.UTF8Encoding]::new($false))
+        '{"schemaVersion":1,"rules":{"routing-current":["off"]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        (Get-Rules (Get-Result $r) 'required-sections').Count | Should -Be 0
+    }
+    It 'reports a mistyped rule after -Explain as an unknown rule, not a missing path' {
+        { Test-OctoAgentDocs -Explain doc-sizee 3>$null } | Should -Throw '*Unknown rule*'
+    }
+    It 'matches allowlist subdomains without regard to case' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see https://docs.github.com/x and https://github.com/y'
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["GitHub.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
+    }
+    It 'files a repository without any entry point under the structural rule, honouring its severity' {
+        $r = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $r -Force | Out-Null
+        $f = Get-Rules (Get-Result $r) 'required-sections'
+        $f.Count | Should -Be 1
+        $f[0].tier | Should -Be 2
+        '{"schemaVersion":1,"rules":{"required-sections":"off"}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        (Get-Rules (Get-Result $r) 'required-sections').Count | Should -Be 0
+    }
+    It 'rejects a file path as the repository' {
+        $r = New-Fixture
+        { Test-OctoAgentDocs -Path (Join-Path $r 'CLAUDE.md') 3>$null } | Should -Throw '*is a file*'
+    }
+    It 'exposes the shim verdict in JSON even when shim-valid is off' {
+        $r = New-Fixture -Agents
+        '# real content' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        '{"schemaVersion":1,"rules":{"shim-valid":"off"}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $res = Get-Result $r
+        (Get-Rules $res 'shim-valid').Count | Should -Be 0
+        $res.data.shim | Should -Be 'differs'
+    }
+    It 'works with -Json when only the checker module was imported' {
+        $r = New-Fixture
+        $script = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-run-" + [guid]::NewGuid().ToString('N') + '.ps1')
+        "Import-Module '$(Join-Path $ModuleDir 'Test-OctoAgentDocs.psm1')' -Force`nTest-OctoAgentDocs -Path '$r' -Json 3>`$null" | Set-Content -LiteralPath $script
+        $out = & (Get-Process -Id $PID).Path -NoProfile -File $script 2>&1
+        Remove-Item -LiteralPath $script -ErrorAction SilentlyContinue
+        (($out -join '') | ConvertFrom-Json).command | Should -Be 'Test-OctoAgentDocs'
+    }
+}

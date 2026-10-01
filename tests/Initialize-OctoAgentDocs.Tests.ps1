@@ -256,3 +256,16 @@ Describe 'review pass - the checker decides what the shim is' {
         @($res.data.nextSteps | Where-Object { $_.command -like '*-Fix' }).Count | Should -Be 1
     }
 }
+
+Describe 'review pass - the shim verdict does not depend on the rule being on' {
+    It 'still reports real content in CLAUDE.md when the repository turned shim-valid off' {
+        $r = New-Repo
+        Get-Init $r | Out-Null
+        "# Real rules`nDo X`n" | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        '{"schemaVersion":1,"rules":{"shim-valid":"off"}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'migrating'
+        (Get-Row $res 'CLAUDE.md').fact | Should -Be 'real content'
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Move the remaining content'
+    }
+}
