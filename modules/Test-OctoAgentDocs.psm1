@@ -140,7 +140,10 @@ function Test-OctoAgentDocs {
     An additional ruleset file, merged after the repository's own.
 
     .PARAMETER Json
-    Emit the standard octo-tools JSON envelope instead of human output.
+    Emit the standard octo-tools JSON envelope instead of human output. Two shapes: a check
+    (with or without -Explain) returns findings, each with its tier, plus startHere and,
+    under -Explain, explanations ordered by tier; the reference (-Explain -All or -Rule)
+    returns rules.
 
     .EXAMPLE
     Test-OctoAgentDocs
@@ -1113,11 +1116,14 @@ function Test-OctoAgentDocs {
     if ($fired -contains 'no-invisible-characters') {
         $causes.Add('a file carries characters a reviewer cannot see. Remove them before anything else.')
     }
-    if (-not $hasAgents -and ($fired -contains 'required-sections' -or $fired -contains 'entry-point-characters' -or $fired -contains 'entry-point-lines')) {
-        $causes.Add("this repository has not migrated to AGENTS.md, and the entry-point findings follow from that. Initialize-OctoAgentDocs -Path $Path writes the migration brief.")
+    $pathArg = if ($Path -match '\s') { "'$Path'" } else { $Path }
+    if ($fired -contains 'migration-pending') {
+        # The brief exists, so "run Initialize" would be the wrong advice even for an
+        # unmigrated repository - the brief IS the next step.
+        $causes.Add('the migration brief is still present - follow its steps and delete it in the migration commit.')
     }
-    elseif ($fired -contains 'migration-pending') {
-        $causes.Add('the migration brief is still present - finish its steps and delete it.')
+    elseif (-not $hasAgents -and ($fired -contains 'required-sections' -or $fired -contains 'entry-point-characters' -or $fired -contains 'entry-point-lines')) {
+        $causes.Add("this repository has not migrated to AGENTS.md, and the entry-point findings follow from that. Initialize-OctoAgentDocs -Path $pathArg writes the migration brief.")
     }
     if ($causes.Count -eq 0 -and $findings.Count -gt 0 -and @($findings | Where-Object { $_.tier -lt 4 }).Count -eq 0) {
         $causes.Add('only budgets are left. Move content into routed docs rather than trimming it in place.')
@@ -1137,7 +1143,7 @@ function Test-OctoAgentDocs {
             routes       = $routes
             findings     = $findings
             startHere    = $startHere
-            explanations = @(if ($Explain) { foreach ($id in $fired) { Get-RuleRow $id } })
+            explanations = @(if ($Explain) { @(foreach ($id in $fired) { Get-RuleRow $id }) | Sort-Object -Stable @{ e = { $_.tier } }, @{ e = { $_.rule } } })
             ruleSet      = $config.rules
             summary      = [ordered]@{ errors = $errors.Count; warnings = $warnings.Count; success = $ok }
         })
@@ -1146,7 +1152,8 @@ function Test-OctoAgentDocs {
         Write-Host "Agent docs check: $(Split-Path -Leaf $repo) (entry point: $entryName, mode: $($config.mode))" -ForegroundColor Yellow
         if ($findings.Count -eq 0) { Write-Host "  clean - $($routes.Count) routed docs" -ForegroundColor Green }
         else {
-            $fileCount = @($findings | ForEach-Object { $_.file } | Where-Object { $_ } | Sort-Object -Unique).Count
+            # 'CLAUDE.md:7' and 'CLAUDE.md:13' are one file.
+            $fileCount = @($findings | ForEach-Object { ($_.file -split ':')[0] } | Where-Object { $_ } | Sort-Object -Unique).Count
             Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s) in $fileCount file(s)" -ForegroundColor Gray
             if ($startHere) { Write-Host "  Start here: $startHere" -ForegroundColor Cyan }
             # Grouped by tier, errors before warnings, then by file - so the list reads as

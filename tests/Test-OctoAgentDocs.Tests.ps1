@@ -1185,3 +1185,38 @@ Describe 'AB#5457 - report order' {
         $sh | Should -Match 'After that: this repository has not migrated'
     }
 }
+
+Describe 'AB#5457 - review pass 2' {
+    It 'counts a file once however many lines are flagged in it' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @(('a' * 130 + ' b'), ('c' * 130 + ' d'))
+        $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
+        $out | Should -Match 'in 1 file\(s\)'
+    }
+    It 'prefers the brief over Initialize when the brief already exists' {
+        $r = New-Fixture
+        (Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw).Replace('## Rules', '## Other') |
+            Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        '# brief' | Set-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md')
+        $sh = (Get-Result $r).data.startHere
+        $sh | Should -Match 'brief is still present'
+        $sh | Should -Not -Match 'Initialize-OctoAgentDocs'
+    }
+    It 'orders JSON explanations by tier like the text report' {
+        $r = New-Fixture
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ("hidden" + [char]0x200B)
+        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        $tiers = @($res.data.explanations | ForEach-Object { $_.tier })
+        ($tiers -join ',') | Should -Be (($tiers | Sort-Object) -join ',')
+        $res.data.explanations[0].rule | Should -Be 'no-invisible-characters'
+    }
+    It 'quotes a repository path with spaces in the commands it prints' {
+        $r = New-Fixture
+        $spaced = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs sp " + [guid]::NewGuid().ToString('N'))
+        Move-Item -LiteralPath $r -Destination $spaced
+        (Get-Content -LiteralPath (Join-Path $spaced 'CLAUDE.md') -Raw).Replace('## Rules', '## Other') |
+            Set-Content -LiteralPath (Join-Path $spaced 'CLAUDE.md') -NoNewline
+        (Get-Result $spaced).data.startHere | Should -Match "-Path '"
+    }
+}

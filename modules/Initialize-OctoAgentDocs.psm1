@@ -124,7 +124,7 @@ function Initialize-OctoAgentDocs {
     # apart so the command is clean to copy and the text is not mistaken for syntax.
     $next = [System.Collections.Generic.List[object]]::new()
     function Add-Next { param([string]$What, [string]$Command) $next.Add([ordered]@{ what = $What; command = $Command }) }
-    $checkCmd = "Test-OctoAgentDocs -Path $Path"
+    $checkCmd = "Test-OctoAgentDocs -Path $(if ($Path -match '\s') { "'$Path'" } else { $Path })"
     $hasChecker = [bool](Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)
 
     # ----------------------------------------------------------------- actions
