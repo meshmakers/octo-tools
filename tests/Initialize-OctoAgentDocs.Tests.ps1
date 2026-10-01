@@ -1,4 +1,4 @@
-# Pester tests for Initialize-OctoAgentDocs (AB#5457).
+# Pester tests for Initialize-OctoAgentDocs.
 # Run:  Invoke-Pester ./tests/Initialize-OctoAgentDocs.Tests.ps1
 
 BeforeAll {

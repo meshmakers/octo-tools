@@ -973,7 +973,7 @@ Describe 'tenth review pass' {
     }
 }
 
-Describe 'AB#5457 - explain' {
+Describe 'explain - rule reference and per-finding reasons' {
     It 'documents every rule with a why and a fix' {
         # The ruleset is the single source for -Explain, the README and the migration
         # brief, so a rule without text would show up in all three as a bare id.
@@ -1043,7 +1043,7 @@ Describe 'AB#5457 - explain' {
     }
 }
 
-Describe 'AB#5457 - diff and whatif' {
+Describe 'diff and whatif - previewing a rewrite' {
     It 'with -Fix -WhatIf writes nothing and still reports the stale regions' {
         $r = New-Fixture -Agents
         $before = [System.IO.File]::ReadAllText((Join-Path $r 'AGENTS.md'))
@@ -1083,7 +1083,7 @@ Describe 'AB#5457 - diff and whatif' {
     }
 }
 
-Describe 'AB#5457 - migration-pending' {
+Describe 'migration-pending - the brief must not outlive the migration' {
     It 'warns while the migration brief is present' {
         $r = New-Fixture -Agents
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
@@ -1100,7 +1100,7 @@ Describe 'AB#5457 - migration-pending' {
     }
 }
 
-Describe 'AB#5457 - review pass' {
+Describe 'explain and diff - edge cases' {
     It 'shows no shim diff for a CLAUDE.md that -Fix would refuse to touch' {
         $r = New-Fixture -Agents
         '# real content' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
@@ -1115,7 +1115,7 @@ Describe 'AB#5457 - review pass' {
     }
 }
 
-Describe 'AB#5457 - tiered report' {
+Describe 'tiered report - grouping and where to start' {
     It 'tags every finding with its tier' {
         $r = New-Fixture
         $res = Get-Result $r
@@ -1165,7 +1165,7 @@ Describe 'AB#5457 - tiered report' {
     }
 }
 
-Describe 'AB#5457 - report order' {
+Describe 'tiered report - order inside a tier' {
     It 'keeps the findings of one file in detection order inside a tier' {
         $r = New-Fixture
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
@@ -1186,7 +1186,7 @@ Describe 'AB#5457 - report order' {
     }
 }
 
-Describe 'AB#5457 - review pass 2' {
+Describe 'tiered report - counts, precedence and JSON shape' {
     It 'counts a file once however many lines are flagged in it' {
         $r = New-Fixture
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
