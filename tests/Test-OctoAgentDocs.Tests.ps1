@@ -1158,10 +1158,11 @@ Describe 'tiered report - grouping and where to start' {
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         (Get-Result $r).data.startHere | Should -BeNullOrEmpty
     }
-    It 'puts the explanations under their tier when -Explain is on' {
+    It 'puts the explanations under their tier when -Explain is on, with their limits' {
         $r = New-Fixture
         $out = Test-OctoAgentDocs -Path $r -Explain 6>&1 3>$null | Out-String
         $out.IndexOf('2. Entry point') | Should -BeLessThan $out.IndexOf('why: The routing table')
+        $out | Should -Match 'includeDescriptions=False'   # the rule's options, not only its reason
     }
 }
 

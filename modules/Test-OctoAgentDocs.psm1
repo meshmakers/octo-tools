@@ -1196,7 +1196,9 @@ function Test-OctoAgentDocs {
                     Write-Host "$where$($f.message)" -ForegroundColor $colour
                 }
                 if ($Explain) {
-                    foreach ($id in @($group | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Write-RuleRow (Get-RuleRow $id) -Indent '     ' }
+                    # With the options: the limit a finding was measured against belongs next
+                    # to the reason for it.
+                    foreach ($id in @($group | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Write-RuleRow (Get-RuleRow $id) -WithOptions -Indent '     ' }
                 }
             }
             Write-Host ""
