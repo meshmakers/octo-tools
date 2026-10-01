@@ -123,6 +123,7 @@ function Test-OctoAgentDocs {
     what to do about it. The text comes from 'ruleDocs' in the ruleset, so it cannot drift
     from what is enforced. With -All or -Rule nothing is scanned: the rules are listed as a
     reference, with the severity this repository ends up with after its own overrides.
+    -Explain never throws, whatever the mode: it is a question, not a gate.
 
     .PARAMETER All
     With -Explain, list every rule instead of the ones that fired.
@@ -229,39 +230,17 @@ function Test-OctoAgentDocs {
         }
     }
 
-    # The ruleset schema allows both "rule": "warn" and "rule": ["warn", {...}].
-    # Everything downstream indexes [0] and [1], and indexing a STRING yields a
-    # character ("warn"[0] is 'w'), so normalise to the array form once, here.
-    function ConvertTo-RuleArray {
-        param($Raw)
-        if ($Raw -is [string]) { return , @($Raw, @{}) }
-        $sev = if ($Raw.Count -ge 1) { $Raw[0] } else { $null }
-        $opt = if ($Raw.Count -gt 1 -and $Raw[1] -is [hashtable]) { $Raw[1] } else { @{} }
-        return , @($sev, $opt)
-    }
-
-    $defaultsPath = Join-Path $PSScriptRoot 'agent-docs.rules.json'
-    $config = Read-RuleFile $defaultsPath -Required
-    if (-not $config.rules) { throw "Built-in ruleset at $defaultsPath has no 'rules' section" }
-
-    foreach ($id in $script:AgentDocsRuleIds) {
-        if (-not $config.rules.ContainsKey($id)) {
-            Write-Warning "Built-in ruleset has no '$id' - treated as off"
-            $config.rules[$id] = @('off', @{})
-        }
-        else { $config.rules[$id] = ConvertTo-RuleArray $config.rules[$id] }
-    }
+    $config = Read-OctoAgentDocsBuiltInRuleset -RuleIds $script:AgentDocsRuleIds
 
     # 'ruleDocs' is read from the BUILT-IN ruleset only: a repository may change what it
     # is held to, not the explanation of why the org holds it to that.
     $ruleDocs = if ($config['ruleDocs'] -is [hashtable]) { $config['ruleDocs'] } else { @{} }
-    $tierInfo = if ($config['tiers'] -is [hashtable]) { $config['tiers'] } else { @{} }
-    function Get-Tier { param([string]$Id) $t = if ($ruleDocs[$Id] -is [hashtable]) { $ruleDocs[$Id]['tier'] } else { $null }; if ($t) { [int]$t } else { 4 } }
     foreach ($id in $script:AgentDocsRuleIds) {
         if (-not ($ruleDocs[$id] -is [hashtable]) -or -not $ruleDocs[$id]['why'] -or -not $ruleDocs[$id]['fix']) {
             Write-Warning "Built-in ruleset has no 'ruleDocs' entry for '$id' - -Explain will show it without a reason"
         }
     }
+    function Get-Tier { param([string]$Id) Get-OctoAgentDocsRuleTier -Config $config -Id $Id }
 
     # Accepts ["warn", {...}], ["warn"] or "warn"; returns $null when the severity is
     # not one of off|warn|error so the caller can keep the stricter built-in value.
@@ -277,16 +256,6 @@ function Test-OctoAgentDocs {
         return @{ severity = $match; options = $options }
     }
 
-    # Built-in severities are validated BEFORE any override is applied: the floor below
-    # compares against the built-in value, and a comparison against a typo is not a floor.
-    foreach ($id in $script:AgentDocsRuleIds) {
-        $sev = $config.rules[$id][0]
-        if ($script:AgentDocsSeverities -notcontains $sev) {
-            Write-Warning "Invalid severity '$sev' for rule '$id' in the built-in ruleset - treated as error"
-            $opts = if ($config.rules[$id].Count -gt 1 -and $config.rules[$id][1] -is [hashtable]) { $config.rules[$id][1] } else { @{} }
-            $config.rules[$id] = @('error', $opts)
-        }
-    }
     if (-not ($script:AgentDocsModes -contains $config.mode)) { $config.mode = 'logOnly' }
 
     # The trust boundary. .agent-docs.json lives IN the repository, so anyone who can
@@ -434,11 +403,8 @@ function Test-OctoAgentDocs {
         }
         Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode)) - effective severity, in the order to fix them" -ForegroundColor Yellow
         foreach ($t in @($rows | ForEach-Object { $_.tier } | Sort-Object -Unique)) {
-            $info = $tierInfo["$t"]
-            $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $t" }
-            $why = if ($info -is [hashtable] -and $info['why']) { " - $($info['why'])" } else { '' }
             Write-Host ""
-            Write-Host "  $t. $title$why" -ForegroundColor White
+            Write-Host "  $(Get-OctoAgentDocsTierHeading -Config $config -Tier $t)" -ForegroundColor White
             foreach ($r in @($rows | Where-Object { $_.tier -eq $t })) { Write-RuleRow $r -WithOptions -Indent '     ' }
         }
         Write-Host ""
@@ -1122,14 +1088,17 @@ function Test-OctoAgentDocs {
     if ($fired -contains 'no-invisible-characters') {
         $causes.Add('a file carries characters a reviewer cannot see. Remove them before anything else.')
     }
-    $pathArg = if ($Path -match '\s') { "'$Path'" } else { $Path }
+    $pathArg = Format-OctoAgentDocsArgument -Value $Path
     if ($fired -contains 'migration-pending') {
         # The brief exists, so "run Initialize" would be the wrong advice even for an
         # unmigrated repository - the brief IS the next step.
         $causes.Add('the migration brief is still present - follow its steps and delete it in the migration commit.')
     }
-    elseif (-not $hasAgents -and ($fired -contains 'required-sections' -or $fired -contains 'entry-point-characters' -or $fired -contains 'entry-point-lines')) {
+    elseif (-not $hasAgents -and $hasClaude -and ($fired -contains 'required-sections' -or $fired -contains 'entry-point-characters' -or $fired -contains 'entry-point-lines')) {
         $causes.Add("this repository has not migrated to AGENTS.md, and the entry-point findings follow from that. Initialize-OctoAgentDocs -Path $pathArg writes the migration brief.")
+    }
+    elseif (-not $hasAgents -and -not $hasClaude) {
+        $causes.Add("this repository has no agent instructions yet. Initialize-OctoAgentDocs -Path $pathArg writes the entry point and the shim.")
     }
     if ($causes.Count -eq 0 -and $findings.Count -gt 0 -and @($findings | Where-Object { $_.tier -lt 4 }).Count -eq 0) {
         $causes.Add('only budgets are left. Move content into routed docs rather than trimming it in place.')
@@ -1165,11 +1134,8 @@ function Test-OctoAgentDocs {
             # Grouped by tier, errors before warnings, then by file - so the list reads as
             # "do this first", not as the order the checks happened to run in.
             foreach ($t in @($findings | ForEach-Object { $_.tier } | Sort-Object -Unique)) {
-                $info = $tierInfo["$t"]
-                $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $t" }
-                $why = if ($info -is [hashtable] -and $info['why']) { " - $($info['why'])" } else { '' }
                 Write-Host ""
-                Write-Host "  $t. $title$why" -ForegroundColor White
+                Write-Host "  $(Get-OctoAgentDocsTierHeading -Config $config -Tier $t)" -ForegroundColor White
                 # Errors first, then by file WITHOUT its :line suffix, and Sort-Object is
                 # stable, so the findings of one file keep the order they were detected in
                 # - line 7 before line 13, the "N further" summary last.
@@ -1209,7 +1175,8 @@ function Test-OctoAgentDocs {
         elseif (-not $Explain) { Write-Host "  add -Explain for why and how to fix, or -Explain <rule> for one rule" -ForegroundColor Gray }
     }
 
-    if ($config.mode -eq 'enforce' -and -not $ok) {
+    # -Explain is a person asking why; the gate is for pipelines, which do not ask.
+    if ($config.mode -eq 'enforce' -and -not $ok -and -not $Explain) {
         $global:LASTEXITCODE = 1
         throw "Test-OctoAgentDocs: $($errors.Count) error-severity finding(s) in $(Split-Path -Leaf $repo)"
     }

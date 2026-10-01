@@ -1274,3 +1274,26 @@ Describe 'review pass - case and resolution' {
         finally { Pop-Location }
     }
 }
+
+Describe 'review pass - gate, start-here and path edge cases' {
+    It 'does not throw under -Explain even when the repository is in enforce mode' {
+        $r = New-Fixture
+        '{"schemaVersion":1,"mode":"enforce"}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        { Test-OctoAgentDocs -Path $r 3>$null 6>$null } | Should -Throw
+        { Test-OctoAgentDocs -Path $r -Explain 3>$null 6>$null } | Should -Not -Throw
+    }
+    It 'tells an empty repository that Initialize writes the entry point, not a brief' {
+        $r = Join-Path ([System.IO.Path]::GetTempPath()) ("adocs-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $r -Force | Out-Null
+        $sh = (Get-Result $r).data.startHere
+        $sh | Should -Match 'no agent instructions yet'
+        $sh | Should -Not -Match 'migration brief'
+    }
+    It 'rejects an empty path instead of checking the whole root' {
+        { Test-OctoAgentDocs -Path '' 3>$null } | Should -Throw '*Path is empty*'
+    }
+    It 'quotes a path with an embedded single quote so the printed command parses' {
+        Format-OctoAgentDocsArgument -Value "/tmp/O'Brien repo" | Should -Be "'/tmp/O''Brien repo'"
+        Format-OctoAgentDocsArgument -Value './octo-tools/' | Should -Be './octo-tools/'
+    }
+}

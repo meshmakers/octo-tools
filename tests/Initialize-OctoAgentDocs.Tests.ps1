@@ -236,3 +236,23 @@ Describe 'review pass - never overwrite, never throw, always a step per open row
         $brief | Should -Not -Match '\{\{'
     }
 }
+
+Describe 'review pass - the checker decides what the shim is' {
+    It 'accepts a shim the repository has overridden, as the checker does' {
+        $r = New-Repo
+        Get-Init $r | Out-Null
+        '{"schemaVersion":1,"rules":{"shim-valid":["error",{"content":["@AGENTS.md"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        "@AGENTS.md`n" | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'migrated'
+        (Get-Row $res 'CLAUDE.md').fact | Should -Be 'shim'
+        @($res.data.nextSteps).Count | Should -Be 0
+    }
+    It 'prints one -Fix command, not two, for a thin CLAUDE.md' {
+        $r = New-Repo
+        "<!-- note -->`n@docs/other.md`n" | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        $res = Get-Init $r
+        @($res.data.nextSteps | Where-Object { $_.command -like '*-Fix' }).Count | Should -Be 1
+    }
+}
