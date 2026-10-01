@@ -52,12 +52,35 @@ Describe 'greenfield repository' {
         Get-Init $r | Out-Null
         $agents = Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw
         $res = Get-Init $r
-        $res.data.state | Should -Be 'initialised'
+        $res.data.state | Should -Be 'migrated'
         $res.data.filesWritten.Count | Should -Be 0
         Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw | Should -Be $agents
+        $res.data.status.claudeMd | Should -Be 'shim'
+        $res.data.status.brief | Should -Be 'absent'
+        $res.data.status.check | Should -Be 'clean'
         # A current repository must not be told to -Fix anything.
-        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Clean'
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Migration complete'
         ($res.data.nextSteps | ForEach-Object { $_.command }) -join ' ' | Should -Not -Match '-Fix'
+    }
+    It 'reports migrating while CLAUDE.md still has real content beside AGENTS.md' {
+        $r = New-Repo
+        Get-Init $r | Out-Null
+        '# still the old file' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'migrating'
+        $res.data.status.claudeMd | Should -Be 'real content'
+        $res.data.filesWritten.Count | Should -Be 0
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'remaining content out of CLAUDE.md'
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Not -Match 'Migration complete'
+    }
+    It 'reports migrating while the brief is still present' {
+        $r = New-Repo
+        Get-Init $r | Out-Null
+        '# brief' | Set-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md')
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'migrating'
+        $res.data.status.brief | Should -Be 'present'
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'delete it'
     }
     It 'suggests -Fix for an initialised repository only when a generated region is stale' {
         $r = New-Repo
@@ -65,7 +88,7 @@ Describe 'greenfield repository' {
         New-Item -ItemType Directory -Path (Join-Path $r 'docs') -Force | Out-Null
         "---`ndescription: A doc.`napplies_to: src/**`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
         $res = Get-Init $r
-        $res.data.state | Should -Be 'initialised'
+        $res.data.state | Should -Be 'migrated'
         $steps = @($res.data.nextSteps)
         ($steps | Where-Object { $_.command -like '*-Fix' }).Count | Should -Be 1
         ($steps | Where-Object { $_.command -like '*-Fix' })[0].what | Should -Match 'routing table'

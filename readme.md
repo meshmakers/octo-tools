@@ -190,7 +190,10 @@ Initialize-OctoAgentDocs -Path octo-new-repo          # minimal shape, or a migr
 Initialize-OctoAgentDocs -Path octo-new-repo -WhatIf  # show what it would write
 ```
 
-`Initialize-OctoAgentDocs` never overwrites a file. A repository with no agent files gets
+`Initialize-OctoAgentDocs` never overwrites a file, and on a repository that already has
+`AGENTS.md` it answers the question "is the migration finished": a status block with the state of
+`CLAUDE.md`, the routed docs, the brief and the check, and a state of `migrated` or `migrating`.
+A repository with no agent files gets
 `AGENTS.md` with the required sections and the routing markers, the `CLAUDE.md` shim, and a first
 `-Fix` run; nothing else, because the first routed doc creates `docs/` and an override file is
 something a repository adds when it has a reason. A repository that still has a hand-written
