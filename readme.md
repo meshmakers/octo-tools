@@ -162,9 +162,12 @@ Test-OctoAgentDocs -Explain -Rule doc-size           # one rule; no scan
 Test-OctoAgentDocs -Mode enforce -Json               # for a pipeline step
 ```
 
-Every finding names its rule. `-Explain` adds, for each rule that fired, why it exists and what to
-do about it; `-Explain -All` is the full reference. That text lives in the ruleset (`ruleDocs`), so
-the explanation, this README and the migration brief below cannot drift from what is enforced.
+The report opens with the counts and a "start here" sentence naming the cause behind most of the
+findings, then groups them in the order to fix them: integrity, entry point, docs, budgets. Every
+finding names its rule. `-Explain` adds, for each rule that fired, why it exists and what to do
+about it; `-Explain -All` is the full reference in the same order. That text and the order live in
+the ruleset (`ruleDocs`, `tiers`), so the report, this README and the migration brief below cannot
+drift from what is enforced.
 
 It checks two things that are easy to get wrong by hand and one that is impossible to
 see: that the always-loaded entry point stays inside its budget, that every doc is

@@ -298,15 +298,26 @@ function New-MigrationBrief {
     $sectionList = ($Sections | ForEach-Object { "- ``## $_``" }) -join "`n"
     $shim = ($ShimLines | ForEach-Object { "                   $_" }) -join "`n"
 
+    # Grouped by tier - the brief says "fix in this order", the same order the checker
+    # reports in.
     $docs = if ($Config['ruleDocs'] -is [hashtable]) { $Config['ruleDocs'] } else { @{} }
+    $tiers = if ($Config['tiers'] -is [hashtable]) { $Config['tiers'] } else { @{} }
     $rules = [System.Text.StringBuilder]::new()
-    foreach ($id in $Config.rules.Keys) {
-        $sev = Sev $id
-        if ($sev -eq 'off') { continue }
-        $d = if ($docs[$id] -is [hashtable]) { $docs[$id] } else { @{} }
-        [void]$rules.Append("- ``$id`` [$sev]")
-        if ($d['why']) { [void]$rules.Append(" - $($d['why'])") }
-        if ($d['fix']) { [void]$rules.Append(" Fix: $($d['fix'])") }
+    $active = @($Config.rules.Keys | Where-Object { (Sev $_) -ne 'off' })
+    foreach ($tierNo in @($active | ForEach-Object { $d = $docs[$_]; if ($d -is [hashtable] -and $d['tier']) { [int]$d['tier'] } else { 4 } } | Sort-Object -Unique)) {
+        $info = $tiers["$tierNo"]
+        $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $tierNo" }
+        $why = if ($info -is [hashtable] -and $info['why']) { " - $($info['why'])" } else { '' }
+        [void]$rules.Append("**$tierNo. $title**$why`n`n")
+        foreach ($id in $active) {
+            $d = if ($docs[$id] -is [hashtable]) { $docs[$id] } else { @{} }
+            $rt = if ($d['tier']) { [int]$d['tier'] } else { 4 }
+            if ($rt -ne $tierNo) { continue }
+            [void]$rules.Append("- ``$id`` [$(Sev $id)]")
+            if ($d['why']) { [void]$rules.Append(" - $($d['why'])") }
+            if ($d['fix']) { [void]$rules.Append(" Fix: $($d['fix'])") }
+            [void]$rules.Append("`n")
+        }
         [void]$rules.Append("`n")
     }
 

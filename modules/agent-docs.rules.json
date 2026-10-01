@@ -123,60 +123,92 @@
       }
     ]
   },
+  "tiers": {
+    "1": {
+      "title": "Integrity",
+      "why": "text a model reads that a reviewer cannot see - fix before anything else"
+    },
+    "2": {
+      "title": "Entry point",
+      "why": "the shape every repository shares; the migration fixes most of these at once"
+    },
+    "3": {
+      "title": "Docs",
+      "why": "one edit per file: frontmatter and routing"
+    },
+    "4": {
+      "title": "Budgets",
+      "why": "sizes and counts; they shrink as content moves into routed docs"
+    }
+  },
   "ruleDocs": {
     "entry-point-lines": {
+      "tier": 4,
       "why": "The entry point is loaded into every agent session, so each line costs context before any work starts.",
       "fix": "Move detail into a routed doc under docs/ and keep the entry point to pointers and rules."
     },
     "entry-point-characters": {
+      "tier": 4,
       "why": "A line budget can be beaten by a few very long lines; characters measure what the agent actually loads.",
       "fix": "Move long passages and tables into docs/ and route them with applies_to."
     },
     "line-length": {
+      "tier": 4,
       "why": "Lines wider than a screen are hard to review in a diff, and review is the only defence for instruction files.",
       "fix": "Wrap prose at the limit; tables and lines without whitespace have their own allowance."
     },
     "doc-size": {
+      "tier": 4,
       "why": "A routed doc is loaded whole whenever its globs match, so its size is paid on every matching change.",
       "fix": "Split by topic into sibling docs with their own applies_to, or trim; raise the limit in .agent-docs.json only with a reason."
     },
     "frontmatter-present": {
+      "tier": 3,
       "why": "The description is what the routing table and an agent use to decide whether to open the doc at all.",
       "fix": "Add a frontmatter block with a one-line description under the length limit."
     },
     "doc-reachable": {
+      "tier": 3,
       "why": "A doc nobody routes to is never read, and a doc marked both routed and background has no clear role.",
       "fix": "Give it applies_to globs, or mark it background: true if it is reference material only."
     },
     "reference-resolves": {
+      "tier": 2,
       "why": "A broken link sends an agent to a file or heading that does not exist, and it will guess instead of asking.",
       "fix": "Fix the path or anchor; headings produce anchors the way GitHub does."
     },
     "routing-current": {
+      "tier": 2,
       "why": "The routing table is derived from the docs' frontmatter; a stale table routes an agent to the wrong place or nowhere.",
       "fix": "Run Test-OctoAgentDocs -Fix to regenerate the block between the routing markers."
     },
     "docs-count": {
+      "tier": 4,
       "why": "A routing table longer than a screen stops being scannable, which defeats routing.",
       "fix": "Merge docs that cover one topic, or mark reference material background."
     },
     "shim-valid": {
+      "tier": 2,
       "why": "Claude Code loads CLAUDE.md; once AGENTS.md is canonical the shim must import it and carry nothing else, or two files compete.",
       "fix": "Run Test-OctoAgentDocs -Fix; add -Force only after moving any real content out of CLAUDE.md."
     },
     "required-sections": {
+      "tier": 2,
       "why": "Every repository's entry point carries the same level-2 headings, so an agent finds build, commit and rules in the same place everywhere.",
       "fix": "Add the missing '## ' heading and write its content; the checker never fills text in."
     },
     "no-invisible-characters": {
+      "tier": 1,
       "why": "Unicode tag, zero-width and bidirectional override characters carry text a reviewer cannot see but a model reads.",
       "fix": "Delete the characters; if the file is generated, fix the generator."
     },
     "link-hosts": {
+      "tier": 1,
       "why": "An agent follows links, so an external host outside the allowlist is a way to feed it text nobody reviewed.",
       "fix": "Use an allowed host, or add the host to link-hosts.allow in .agent-docs.json with a reason."
     },
     "migration-pending": {
+      "tier": 2,
       "why": "AGENTS-MIGRATION.md is a working brief for the migration, not documentation; left behind, it misleads the next reader.",
       "fix": "Finish the steps it lists, then delete the file in the same commit."
     }
@@ -189,5 +221,6 @@
   "_nonRelaxable_note": "A repository's own .agent-docs.json may RAISE these rules but never lower them, because that file lives in the branch under review and the pull request carrying a payload can carry the opt-out with it. -ConfigPath is exempt: it comes from whoever runs the tool. To change one of these, change this file.",
   "_scan_note": "The integrity rules (no-invisible-characters, link-hosts) read every *.md in the repository, dotfolders included, minus these path segments - a nested AGENTS.md or a .claude/ rule is loaded by an agent without appearing in any routing table. The structural rules stay on the routed set.",
   "_ruleDocs_note": "The single source for Test-OctoAgentDocs -Explain, the README rules table and the migration brief. One sentence each: 'why' states the cost the rule prevents, 'fix' names the first thing to do. English only.",
-  "_migration_pending_note": "Initialize-OctoAgentDocs writes AGENTS-MIGRATION.md into a repository that still has a real CLAUDE.md. The brief is meant to be deleted in the migration commit; this rule nags until it is."
+  "_migration_pending_note": "Initialize-OctoAgentDocs writes AGENTS-MIGRATION.md into a repository that still has a real CLAUDE.md. The brief is meant to be deleted in the migration commit; this rule nags until it is.",
+  "_tiers_note": "The order findings are reported in and the order the migration brief says to fix them. Each ruleDocs entry names its tier. Severity is unaffected: a tier is about what to do first, not about how wrong something is."
 }

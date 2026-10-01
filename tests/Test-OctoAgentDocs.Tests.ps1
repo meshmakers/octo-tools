@@ -982,6 +982,8 @@ Describe 'AB#5457 - explain' {
             $rules.ruleDocs.ContainsKey($id) | Should -BeTrue -Because "rule '$id' needs a ruleDocs entry"
             $rules.ruleDocs[$id].why | Should -Not -BeNullOrEmpty -Because "rule '$id' needs a why"
             $rules.ruleDocs[$id].fix | Should -Not -BeNullOrEmpty -Because "rule '$id' needs a fix"
+            $rules.ruleDocs[$id].tier | Should -BeIn 1, 2, 3, 4 -Because "rule '$id' needs a tier"
+            $rules.tiers.ContainsKey("$($rules.ruleDocs[$id].tier)") | Should -BeTrue
         }
         foreach ($id in $rules.ruleDocs.Keys) { $rules.rules.ContainsKey($id) | Should -BeTrue -Because "ruleDocs names '$id', which is not a rule" }
     }
@@ -1110,5 +1112,76 @@ Describe 'AB#5457 - review pass' {
         $r = New-Fixture
         $warn = Test-OctoAgentDocs -Path $r -Rule doc-size -Json 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
         ($warn | Out-String) | Should -Match 'only filters -Explain'
+    }
+}
+
+Describe 'AB#5457 - tiered report' {
+    It 'tags every finding with its tier' {
+        $r = New-Fixture
+        $res = Get-Result $r
+        (Get-Rules $res 'routing-current')[0].tier | Should -Be 2
+    }
+    It 'collapses several missing sections into one finding' {
+        $r = New-Fixture
+        '{"schemaVersion":1,"rules":{"required-sections":["error",{"sections":["Deployment","Ownership"]}],"routing-current":["off"]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'required-sections'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'## Deployment', '## Ownership'"
+    }
+    It 'groups the report by tier, integrity first, and names where to start' {
+        $r = New-Fixture
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ("hidden" + [char]0x200B)
+        $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
+        $out | Should -Match 'Start here: a file carries characters a reviewer cannot see'
+        $out.IndexOf('1. Integrity') | Should -BeLessThan $out.IndexOf('2. Entry point')
+        $out | Should -Match '(?m)^\s+\d+ error\(s\), \d+ warning\(s\) in \d+ file\(s\)'
+    }
+    It 'points an unmigrated repository at Initialize' {
+        $r = New-Fixture
+        (Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw).Replace('## Rules', '## Other') |
+            Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        $res = Get-Result $r
+        $res.data.startHere | Should -Match 'not migrated to AGENTS.md'
+        $res.data.startHere | Should -Match 'Initialize-OctoAgentDocs'
+    }
+    It 'says when only budgets are left' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ('x' * 26000)
+        $res = Get-Result $r
+        (Get-Rules $res 'doc-size').Count | Should -Be 1
+        $res.data.startHere | Should -Match 'only budgets are left'
+    }
+    It 'has no start-here line on a clean repository' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        (Get-Result $r).data.startHere | Should -BeNullOrEmpty
+    }
+    It 'puts the explanations under their tier when -Explain is on' {
+        $r = New-Fixture
+        $out = Test-OctoAgentDocs -Path $r -Explain 6>&1 3>$null | Out-String
+        $out.IndexOf('2. Entry point') | Should -BeLessThan $out.IndexOf('why: The routing table')
+    }
+}
+
+Describe 'AB#5457 - report order' {
+    It 'keeps the findings of one file in detection order inside a tier' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @(('a' * 130 + ' b'), 'short', ('c' * 130 + ' d'), ('e' * 130 + ' f'))
+        $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
+        $lines = @($out -split "`n" | Where-Object { $_ -match 'line-length CLAUDE\.md:(\d+)' } | ForEach-Object { [int]$Matches[1] })
+        $lines.Count | Should -BeGreaterThan 1
+        ($lines -join ',') | Should -Be (($lines | Sort-Object) -join ',')
+    }
+    It 'names the second cause after the first when both apply' {
+        $r = New-Fixture
+        (Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw).Replace('## Rules', '## Other') |
+            Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ("hidden" + [char]0x200B)
+        $sh = (Get-Result $r).data.startHere
+        $sh | Should -Match '^a file carries characters'
+        $sh | Should -Match 'After that: this repository has not migrated'
     }
 }

@@ -241,6 +241,8 @@ function Test-OctoAgentDocs {
     # 'ruleDocs' is read from the BUILT-IN ruleset only: a repository may change what it
     # is held to, not the explanation of why the org holds it to that.
     $ruleDocs = if ($config['ruleDocs'] -is [hashtable]) { $config['ruleDocs'] } else { @{} }
+    $tierInfo = if ($config['tiers'] -is [hashtable]) { $config['tiers'] } else { @{} }
+    function Get-Tier { param([string]$Id) $t = if ($ruleDocs[$Id] -is [hashtable]) { $ruleDocs[$Id]['tier'] } else { $null }; if ($t) { [int]$t } else { 4 } }
     foreach ($id in $script:AgentDocsRuleIds) {
         if (-not ($ruleDocs[$id] -is [hashtable]) -or -not $ruleDocs[$id]['why'] -or -not $ruleDocs[$id]['fix']) {
             Write-Warning "Built-in ruleset has no 'ruleDocs' entry for '$id' - -Explain will show it without a reason"
@@ -373,6 +375,7 @@ function Test-OctoAgentDocs {
         $doc = if ($ruleDocs[$Id] -is [hashtable]) { $ruleDocs[$Id] } else { @{} }
         [ordered]@{
             rule         = $Id
+            tier         = Get-Tier $Id
             severity     = Get-Severity $Id
             nonRelaxable = ($floor -contains $Id)
             options      = $o
@@ -381,7 +384,7 @@ function Test-OctoAgentDocs {
         }
     }
     function Write-RuleRow {
-        param($Row, [switch]$WithOptions)
+        param($Row, [switch]$WithOptions, [string]$Indent = '  ')
         $colour = switch ($Row.severity) { 'error' { 'Red' } 'warn' { 'DarkYellow' } default { 'DarkGray' } }
         $lock = if ($Row.nonRelaxable) { ' (non-relaxable)' } else { '' }
         # Scalars inline, lists as a count: 'allow' has six hosts and the table does not
@@ -394,10 +397,10 @@ function Test-OctoAgentDocs {
                 }) -join ', '
         }
         Write-Host ""
-        Write-Host "  $($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
+        Write-Host "$Indent$($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
         if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host "" }
-        if ($Row.why) { Write-Host "    why: $($Row.why)" }
-        if ($Row.fix) { Write-Host "    fix: $($Row.fix)" }
+        if ($Row.why) { Write-Host "$Indent  why: $($Row.why)" }
+        if ($Row.fix) { Write-Host "$Indent  fix: $($Row.fix)" }
     }
     if ($Explain -and ($All -or $Rule)) {
         $ids = @($script:AgentDocsRuleIds)
@@ -415,8 +418,15 @@ function Test-OctoAgentDocs {
             })
             return
         }
-        Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode); severity after this repository's overrides)" -ForegroundColor Yellow
-        foreach ($r in $rows) { Write-RuleRow $r -WithOptions }
+        Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode); severity after this repository's overrides; in the order to fix them)" -ForegroundColor Yellow
+        foreach ($t in @($rows | ForEach-Object { $_.tier } | Sort-Object -Unique)) {
+            $info = $tierInfo["$t"]
+            $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $t" }
+            $why = if ($info -is [hashtable] -and $info['why']) { " - $($info['why'])" } else { '' }
+            Write-Host ""
+            Write-Host "  $t. $title$why" -ForegroundColor White
+            foreach ($r in @($rows | Where-Object { $_.tier -eq $t })) { Write-RuleRow $r -WithOptions -Indent '     ' }
+        }
         Write-Host ""
         Write-Host "  Overrides: .agent-docs.json in the repository, then -ConfigPath, then -Mode. Non-relaxable rules can be raised there, never lowered." -ForegroundColor Gray
         return
@@ -430,7 +440,7 @@ function Test-OctoAgentDocs {
         param([string]$Rule, [string]$File, [string]$Message, [string]$As)
         $sev = if ($As) { $As } else { Get-Severity $Rule }
         if ($sev -eq 'off') { return }
-        $findings.Add([ordered]@{ severity = $sev; rule = $Rule; file = $File; message = $Message })
+        $findings.Add([ordered]@{ severity = $sev; rule = $Rule; tier = (Get-Tier $Rule); file = $File; message = $Message })
     }
 
     function Read-Text { param([string]$P) [System.IO.File]::ReadAllText($P) }
@@ -1036,11 +1046,10 @@ function Test-OctoAgentDocs {
             foreach ($l in (Get-Lines $entry)) {
                 if ($l -match '^##\s+(.*?)\s*$') { $headings += $Matches[1] }
             }
-            foreach ($want in $required) {
-                if (-not ($headings | Where-Object { $_ -eq $want })) {
-                    Add-Finding 'required-sections' $entryName "Missing section '## $want' - every repo's entry point carries it"
-                }
-            }
+            # One finding for all missing sections: four lines for one problem is noise.
+            $missing = @(foreach ($want in $required) { if (-not ($headings | Where-Object { $_ -eq $want })) { "'## $want'" } })
+            if ($missing.Count -eq 1) { Add-Finding 'required-sections' $entryName "Missing section $($missing[0]) - every repo's entry point carries it" }
+            elseif ($missing.Count -gt 1) { Add-Finding 'required-sections' $entryName "Missing sections $($missing -join ', ') - every repo's entry point carries them" }
         }
 
         if (Test-RuleOn 'routing-current') {
@@ -1095,6 +1104,27 @@ function Test-OctoAgentDocs {
     $warnings = @($findings | Where-Object { $_.severity -eq 'warn' })
     $ok = $errors.Count -eq 0
 
+    # The one sentence a reader needs before the list: what most of the findings follow
+    # from, and therefore where to start. Integrity beats everything; an unmigrated entry
+    # point explains its own shape and budget findings; otherwise there is no dominant
+    # cause and the tiers speak for themselves.
+    $fired = @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)
+    $causes = [System.Collections.Generic.List[string]]::new()
+    if ($fired -contains 'no-invisible-characters') {
+        $causes.Add('a file carries characters a reviewer cannot see. Remove them before anything else.')
+    }
+    if (-not $hasAgents -and ($fired -contains 'required-sections' -or $fired -contains 'entry-point-characters' -or $fired -contains 'entry-point-lines')) {
+        $causes.Add("this repository has not migrated to AGENTS.md, and the entry-point findings follow from that. Initialize-OctoAgentDocs -Path $Path writes the migration brief.")
+    }
+    elseif ($fired -contains 'migration-pending') {
+        $causes.Add('the migration brief is still present - finish its steps and delete it.')
+    }
+    if ($causes.Count -eq 0 -and $findings.Count -gt 0 -and @($findings | Where-Object { $_.tier -lt 4 }).Count -eq 0) {
+        $causes.Add('only budgets are left. Move content into routed docs rather than trimming it in place.')
+    }
+    # At most two: the first thing to do, and the cause behind most of the rest.
+    $startHere = switch ($causes.Count) { 0 { $null } 1 { $causes[0] } default { "$($causes[0]) After that: $($causes[1])" } }
+
     if ($Json) {
         Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{
             repository   = Split-Path -Leaf $repo
@@ -1106,7 +1136,8 @@ function Test-OctoAgentDocs {
             diffs        = @($diffs)
             routes       = $routes
             findings     = $findings
-            explanations = @(if ($Explain) { foreach ($id in @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Get-RuleRow $id } })
+            startHere    = $startHere
+            explanations = @(if ($Explain) { foreach ($id in $fired) { Get-RuleRow $id } })
             ruleSet      = $config.rules
             summary      = [ordered]@{ errors = $errors.Count; warnings = $warnings.Count; success = $ok }
         })
@@ -1114,10 +1145,32 @@ function Test-OctoAgentDocs {
     else {
         Write-Host "Agent docs check: $(Split-Path -Leaf $repo) (entry point: $entryName, mode: $($config.mode))" -ForegroundColor Yellow
         if ($findings.Count -eq 0) { Write-Host "  clean - $($routes.Count) routed docs" -ForegroundColor Green }
-        foreach ($f in $findings) {
-            $colour = if ($f.severity -eq 'error') { 'Red' } else { 'DarkYellow' }
-            $where = if ($f.file) { " $($f.file):" } else { '' }
-            Write-Host "  [$($f.severity)] $($f.rule)$where $($f.message)" -ForegroundColor $colour
+        else {
+            $fileCount = @($findings | ForEach-Object { $_.file } | Where-Object { $_ } | Sort-Object -Unique).Count
+            Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s) in $fileCount file(s)" -ForegroundColor Gray
+            if ($startHere) { Write-Host "  Start here: $startHere" -ForegroundColor Cyan }
+            # Grouped by tier, errors before warnings, then by file - so the list reads as
+            # "do this first", not as the order the checks happened to run in.
+            foreach ($t in @($findings | ForEach-Object { $_.tier } | Sort-Object -Unique)) {
+                $info = $tierInfo["$t"]
+                $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $t" }
+                $why = if ($info -is [hashtable] -and $info['why']) { " - $($info['why'])" } else { '' }
+                Write-Host ""
+                Write-Host "  $t. $title$why" -ForegroundColor White
+                # Errors first, then by file WITHOUT its :line suffix, and Sort-Object is
+                # stable, so the findings of one file keep the order they were detected in
+                # - line 7 before line 13, the "N further" summary last.
+                $group = @($findings | Where-Object { $_.tier -eq $t } | Sort-Object -Stable @{ e = { if ($_.severity -eq 'error') { 0 } else { 1 } } }, @{ e = { ($_.file -split ':')[0] } })
+                foreach ($f in $group) {
+                    $colour = if ($f.severity -eq 'error') { 'Red' } else { 'DarkYellow' }
+                    $where = if ($f.file) { " $($f.file):" } else { '' }
+                    Write-Host "     [$($f.severity)] $($f.rule)$where $($f.message)" -ForegroundColor $colour
+                }
+                if ($Explain) {
+                    foreach ($id in @($group | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Write-RuleRow (Get-RuleRow $id) -Indent '     ' }
+                }
+            }
+            Write-Host ""
         }
         if ($written.Count -gt 0) { Write-Host "  rewrote $($written -join ', ')" -ForegroundColor Cyan }
         elseif ($Fix -and -not $WhatIfPreference) { Write-Host "  nothing to rewrite" -ForegroundColor Cyan }
@@ -1129,14 +1182,11 @@ function Test-OctoAgentDocs {
                 Write-Host "  $l" -ForegroundColor $c
             }
         }
-        Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s)" -ForegroundColor Gray
-        $firedRules = @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)
-        if ($Explain -and $firedRules.Count -gt 0) {
-            foreach ($id in $firedRules) { Write-RuleRow (Get-RuleRow $id) }
-            Write-Host ""
+        if ($findings.Count -eq 0) {
+            Write-Host "  0 error(s), 0 warning(s)" -ForegroundColor Gray
+            if ($Explain) { Write-Host "  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All" -ForegroundColor Gray }
         }
-        elseif ($Explain) { Write-Host "  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All" -ForegroundColor Gray }
-        elseif ($firedRules.Count -gt 0) { Write-Host "  add -Explain to see why each rule exists and how to fix it" -ForegroundColor Gray }
+        elseif (-not $Explain) { Write-Host "  add -Explain to see why each rule exists and how to fix it" -ForegroundColor Gray }
     }
 
     if ($config.mode -eq 'enforce' -and -not $ok) {

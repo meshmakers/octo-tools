@@ -153,6 +153,7 @@ Describe 'repository with a hand-written CLAUDE.md' {
         foreach ($line in $Rules.rules.'shim-valid'[1].content) { $brief | Should -Match ([regex]::Escape($line)) }
         $brief | Should -Match ([regex]::Escape($Rules.ruleDocs.'doc-size'.why))
         $brief | Should -Not -Match '`link-hosts`'   # off rules are not part of the brief
+        $brief.IndexOf('**1. Integrity**') | Should -BeLessThan $brief.IndexOf('**4. Budgets**')
     }
     It 'tells the agent it may run -Fix, and never -Force' {
         Get-Init $r | Out-Null

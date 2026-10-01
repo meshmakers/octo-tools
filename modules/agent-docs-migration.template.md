@@ -84,6 +84,6 @@ Rules for the agent during the migration:
 - When a budget is exceeded, split by topic before you trim, and trim before you ask for a higher
   limit. A higher limit in `.agent-docs.json` needs a reason in the pull request.
 
-## What the checker will say
+## What the checker will say, in the order to fix it
 
 {{RULES}}
