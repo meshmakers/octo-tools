@@ -56,6 +56,37 @@
         }
       }
     },
+    "ruleDocs": {
+      "description": "Per-rule explanation rendered by Test-OctoAgentDocs -Explain and the migration brief. Every rule id must have an entry.",
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "entry-point-lines",
+          "entry-point-characters",
+          "line-length",
+          "doc-size",
+          "frontmatter-present",
+          "doc-reachable",
+          "reference-resolves",
+          "routing-current",
+          "docs-count",
+          "shim-valid",
+          "required-sections",
+          "no-invisible-characters",
+          "link-hosts",
+          "migration-pending"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["why", "fix"],
+        "additionalProperties": false,
+        "properties": {
+          "why": { "type": "string", "minLength": 1 },
+          "fix": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "rules": {
       "type": "object",
       "propertyNames": {
@@ -72,7 +103,8 @@
           "shim-valid",
           "required-sections",
           "no-invisible-characters",
-          "link-hosts"
+          "link-hosts",
+          "migration-pending"
         ]
       },
       "additionalProperties": {

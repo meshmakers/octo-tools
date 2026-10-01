@@ -972,3 +972,106 @@ Describe 'tenth review pass' {
         $f[0].message | Should -Match "'evil\.example'"
     }
 }
+
+Describe 'AB#5457 - explain' {
+    It 'documents every rule with a why and a fix' {
+        # The ruleset is the single source for -Explain, the README and the migration
+        # brief, so a rule without text would show up in all three as a bare id.
+        $rules = Get-Content -LiteralPath (Join-Path $ModuleDir 'agent-docs.rules.json') -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($id in $rules.rules.Keys) {
+            $rules.ruleDocs.ContainsKey($id) | Should -BeTrue -Because "rule '$id' needs a ruleDocs entry"
+            $rules.ruleDocs[$id].why | Should -Not -BeNullOrEmpty -Because "rule '$id' needs a why"
+            $rules.ruleDocs[$id].fix | Should -Not -BeNullOrEmpty -Because "rule '$id' needs a fix"
+        }
+        foreach ($id in $rules.ruleDocs.Keys) { $rules.rules.ContainsKey($id) | Should -BeTrue -Because "ruleDocs names '$id', which is not a rule" }
+    }
+    It 'lists every rule with its effective severity and reason, and scans nothing' {
+        $r = New-Fixture
+        # No -Fix run here: a scan would report the routing table as stale. -Explain must
+        # not report that, because it must not scan.
+        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        $res.data.rules.Count | Should -Be 14
+        ($res.data.rules | Where-Object { $_.rule -eq 'doc-size' }).why | Should -Match 'loaded whole'
+        $res.data.PSObject.Properties.Name | Should -Not -Contain 'findings'
+    }
+    It 'shows the severity this repository is held to, after its overrides' {
+        $r = New-Fixture
+        '{"schemaVersion":1,"rules":{"docs-count":["error",{"max":3}]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $res = (Test-OctoAgentDocs -Path $r -Explain -Rule docs-count -Json 3>$null) | ConvertFrom-Json
+        $res.data.rules.Count | Should -Be 1
+        $res.data.rules[0].severity | Should -Be 'error'
+        $res.data.rules[0].options.max | Should -Be 3
+    }
+    It 'marks the non-relaxable rules' {
+        $r = New-Fixture
+        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        ($res.data.rules | Where-Object { $_.rule -eq 'no-invisible-characters' }).nonRelaxable | Should -BeTrue
+        ($res.data.rules | Where-Object { $_.rule -eq 'doc-size' }).nonRelaxable | Should -BeFalse
+    }
+    It 'rejects an unknown rule id instead of printing nothing' {
+        $r = New-Fixture
+        { Test-OctoAgentDocs -Path $r -Explain -Rule no-such-rule 3>$null } | Should -Throw '*Unknown rule*'
+    }
+    It 'points a finding at -Explain' {
+        $r = New-Fixture
+        $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
+        $out | Should -Match 'Test-OctoAgentDocs -Explain -Rule .*routing-current'
+    }
+}
+
+Describe 'AB#5457 - diff and whatif' {
+    It 'with -Fix -WhatIf writes nothing and still reports the stale regions' {
+        $r = New-Fixture -Agents
+        $before = [System.IO.File]::ReadAllText((Join-Path $r 'AGENTS.md'))
+        $res = (Test-OctoAgentDocs -Path $r -Fix -WhatIf -Json 3>$null) | ConvertFrom-Json
+        [System.IO.File]::ReadAllText((Join-Path $r 'AGENTS.md')) | Should -Be $before
+        Test-Path (Join-Path $r 'CLAUDE.md') | Should -BeFalse
+        $res.data.filesWritten.Count | Should -Be 0
+        (Get-Rules $res 'routing-current').Count | Should -Be 1
+        (Get-Rules $res 'shim-valid').Count | Should -Be 1
+    }
+    It 'with -Diff shows the table -Fix would write, as added lines' {
+        $r = New-Fixture -Agents
+        $res = (Test-OctoAgentDocs -Path $r -Diff -Json 3>$null) | ConvertFrom-Json
+        $routing = @($res.data.diffs | Where-Object { $_.region -eq 'routing' })
+        $routing.Count | Should -Be 1
+        ($routing[0].lines -join "`n") | Should -Match '\+ \| `src/\*\*` \| `docs/one\.md` \|'
+        ($routing[0].lines | Where-Object { $_ -like '- *' }).Count | Should -Be 0
+        $shim = @($res.data.diffs | Where-Object { $_.region -eq 'shim' })
+        $shim.Count | Should -Be 1
+    }
+    It 'produces no diff once the regions are current' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $res = (Test-OctoAgentDocs -Path $r -Diff -Json 3>$null) | ConvertFrom-Json
+        @($res.data.diffs).Count | Should -Be 0
+    }
+    It 'diffs a changed row rather than replacing the whole table' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        (Get-Content -LiteralPath (Join-Path $r 'docs/one.md') -Raw) -replace 'applies_to: src/\*\*', 'applies_to: lib/**' |
+            Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        $res = (Test-OctoAgentDocs -Path $r -Diff -Json 3>$null) | ConvertFrom-Json
+        $lines = @(($res.data.diffs | Where-Object { $_.region -eq 'routing' })[0].lines)
+        ($lines | Where-Object { $_ -like '  | When you change*' }).Count | Should -Be 1   # header kept
+        ($lines | Where-Object { $_ -like '- *src/`*`**' }).Count | Should -Be 1
+        ($lines | Where-Object { $_ -like '+ *lib/`*`**' }).Count | Should -Be 1
+    }
+}
+
+Describe 'AB#5457 - migration-pending' {
+    It 'warns while the migration brief is present' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        '# brief' | Set-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md')
+        $f = Get-Rules (Get-Result $r) 'migration-pending'
+        $f.Count | Should -Be 1
+        $f[0].severity | Should -Be 'warn'
+        $f[0].file | Should -Be 'AGENTS-MIGRATION.md'
+    }
+    It 'is quiet once the brief is deleted' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        (Get-Rules (Get-Result $r) 'migration-pending').Count | Should -Be 0
+    }
+}

@@ -155,8 +155,15 @@ its `CLAUDE.md` shim and `docs/` - and regenerates the parts of them that are de
 Test-OctoAgentDocs                                   # current repo, report only
 Test-OctoAgentDocs -Path octo-communication-operator # or a repo name under $ROOTPATH
 Test-OctoAgentDocs -Fix                              # rewrite the generated regions
+Test-OctoAgentDocs -Fix -WhatIf -Diff                # show what -Fix would write, write nothing
+Test-OctoAgentDocs -Explain                          # every rule: severity, limits, why, fix
+Test-OctoAgentDocs -Explain -Rule doc-size           # one rule
 Test-OctoAgentDocs -Mode enforce -Json               # for a pipeline step
 ```
+
+Every finding names its rule, and `-Explain -Rule <id>` says why the rule exists and what to do
+about it. That text lives in the ruleset (`ruleDocs`), so the explanation, this README and the
+migration brief below cannot drift from what is enforced.
 
 It checks two things that are easy to get wrong by hand and one that is impossible to
 see: that the always-loaded entry point stays inside its budget, that every doc is
@@ -175,8 +182,25 @@ own `.agent-docs.json`, then `-ConfigPath`, then `-Mode`. A repository may raise
 but not lower one listed in `nonRelaxable`, because that file lives in the branch under
 review. `Get-Help Test-OctoAgentDocs -Full` has the rest.
 
+## Starting a repository
+
+```powershell
+Initialize-OctoAgentDocs -Path octo-new-repo          # minimal shape, or a migration brief
+Initialize-OctoAgentDocs -Path octo-new-repo -WhatIf  # show what it would write
+```
+
+`Initialize-OctoAgentDocs` never overwrites a file. A repository with no agent files gets
+`AGENTS.md` with the required sections and the routing markers, the `CLAUDE.md` shim, and a first
+`-Fix` run; nothing else, because the first routed doc creates `docs/` and an override file is
+something a repository adds when it has a reason. A repository that still has a hand-written
+`CLAUDE.md` gets only `AGENTS-MIGRATION.md`: a brief for the coding agent and the developer doing
+the migration, rendered from the ruleset so it carries the budgets, the section names and the
+shim as enforced. The checker warns while that file exists (`migration-pending`); it is deleted in
+the migration commit. All of these files are English, like everything else that ships with a
+repository.
+
 Tests, from the `octo-tools` folder (Pester 5: `Install-Module Pester -Scope CurrentUser -MinimumVersion 5.0`):
-`Invoke-Pester ./tests/Test-OctoAgentDocs.Tests.ps1`.
+`Invoke-Pester ./tests`.
 
 # Support and Feedback
 

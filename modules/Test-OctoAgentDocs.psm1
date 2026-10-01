@@ -2,7 +2,7 @@ $script:AgentDocsRuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
     'frontmatter-present', 'doc-reachable', 'reference-resolves',
     'routing-current', 'docs-count', 'shim-valid', 'required-sections',
-    'no-invisible-characters', 'link-hosts'
+    'no-invisible-characters', 'link-hosts', 'migration-pending'
 )
 $script:AgentDocsSeverities = @('off', 'warn', 'error')
 $script:AgentDocsModes = @('logOnly', 'enforce')
@@ -38,6 +38,8 @@ function Test-OctoAgentDocs {
                               EVERY *.md in the repository, not only the routed ones
       link-hosts              off by default; when on, every external link host must be
                               on the allowlist
+      migration-pending       the AGENTS-MIGRATION.md brief that Initialize-OctoAgentDocs
+                              writes is still present - the migration is not finished
 
     GENERATES - from structure only, never by summarizing code:
       the routing table between
@@ -105,7 +107,21 @@ function Test-OctoAgentDocs {
     when the path itself does not exist. Defaults to the current directory.
 
     .PARAMETER Fix
-    Rewrite the generated regions instead of only reporting that they are stale.
+    Rewrite the generated regions instead of only reporting that they are stale. Supports
+    -WhatIf, which reports what would be rewritten and writes nothing.
+
+    .PARAMETER Diff
+    When a generated region is stale, print a line diff of the current block against the
+    block that -Fix would write. Combine with -Fix -WhatIf to preview a rewrite.
+
+    .PARAMETER Explain
+    Print every rule with its effective severity, its options and the reason it exists,
+    then return without checking anything. The text comes from 'ruleDocs' in the ruleset,
+    so it cannot drift from what is enforced. Overrides in the repository's own
+    .agent-docs.json are applied, so the output is what THIS repository is held to.
+
+    .PARAMETER Rule
+    With -Explain, restrict the output to these rule ids.
 
     .PARAMETER Force
     With -Fix, allow the CLAUDE.md shim to replace a CLAUDE.md that still has real
@@ -131,9 +147,15 @@ function Test-OctoAgentDocs {
 
     .EXAMPLE
     Test-OctoAgentDocs -Mode enforce -Json
+
+    .EXAMPLE
+    Test-OctoAgentDocs -Explain -Rule doc-size
+
+    .EXAMPLE
+    Test-OctoAgentDocs -Fix -WhatIf -Diff
     #>
 
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
         [string]$Path = ".",
         [switch]$Fix,
@@ -141,7 +163,10 @@ function Test-OctoAgentDocs {
         [ValidateSet('logOnly', 'enforce')]
         [string]$Mode,
         [string]$ConfigPath,
-        [switch]$Json
+        [switch]$Json,
+        [switch]$Diff,
+        [switch]$Explain,
+        [string[]]$Rule
     )
 
     $ErrorActionPreference = 'Stop'
@@ -201,6 +226,15 @@ function Test-OctoAgentDocs {
             $config.rules[$id] = @('off', @{})
         }
         else { $config.rules[$id] = ConvertTo-RuleArray $config.rules[$id] }
+    }
+
+    # 'ruleDocs' is read from the BUILT-IN ruleset only: a repository may change what it
+    # is held to, not the explanation of why the org holds it to that.
+    $ruleDocs = if ($config['ruleDocs'] -is [hashtable]) { $config['ruleDocs'] } else { @{} }
+    foreach ($id in $script:AgentDocsRuleIds) {
+        if (-not ($ruleDocs[$id] -is [hashtable]) -or -not $ruleDocs[$id]['why'] -or -not $ruleDocs[$id]['fix']) {
+            Write-Warning "Built-in ruleset has no 'ruleDocs' entry for '$id' - -Explain will show it without a reason"
+        }
     }
 
     # Accepts ["warn", {...}], ["warn"] or "warn"; returns $null when the severity is
@@ -315,6 +349,59 @@ function Test-OctoAgentDocs {
     }
     function Test-RuleOn { param([string]$Id) (Get-Severity $Id) -ne 'off' }
 
+    # ---------------------------------------------------------------- explain
+    # One screen that answers "what will this check, and why": the rule, the severity
+    # this repository ends up with after its overrides, the thresholds, and the reason.
+    # Nothing is scanned. The reason text lives in the ruleset, so this output, the
+    # README and the migration brief cannot say three different things.
+    if ($Explain) {
+        $ids = @($script:AgentDocsRuleIds)
+        if ($Rule) {
+            $unknown = @($Rule | Where-Object { $script:AgentDocsRuleIds -notcontains $_ })
+            if ($unknown.Count -gt 0) { throw "Unknown rule(s): $($unknown -join ', '). Known: $($script:AgentDocsRuleIds -join ', ')" }
+            $ids = @($Rule)
+        }
+        $rows = foreach ($id in $ids) {
+            $o = if ($config.rules[$id].Count -gt 1) { $config.rules[$id][1] } else { @{} }
+            $doc = if ($ruleDocs[$id] -is [hashtable]) { $ruleDocs[$id] } else { @{} }
+            [ordered]@{
+                rule         = $id
+                severity     = Get-Severity $id
+                nonRelaxable = ($floor -contains $id)
+                options      = $o
+                why          = [string]$doc['why']
+                fix          = [string]$doc['fix']
+            }
+        }
+        if ($Json) {
+            Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{
+                repository = Split-Path -Leaf $repo
+                mode       = $config.mode
+                rules      = @($rows)
+            })
+            return
+        }
+        Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode); severity after this repository's overrides)" -ForegroundColor Yellow
+        foreach ($r in $rows) {
+            $colour = switch ($r.severity) { 'error' { 'Red' } 'warn' { 'DarkYellow' } default { 'DarkGray' } }
+            $lock = if ($r.nonRelaxable) { ' (non-relaxable)' } else { '' }
+            # Scalars inline, lists as a count: 'allow' has six hosts and the table does
+            # not need them, -Json has the full options.
+            $opts = @(foreach ($k in ($r.options.Keys | Sort-Object)) {
+                    $v = $r.options[$k]
+                    if ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) { "$k=[$(@($v).Count)]" } else { "$k=$v" }
+                }) -join ', '
+            Write-Host ""
+            Write-Host "  $($r.rule)  [$($r.severity)]$lock" -ForegroundColor $colour -NoNewline
+            if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host "" }
+            if ($r.why) { Write-Host "    why: $($r.why)" }
+            if ($r.fix) { Write-Host "    fix: $($r.fix)" }
+        }
+        Write-Host ""
+        Write-Host "  Overrides: .agent-docs.json in the repository, then -ConfigPath, then -Mode. Non-relaxable rules can be raised there, never lowered." -ForegroundColor Gray
+        return
+    }
+
     # ---------------------------------------------------------------- findings
     $findings = [System.Collections.Generic.List[object]]::new()
     $written = [System.Collections.Generic.List[string]]::new()
@@ -330,6 +417,47 @@ function Test-OctoAgentDocs {
     function Write-Text {
         param([string]$P, [string]$Content)
         [System.IO.File]::WriteAllText($P, $Content, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    # -Diff output: one entry per stale generated region. A plain LCS line diff is
+    # enough here - the regions are a two-line shim and a table of at most a dozen rows.
+    $diffs = [System.Collections.Generic.List[object]]::new()
+    function Get-LineDiff {
+        param([string[]]$Old, [string[]]$New)
+        $n = $Old.Count; $m = $New.Count
+        $lcs = New-Object 'int[,]' ($n + 1), ($m + 1)
+        for ($i = $n - 1; $i -ge 0; $i--) {
+            for ($j = $m - 1; $j -ge 0; $j--) {
+                $lcs[$i, $j] = if ($Old[$i] -eq $New[$j]) { $lcs[($i + 1), ($j + 1)] + 1 } else { [Math]::Max($lcs[($i + 1), $j], $lcs[$i, ($j + 1)]) }
+            }
+        }
+        $out = [System.Collections.Generic.List[string]]::new()
+        $i = 0; $j = 0
+        while ($i -lt $n -and $j -lt $m) {
+            if ($Old[$i] -eq $New[$j]) { $out.Add("  $($Old[$i])"); $i++; $j++ }
+            elseif ($lcs[($i + 1), $j] -ge $lcs[$i, ($j + 1)]) { $out.Add("- $($Old[$i])"); $i++ }
+            else { $out.Add("+ $($New[$j])"); $j++ }
+        }
+        while ($i -lt $n) { $out.Add("- $($Old[$i])"); $i++ }
+        while ($j -lt $m) { $out.Add("+ $($New[$j])"); $j++ }
+        # No comma: the caller wraps the output in @(), and a comma-wrapped array inside
+        # @() is an array of one array.
+        return $out.ToArray()
+    }
+    function Add-Diff {
+        param([string]$File, [string]$Region, [string]$Current, [string]$Generated)
+        if (-not $Diff) { return }
+        # Get-Lines returns its array comma-wrapped so a one-line file stays an array;
+        # assign first, or @() wraps that array inside another one.
+        $oldLines = Get-Lines $Current
+        $newLines = Get-Lines $Generated
+        $diffs.Add([ordered]@{
+                file      = $File
+                region    = $Region
+                current   = $Current
+                generated = $Generated
+                lines     = @(Get-LineDiff -Old ([string[]]$oldLines) -New ([string[]]$newLines))
+            })
     }
 
     # Lines as `wc -l` counts them: a trailing newline does not add a line.
@@ -440,9 +568,15 @@ function Test-OctoAgentDocs {
         $current = if ($hasClaude) { ((Read-Text $claudePath) -replace "`r`n", "`n") -replace "`r", "`n" } else { $null }
         if (($null -eq $current) -or ($current.Trim() -ne $expected)) {
             $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
-            if ($Fix -and $safe) {
+            Add-Diff 'CLAUDE.md' 'shim' ([string]$current) "$expected`n"
+            if ($Fix -and $safe -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) {
                 Write-Text $claudePath "$expected`n"
                 $written.Add('CLAUDE.md')
+            }
+            elseif ($Fix -and $safe) {
+                # -WhatIf: ShouldProcess has already printed what would happen; the file
+                # is still stale, so it is still a finding.
+                Add-Finding 'shim-valid' 'CLAUDE.md' 'CLAUDE.md shim would be written (run without -WhatIf)'
             }
             elseif ($Fix) {
                 Add-Finding 'shim-valid' 'CLAUDE.md' 'Has real content while AGENTS.md is canonical - migrate it by hand, or re-run with -Force to replace it with the shim'
@@ -451,6 +585,16 @@ function Test-OctoAgentDocs {
                 $why = if ($hasClaude) { 'CLAUDE.md must contain exactly the shim and nothing else' } else { 'CLAUDE.md shim is absent' }
                 Add-Finding 'shim-valid' 'CLAUDE.md' "$why (run with -Fix)"
             }
+        }
+    }
+
+    # ---------------------------------------------------------- migration brief
+    # Initialize-OctoAgentDocs leaves a brief for the agent doing the migration. It is a
+    # working file, and the rule nags until the migration commit deletes it.
+    if (Test-RuleOn 'migration-pending') {
+        $briefName = [string](Get-Opt 'migration-pending' 'file' 'AGENTS-MIGRATION.md')
+        if ($briefName -and (Test-Path -LiteralPath (Join-Path $repo $briefName))) {
+            Add-Finding 'migration-pending' $briefName 'Migration brief is still present - finish its steps and delete it in the same commit'
         }
     }
 
@@ -913,7 +1057,11 @@ function Test-OctoAgentDocs {
                 $currentBlock = $entry.Substring($si + $startMarker.Length, $ei - $si - $startMarker.Length)
                 $desired = "`n$generated`n"
                 if ($currentBlock -ne $desired) {
-                    if ($Fix) { Write-Text $entryPath ($head + $desired + $tail); $written.Add($entryName) }
+                    Add-Diff $entryName 'routing' $currentBlock.Trim("`n") $generated
+                    if ($Fix -and $PSCmdlet.ShouldProcess($entryName, 'Regenerate the routing table')) {
+                        Write-Text $entryPath ($head + $desired + $tail); $written.Add($entryName)
+                    }
+                    elseif ($Fix) { Add-Finding 'routing-current' $entryName 'Generated routing table would be rewritten (run without -WhatIf)' }
                     else { Add-Finding 'routing-current' $entryName 'Generated routing table is out of date (run with -Fix)' }
                 }
             }
@@ -933,6 +1081,7 @@ function Test-OctoAgentDocs {
             mode         = $config.mode
             filesScanned = [ordered]@{ routed = $checkFiles.Count; integrity = $integrityFiles.Count; truncated = $scanTruncated }
             filesWritten = @($written)
+            diffs        = @($diffs)
             routes       = $routes
             findings     = $findings
             ruleSet      = $config.rules
@@ -948,8 +1097,20 @@ function Test-OctoAgentDocs {
             Write-Host "  [$($f.severity)] $($f.rule)$where $($f.message)" -ForegroundColor $colour
         }
         if ($written.Count -gt 0) { Write-Host "  rewrote $($written -join ', ')" -ForegroundColor Cyan }
-        elseif ($Fix) { Write-Host "  nothing to rewrite" -ForegroundColor Cyan }
+        elseif ($Fix -and -not $WhatIfPreference) { Write-Host "  nothing to rewrite" -ForegroundColor Cyan }
+        foreach ($d in $diffs) {
+            Write-Host "  --- $($d.file) [$($d.region)] current" -ForegroundColor DarkGray
+            Write-Host "  +++ $($d.file) [$($d.region)] generated" -ForegroundColor DarkGray
+            foreach ($l in $d.lines) {
+                $c = switch ($l.Substring(0, 1)) { '-' { 'Red' } '+' { 'Green' } default { 'DarkGray' } }
+                Write-Host "  $l" -ForegroundColor $c
+            }
+        }
         Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s)" -ForegroundColor Gray
+        if ($findings.Count -gt 0) {
+            $ruleIds = @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)
+            Write-Host "  why and how to fix: Test-OctoAgentDocs -Explain -Rule $($ruleIds -join ',')" -ForegroundColor Gray
+        }
     }
 
     if ($config.mode -eq 'enforce' -and -not $ok) {
