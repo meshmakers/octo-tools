@@ -28,6 +28,8 @@ function Test-OctoAgentDocs {
       frontmatter-present     every docs/*.md carries a description, within its length limit
       doc-reachable           every doc is either routed (applies_to) or marked background
       reference-resolves      every relative link and in-file anchor resolves
+      reference-to-shim       a reference that resolves to a CLAUDE.md shim is advised to
+                              point at AGENTS.md instead - a warning, never a failure
       docs-count              the number of routed docs stays reviewable
       shim-valid              when AGENTS.md is canonical, CLAUDE.md is exactly the shim
       routing-current         the generated routing block matches the docs' frontmatter
@@ -242,15 +244,19 @@ function Test-OctoAgentDocs {
     # not one of off|warn|error so the caller can keep the stricter built-in value.
     function ConvertTo-RuleEntry {
         param($Raw, [string]$Id, [string]$Source)
-        $severity = if ($Raw -is [string]) { $Raw } elseif ($Raw.Count -ge 1) { $Raw[0] } else { $null }
-        $options = if ($Raw -isnot [string] -and $Raw.Count -gt 1 -and $Raw[1] -is [hashtable]) { $Raw[1] } else { @{} }
-        $match = $script:AgentDocsSeverities | Where-Object { $_ -eq $severity }
-        if (-not $match) {
-            Write-Warning "Invalid severity '$severity' for rule '$Id' in $Source - must be off, warn or error. Keeping the built-in severity."
+        $entry = ConvertTo-OctoAgentDocsRuleEntry $Raw
+        if (-not $entry.valid) {
+            Write-Warning "Invalid severity '$($entry.severity)' for rule '$Id' in $Source - must be off, warn or error. Keeping the built-in severity."
             return $null
         }
-        return @{ severity = $match; options = $options }
+        return @{ severity = $entry.severity; options = $entry.options }
     }
+
+    # The built-in options, kept before any override is merged: Get-Opt falls back to these
+    # when a repository removes a key, so the thresholds have one home - the ruleset file -
+    # and no literal in this code can drift from it.
+    $builtInOptions = @{}
+    foreach ($id in $script:AgentDocsRuleIds) { $builtInOptions[$id] = $config.rules[$id][1].Clone() }
 
     if (-not ($script:AgentDocsModes -contains $config.mode)) { $config.mode = 'logOnly' }
 
@@ -339,6 +345,7 @@ function Test-OctoAgentDocs {
         param([string]$Id, [string]$Name, $Default = $null)
         $o = if ($config.rules[$Id].Count -gt 1) { $config.rules[$Id][1] } else { $null }
         if ($o -and $o.ContainsKey($Name)) { return $o[$Name] }
+        if ($builtInOptions[$Id] -and $builtInOptions[$Id].ContainsKey($Name)) { return $builtInOptions[$Id][$Name] }
         return $Default
     }
     function Test-RuleOn { param([string]$Id) (Get-Severity $Id) -ne 'off' }
@@ -507,9 +514,15 @@ function Test-OctoAgentDocs {
         $map = @{}
         $lines = $Content -split "`r?`n"
         if ($lines.Count -eq 0 -or $lines[0].Trim() -ne '---') { return $map }
+        $key = $null
         for ($i = 1; $i -lt $lines.Count; $i++) {
             if ($lines[$i].Trim() -eq '---') { break }
-            if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') { $map[$Matches[1]] = $Matches[2].Trim() }
+            if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') { $key = $Matches[1]; $map[$key] = $Matches[2].Trim(); continue }
+            # A YAML block list under the previous key ("applies_to:" then "  - src/**")
+            # is the same value as the inline comma form.
+            if ($key -and $lines[$i] -match '^\s+-\s+(.+?)\s*$') {
+                $map[$key] = if ($map[$key]) { "$($map[$key]), $($Matches[1])" } else { $Matches[1] }
+            }
         }
         return $map
     }
@@ -652,7 +665,7 @@ function Test-OctoAgentDocs {
 
         if (Test-RuleOn 'doc-size') {
             $maxL = Get-Opt 'doc-size' 'maxLines' 0
-            $maxC = Get-Opt 'doc-size' 'maxCharacters' 24000
+            $maxC = Get-Opt 'doc-size' 'maxCharacters' 25000
             # One finding per file, not one per dimension, and it must say what to do:
             # a warning nobody can act on is a warning people learn to scroll past.
             $charsPerToken = Get-Opt 'doc-size' 'charactersPerToken' 4.0
@@ -922,8 +935,12 @@ function Test-OctoAgentDocs {
         $rel = [System.IO.Path]::GetRelativePath($repo, $f).Replace('\', '/')
         $base = Split-Path -Parent $f
 
-        if (Test-RuleOn 'reference-resolves') {
-            foreach ($m in [regex]::Matches($content, '\]\(([^)\s]+)\)')) {
+        if ((Test-RuleOn 'reference-resolves') -or (Test-RuleOn 'reference-to-shim')) {
+            # Fenced code is illustration, not navigation: a link in a ```markdown example is
+            # never followed, so it is not checked. Get-Anchors applies the same rule.
+            $prose = [regex]::Replace($content, '(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$', '')
+            # Destination, optionally in <...>, optionally followed by a "title".
+            foreach ($m in [regex]::Matches($prose, '\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
                 $target = $m.Groups[1].Value
                 if ($target -match '^[A-Za-z][A-Za-z0-9+.-]*:') { continue }   # any URI scheme
                 $parts = $target -split '#', 2
@@ -937,7 +954,7 @@ function Test-OctoAgentDocs {
                     Add-Finding 'reference-resolves' $rel "Link target not found: $target"; continue
                 }
                 if ($filePart -and (Test-PointsAtShim $resolved)) {
-                    Add-Finding 'reference-resolves' $rel "Link $(Get-ShimAdvice $filePart)" 'warn'
+                    Add-Finding 'reference-to-shim' $rel "Link $(Get-ShimAdvice $filePart)"
                 }
                 if ($anchor -and $resolved -like '*.md') {
                     $full = (Resolve-Path -LiteralPath $resolved).Path
@@ -945,23 +962,23 @@ function Test-OctoAgentDocs {
                     if (-not $anchorCache[$full].Contains($anchor)) { Add-Finding 'reference-resolves' $rel "Anchor not found: $target" }
                 }
             }
-            foreach ($m in [regex]::Matches($content, '`([^`\s]+\.md)`')) {
+            foreach ($m in [regex]::Matches($prose, '`([^`\s]+\.md)`')) {
                 $ref = $m.Groups[1].Value
                 # A bare `CLAUDE.md` means this repo's own entry point - after a migration,
                 # its shim. Extracted docs routinely say "see CLAUDE.md".
                 if ($ref -eq 'CLAUDE.md') {
                     if (Test-PointsAtShim (Join-Path $repo 'CLAUDE.md')) {
-                        Add-Finding 'reference-resolves' $rel "``CLAUDE.md`` $(Get-ShimAdvice $ref)" 'warn'
+                        Add-Finding 'reference-to-shim' $rel "``CLAUDE.md`` $(Get-ShimAdvice $ref)"
                     }
                     continue
                 }
                 if ($ref -notmatch '/') { continue }
                 if ($ref -match '^\.\.') { continue }
-                if ($ref -match '[*?\[{]') { continue }   # `docs/*.md` describes files, it does not name one
+                if ($ref -match '[*?\[{<>]') { continue }   # `docs/*.md` or `docs/<topic>.md` describes files, it does not name one
                 if ($siblingPattern -and $ref -match $siblingPattern) {
                     # A sibling that is not checked out is skipped silently, as before.
                     if (Test-PointsAtShim (Join-Path $siblingRoot $ref)) {
-                        Add-Finding 'reference-resolves' $rel "``$ref`` $(Get-ShimAdvice $ref)" 'warn'
+                        Add-Finding 'reference-to-shim' $rel "``$ref`` $(Get-ShimAdvice $ref)"
                     }
                     continue
                 }
@@ -970,7 +987,7 @@ function Test-OctoAgentDocs {
                     Add-Finding 'reference-resolves' $rel "Referenced file not found: $ref"
                 }
                 elseif (Test-PointsAtShim $local) {
-                    Add-Finding 'reference-resolves' $rel "``$ref`` $(Get-ShimAdvice $ref)" 'warn'
+                    Add-Finding 'reference-to-shim' $rel "``$ref`` $(Get-ShimAdvice $ref)"
                 }
             }
         }
@@ -1018,7 +1035,7 @@ function Test-OctoAgentDocs {
         # file's own line endings rather than rewriting every line of a CRLF file.
         $entryRaw = Read-Text $entryPath
         $entry = ConvertTo-OctoAgentDocsLf $entryRaw
-        $entryEol = if ($entryRaw.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $entryEol = if ($entryRaw.Contains("`r`n")) { "`r`n" } elseif ($entryRaw.Contains("`r")) { "`r" } else { "`n" }
         $entryLines = (Get-Lines $entry).Count
         $entryChars = $entry.Length
 

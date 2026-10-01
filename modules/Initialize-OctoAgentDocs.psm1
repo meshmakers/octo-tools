@@ -166,7 +166,7 @@ function Initialize-OctoAgentDocs {
         # One pass fills the (empty) routing table and returns the data the checklist needs,
         # so the first check is clean and the repository is scanned once. Only when the shim
         # was ours to write: otherwise -Fix would replace the existing CLAUDE.md.
-        if ($written.Contains('AGENTS.md') -and -not $hasClaude) { $check = Invoke-Check -Fix }
+        if ($written.Contains('AGENTS.md') -and $written.Contains('CLAUDE.md')) { $check = Invoke-Check -Fix }
     }
 
     # --------------------------------------------------------------- checklist

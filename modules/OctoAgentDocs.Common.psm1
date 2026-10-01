@@ -15,7 +15,7 @@ $script:Severities = @('off', 'warn', 'error')
 # schema's two enums mirror this list.
 $script:RuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
-    'frontmatter-present', 'doc-reachable', 'reference-resolves',
+    'frontmatter-present', 'doc-reachable', 'reference-resolves', 'reference-to-shim',
     'routing-current', 'docs-count', 'shim-valid', 'required-sections',
     'no-invisible-characters', 'link-hosts', 'migration-pending'
 )
@@ -71,7 +71,7 @@ function Resolve-OctoAgentDocsRepository {
     }
     if ($repo) { return $repo }
     if ($AsNullIfMissing) { return $null }
-    $tried = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
+    $tried = if ([System.IO.Path]::IsPathRooted($Path)) { [System.IO.Path]::GetFullPath($Path) } else { [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path)) }
     $msg = "Path '$Path' does not exist (resolved to '$tried')"
     if ($Global:ROOTPATH) { $msg += " and not under ROOTPATH '$Global:ROOTPATH'" }
     throw $msg
@@ -135,6 +135,19 @@ function Write-OctoAgentDocsText {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function ConvertTo-OctoAgentDocsRuleEntry {
+    <#
+    .SYNOPSIS
+    Reads one rule in any shape the schema allows - "warn", ["warn"] or ["warn", {...}] -
+    into @{ severity; options; valid }, where valid says whether the severity is one of
+    off, warn, error. What to do about an invalid one is the caller's policy.
+    #>
+    param([AllowNull()]$Raw)
+    $severity = if ($Raw -is [string]) { $Raw } elseif ($null -ne $Raw -and $Raw.Count -ge 1) { $Raw[0] } else { $null }
+    $options = if ($Raw -isnot [string] -and $null -ne $Raw -and $Raw.Count -gt 1 -and $Raw[1] -is [hashtable]) { $Raw[1] } else { @{} }
+    return @{ severity = $severity; options = $options; valid = ($script:Severities -contains $severity) }
+}
+
 function Read-OctoAgentDocsBuiltInRuleset {
     <#
     .SYNOPSIS
@@ -160,16 +173,15 @@ function Read-OctoAgentDocsBuiltInRuleset {
             $config.rules[$id] = @('off', @{})
             continue
         }
-        $raw = $config.rules[$id]
-        $sev = if ($raw -is [string]) { $raw } elseif ($raw.Count -ge 1) { $raw[0] } else { $null }
-        $opt = if ($raw -isnot [string] -and $raw.Count -gt 1 -and $raw[1] -is [hashtable]) { $raw[1] } else { @{} }
+        $entry = ConvertTo-OctoAgentDocsRuleEntry $config.rules[$id]
+        $sev = $entry.severity
         # Validated BEFORE any override is applied: the non-relaxable floor compares against
         # the built-in value, and a comparison against a typo is not a floor.
-        if ($script:Severities -notcontains $sev) {
+        if (-not $entry.valid) {
             Write-Warning "Invalid severity '$sev' for rule '$id' in the built-in ruleset - treated as error"
             $sev = 'error'
         }
-        $config.rules[$id] = @($sev, $opt)
+        $config.rules[$id] = @($sev, $entry.options)
     }
     return $config
 }
@@ -204,5 +216,5 @@ Export-ModuleMember -Function @(
     'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList', 'Get-OctoAgentDocsSeverityList',
     'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
     'ConvertTo-OctoAgentDocsLf', 'Test-OctoAgentDocsShimLike', 'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
-    'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
+    'ConvertTo-OctoAgentDocsRuleEntry', 'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
 )

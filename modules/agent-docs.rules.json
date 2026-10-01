@@ -66,6 +66,10 @@
         "siblingRepoPattern": "^(octo|mm)-[^/]+/"
       }
     ],
+    "reference-to-shim": [
+      "warn",
+      {}
+    ],
     "routing-current": [
       "error",
       {
@@ -174,6 +178,11 @@
       "tier": 2,
       "why": "A broken link sends an agent to a file or heading that does not exist, and it will guess instead of asking.",
       "fix": "Fix the path or anchor; headings produce anchors the way GitHub does."
+    },
+    "reference-to-shim": {
+      "tier": 3,
+      "why": "A reference to a CLAUDE.md that has become the shim still resolves, but an agent that opens it gets only '@AGENTS.md' - the pointer degrades without breaking.",
+      "fix": "Point the reference at AGENTS.md instead; a sibling repository that has not migrated yet is left alone."
     },
     "routing-current": {
       "tier": 2,

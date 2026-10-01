@@ -699,7 +699,7 @@ Describe 'references to a shim' {
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         $sib = New-Sibling -Parent (Split-Path -Parent $r) -Migrated
         Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value "`nThe contract lives in ``$sib/CLAUDE.md``."
-        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f = Get-Rules (Get-Result $r) 'reference-to-shim'
         $f.Count | Should -Be 1
         $f[0].severity | Should -Be 'warn'
         $f[0].message | Should -Match "$sib/AGENTS\.md"
@@ -709,7 +709,7 @@ Describe 'references to a shim' {
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         $sib = New-Sibling -Parent (Split-Path -Parent $r)
         Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value "`nThe contract lives in ``$sib/CLAUDE.md``."
-        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        (Get-Rules (Get-Result $r) 'reference-to-shim').Count | Should -Be 0
     }
     It 'does not advise AGENTS.md for a thin CLAUDE.md that has no AGENTS.md beside it' {
         # "@README.md" alone looks shim-like, but pointing the reader at a non-existent
@@ -721,19 +721,19 @@ Describe 'references to a shim' {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
         '@README.md' | Set-Content -LiteralPath (Join-Path $dir 'CLAUDE.md')
         Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value "`nSee ``$name/CLAUDE.md``."
-        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        (Get-Rules (Get-Result $r) 'reference-to-shim').Count | Should -Be 0
     }
     It 'skips a sibling that is not checked out, as before' {
         $r = New-Fixture
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value "`nSee ``octo-not-checked-out/CLAUDE.md``."
-        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        (Get-Rules (Get-Result $r) 'reference-to-shim').Count | Should -Be 0
     }
     It 'warns on a markdown link to a shim inside the repo' {
         $r = New-Fixture -Agents
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null          # writes the shim
         Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value "`nsee [the guide](../CLAUDE.md)"
-        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f = Get-Rules (Get-Result $r) 'reference-to-shim'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match 'AGENTS\.md'
     }
@@ -743,7 +743,7 @@ Describe 'references to a shim' {
         $r = New-Fixture -Agents
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null          # writes the shim
         Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'Keep in sync (see "Rules" in `CLAUDE.md`).'
-        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f = Get-Rules (Get-Result $r) 'reference-to-shim'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match "'AGENTS\.md'"
     }
@@ -751,7 +751,7 @@ Describe 'references to a shim' {
         $r = New-Fixture
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'See `CLAUDE.md`.'
-        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        (Get-Rules (Get-Result $r) 'reference-to-shim').Count | Should -Be 0
     }
     It 'does not fail an enforce run - a degraded pointer is not a broken one' {
         $r = New-Fixture
@@ -993,7 +993,8 @@ Describe 'explain - rule reference and per-finding reasons' {
         # No -Fix run here: a scan would report the routing table as stale. The reference
         # must not report that, because it must not scan.
         $res = (Test-OctoAgentDocs -Path $r -Explain -All -Json 3>$null) | ConvertFrom-Json
-        $res.data.rules.Count | Should -Be 14
+        $expectedCount = (Get-Content -LiteralPath (Join-Path $ModuleDir 'agent-docs.rules.json') -Raw | ConvertFrom-Json -AsHashtable).rules.Count
+        $res.data.rules.Count | Should -Be $expectedCount
         ($res.data.rules | Where-Object { $_.rule -eq 'doc-size' }).why | Should -Match 'loaded whole'
         $res.data.PSObject.Properties.Name | Should -Not -Contain 'findings'
     }
@@ -1413,5 +1414,64 @@ Describe 'review pass - references, links, hosts, files' {
         (Get-Rules (Get-Result $r) 'doc-size').Count | Should -Be 0
         [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
         (Get-Rules (Get-Result $r) 'doc-size').Count | Should -Be 0
+    }
+}
+
+Describe 'review pass - references and frontmatter the way authors write them' {
+    It 'ignores a link inside a fenced code block' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @('```markdown', '[example](docs/example.md)', '`docs/nowhere.md`', '```')
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'does not read a placeholder like docs/<topic>.md as a file' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value 'Add `docs/<topic>.md` with frontmatter.'
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'checks a link that carries a title' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value '[guide](docs/missing.md "Read first") and [ok](<docs/one.md> ''Fine'')'
+        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'docs/missing\.md'
+    }
+    It 'reads a YAML block list in applies_to' {
+        $r = New-Fixture
+        "---`ndescription: Listed.`napplies_to:`n  - src/**`n  - lib/**`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $res = Get-Result $r
+        (Get-Rules $res 'doc-reachable').Count | Should -Be 0
+        @($res.data.routes[0].globs) | Should -Be @('src/**', 'lib/**')
+    }
+    It 'keeps lone-CR line endings when -Fix regenerates the routing table' {
+        $r = New-Fixture -Agents
+        $p = Join-Path $r 'AGENTS.md'
+        [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) -replace "`r?`n", "`r"), [System.Text.UTF8Encoding]::new($false))
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        ([System.IO.File]::ReadAllText($p)).Contains("`n") | Should -BeFalse
+    }
+    It 'names the absolute path it tried when a rooted path is missing' {
+        { Test-OctoAgentDocs -Path '/nonexistent/abs/repo' 3>$null } | Should -Throw "*resolved to '/nonexistent/abs/repo'*"
+    }
+    It 'falls back to the built-in threshold when a repository removes an option' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value ('x' * 26000)
+        '{"schemaVersion":1,"rules":{"doc-size":["warn",{}]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'doc-size'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'limit 25000'
+    }
+    It 'lets a repository silence shim advice without losing broken-link errors' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see [shim](../CLAUDE.md) and [gone](missing.md)'
+        '{"schemaVersion":1,"rules":{"reference-to-shim":"off"}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $res = Get-Result $r
+        (Get-Rules $res 'reference-to-shim').Count | Should -Be 0
+        (Get-Rules $res 'reference-resolves').Count | Should -Be 1
     }
 }

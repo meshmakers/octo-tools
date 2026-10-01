@@ -269,3 +269,14 @@ Describe 'review pass - the shim verdict does not depend on the rule being on' {
         ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Move the remaining content'
     }
 }
+
+Describe 'review pass - a declined shim stays declined' {
+    It 'does not let the nested -Fix write a CLAUDE.md the caller declined' {
+        # Simulated by the only observable the cmdlet has: the shim was not written, so the
+        # -Fix pass must not run and CLAUDE.md must still be absent afterwards.
+        $r = New-Repo
+        $res = Initialize-OctoAgentDocs -Path $r -Json -WhatIf 3>$null 6>$null | ConvertFrom-Json
+        $res.data.filesWritten.Count | Should -Be 0
+        Test-Path (Join-Path $r 'CLAUDE.md') | Should -BeFalse
+    }
+}
