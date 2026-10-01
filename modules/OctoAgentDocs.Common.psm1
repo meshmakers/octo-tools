@@ -21,7 +21,6 @@ $script:RuleIds = @(
 )
 
 function Get-OctoAgentDocsRuleIdList { return @($script:RuleIds) }
-function Get-OctoAgentDocsSeverityList { return @($script:Severities) }
 
 function Get-OctoAgentDocsConstant {
     <#
@@ -115,6 +114,36 @@ function Test-OctoAgentDocsShimLike {
     $meaningful = @($lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^<!--.*-->$' })
     if ($meaningful.Count -eq 0) { return $true }
     return ($meaningful.Count -eq 1 -and $meaningful[0].Trim() -match '^@\S+$')
+}
+
+function Invoke-OctoAgentDocsOrdinalSort {
+    <#
+    .SYNOPSIS
+    Sorts by a string key in ordinal (code point) order. The routing table is committed and
+    compared byte for byte, so its order must not depend on the culture of the machine that
+    ran -Fix; Sort-Object, even with -Culture '', applies word-sort rules that treat '-' and
+    '_' specially.
+    #>
+    param([AllowEmptyCollection()][object[]]$Items, [Parameter(Mandatory)][scriptblock]$Key)
+    $arr = @($Items)
+    if ($arr.Count -lt 2) { return , $arr }
+    # The key block reads $_, so it is run with $_ bound, the way ForEach-Object binds it.
+    $keyOf = $Key
+    $ordered = [System.Linq.Enumerable]::OrderBy([object[]]$arr, [System.Func[object, string]] { param($x) [string](ForEach-Object -InputObject $x -Process $keyOf) }, [System.StringComparer]::Ordinal)
+    return , [System.Linq.Enumerable]::ToArray($ordered)
+}
+
+function Get-OctoAgentDocsShimVerdict {
+    <#
+    .SYNOPSIS
+    Whether a CLAUDE.md is the shim: 'ok' (exactly the expected lines, compared
+    case-sensitively after line-ending normalisation), 'absent' (no text), or 'differs'.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string[]]$ExpectedLines)
+    if ($null -eq $Text) { return 'absent' }
+    $expected = $ExpectedLines -join "`n"
+    if ((ConvertTo-OctoAgentDocsLf $Text).Trim() -ceq $expected) { return 'ok' }
+    return 'differs'
 }
 
 function Read-OctoAgentDocsText {
@@ -213,8 +242,9 @@ function Get-OctoAgentDocsTierHeading {
 }
 
 Export-ModuleMember -Function @(
-    'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList', 'Get-OctoAgentDocsSeverityList',
+    'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList',
     'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
-    'ConvertTo-OctoAgentDocsLf', 'Test-OctoAgentDocsShimLike', 'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
+    'ConvertTo-OctoAgentDocsLf', 'Test-OctoAgentDocsShimLike', 'Get-OctoAgentDocsShimVerdict', 'Invoke-OctoAgentDocsOrdinalSort',
+    'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
     'ConvertTo-OctoAgentDocsRuleEntry', 'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
 )

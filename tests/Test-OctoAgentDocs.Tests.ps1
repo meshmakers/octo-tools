@@ -1475,3 +1475,44 @@ Describe 'review pass - references and frontmatter the way authors write them' {
         (Get-Rules $res 'reference-resolves').Count | Should -Be 1
     }
 }
+
+Describe 'review pass - CRLF fences, quoted YAML, ordinal order, unterminated frontmatter' {
+    It 'ignores a link in a fenced block in a CRLF file too' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $p = Join-Path $r 'CLAUDE.md'
+        $text = [System.IO.File]::ReadAllText($p) + "`n``````markdown`n[example](docs/example.md)`n```````n"
+        [System.IO.File]::WriteAllText($p, ($text -replace "`r?`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'strips YAML quotes from frontmatter values' {
+        $r = New-Fixture
+        "---`ndescription: `"Quoted.`"`napplies_to: '*.md'`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $res = Get-Result $r
+        @($res.data.routes[0].globs) | Should -Be @('*.md')
+        $res.data.routes[0].description | Should -Be 'Quoted.'
+        (Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw) | Should -Match '\| `\*\.md` \|'
+    }
+    It 'orders the routing table ordinally, not by the current culture' {
+        $r = New-Fixture
+        foreach ($n in 'api-v2', 'api_v2', 'apiv2') {
+            "---`ndescription: $n.`napplies_to: $n/**`n---`n# $n`n" | Set-Content -LiteralPath (Join-Path $r "docs/$n.md") -NoNewline
+        }
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $files = @((Get-Result $r).data.routes | ForEach-Object { $_.file })
+        # Code-point order: '-' (0x2D) before '_' (0x5F) before 'v' - whatever the culture.
+        $files | Should -Be @('docs/api-v2.md', 'docs/api_v2.md', 'docs/apiv2.md', 'docs/one.md')
+    }
+    It 'does not read a body as frontmatter when the closing fence is missing' {
+        $r = New-Fixture
+        "---`n# Doc`n`nNote: run the build first.`ndescription: not a key`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        (Get-Rules (Get-Result $r) 'frontmatter-present').Count | Should -Be 1
+    }
+    It 'reads every file once' {
+        # Observable through the cache: the entry point is in it after a run.
+        $r = New-Fixture
+        $res = Get-Result $r
+        $res.data.filesScanned.routed | Should -Be 2
+    }
+}

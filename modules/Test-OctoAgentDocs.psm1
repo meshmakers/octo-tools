@@ -6,7 +6,6 @@ Import-Module (Join-Path $PSScriptRoot 'OctoJsonOutput.psm1')
 Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 
 $script:AgentDocsRuleIds = Get-OctoAgentDocsRuleIdList
-$script:AgentDocsSeverities = Get-OctoAgentDocsSeverityList
 $script:AgentDocsModes = @('logOnly', 'enforce')
 
 function Test-OctoAgentDocs {
@@ -514,14 +513,22 @@ function Test-OctoAgentDocs {
         $map = @{}
         $lines = $Content -split "`r?`n"
         if ($lines.Count -eq 0 -or $lines[0].Trim() -ne '---') { return $map }
+        # Frontmatter is what sits between the opening fence and a CLOSING one. Without the
+        # closing fence there is no frontmatter - a leading horizontal rule, or a block whose
+        # end was lost in a merge - and the body must not be read as keys.
+        $end = -1
+        for ($i = 1; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim() -eq '---') { $end = $i; break } }
+        if ($end -lt 0) { return $map }
+        # YAML quotes are syntax, not value: a glob starting with '*' has to be quoted.
+        function Unquote { param([string]$V) if ($V -match '^(["''])(.*)\1$') { $Matches[2] } else { $V } }
         $key = $null
-        for ($i = 1; $i -lt $lines.Count; $i++) {
-            if ($lines[$i].Trim() -eq '---') { break }
-            if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') { $key = $Matches[1]; $map[$key] = $Matches[2].Trim(); continue }
+        for ($i = 1; $i -lt $end; $i++) {
+            if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') { $key = $Matches[1]; $map[$key] = Unquote $Matches[2].Trim(); continue }
             # A YAML block list under the previous key ("applies_to:" then "  - src/**")
             # is the same value as the inline comma form.
             if ($key -and $lines[$i] -match '^\s+-\s+(.+?)\s*$') {
-                $map[$key] = if ($map[$key]) { "$($map[$key]), $($Matches[1])" } else { $Matches[1] }
+                $item = Unquote $Matches[1]
+                $map[$key] = if ($map[$key]) { "$($map[$key]), $item" } else { $item }
             }
         }
         return $map
@@ -585,7 +592,7 @@ function Test-OctoAgentDocs {
     #   n/a      CLAUDE.md is the entry point itself
     $shimVerdict = 'n/a'
     if ($hasAgents) {
-        $expected = ((Get-Opt 'shim-valid' 'content' @('@AGENTS.md')) -join "`n")
+        $expected = ((Get-Opt 'shim-valid' 'content') -join "`n")
         # A Windows checkout with core.autocrlf reads the two-line shim as CRLF; the
         # template is LF, so both are normalised or every migrated repo fails on Windows.
         # A lone CR is normalised too, and BEFORE Test-IsShimLike sees the text, or a
@@ -593,7 +600,7 @@ function Test-OctoAgentDocs {
         $current = if ($hasClaude) { ConvertTo-OctoAgentDocsLf (Read-Text $claudePath) } else { $null }
         # Case-sensitive: '@agents.md' does not resolve to AGENTS.md on a case-sensitive
         # checkout, so it is not the shim.
-        $shimVerdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -cne $expected) { 'differs' } else { 'ok' }
+        $shimVerdict = Get-OctoAgentDocsShimVerdict -Text $current -ExpectedLines @(Get-Opt 'shim-valid' 'content')
     }
     if ($hasAgents -and (Test-RuleOn 'shim-valid')) {
         if ($shimVerdict -ne 'ok') {
@@ -630,16 +637,27 @@ function Test-OctoAgentDocs {
         }
     }
 
+    # Every file is read once and normalised once (CRLF and lone CR become LF): sizes,
+    # line counts, fence stripping and comparisons then behave the same on every checkout.
+    $textCache = @{}
+    function Get-CachedText {
+        param([string]$P)
+        if (-not $textCache.ContainsKey($P)) { $textCache[$P] = ConvertTo-OctoAgentDocsLf (Read-Text $P) }
+        return $textCache[$P]
+    }
+
     # ------------------------------------------------------------------- docs
     $docsDir = Join-Path $repo 'docs'
     $docs = @()
-    if (Test-Path -LiteralPath $docsDir) { $docs = Get-ChildItem -LiteralPath $docsDir -Filter '*.md' -File | Sort-Object Name }
+    # Ordinal order, not the current culture's: the routing table is committed and compared
+    # byte for byte, so its order must not depend on which machine ran -Fix.
+    if (Test-Path -LiteralPath $docsDir) { $docs = Invoke-OctoAgentDocsOrdinalSort -Items @(Get-ChildItem -LiteralPath $docsDir -Filter '*.md' -File) -Key { $_.Name } }
 
     $routes = [System.Collections.Generic.List[object]]::new()
     foreach ($d in $docs) {
         # Normalised like the entry point, so a doc reports the same size and line count
         # on every checkout whatever its line endings.
-        $content = ConvertTo-OctoAgentDocsLf (Read-Text $d.FullName)
+        $content = Get-CachedText $d.FullName
         $fm = Get-Frontmatter $content
         $rel = "docs/$($d.Name)"
         $lineCount = (Get-Lines $content).Count
@@ -784,12 +802,6 @@ function Test-OctoAgentDocs {
         }
     }
 
-    $textCache = @{}
-    function Get-CachedText {
-        param([string]$P)
-        if (-not $textCache.ContainsKey($P)) { $textCache[$P] = Read-Text $P }
-        return $textCache[$P]
-    }
 
     foreach ($f in $integrityFiles) {
         $content = Get-CachedText $f.FullName
@@ -1034,7 +1046,7 @@ function Test-OctoAgentDocs {
         # saved. The ORIGINAL is kept for -Fix, which splices the new block into it with the
         # file's own line endings rather than rewriting every line of a CRLF file.
         $entryRaw = Read-Text $entryPath
-        $entry = ConvertTo-OctoAgentDocsLf $entryRaw
+        $entry = Get-CachedText $entryPath
         $entryEol = if ($entryRaw.Contains("`r`n")) { "`r`n" } elseif ($entryRaw.Contains("`r")) { "`r" } else { "`n" }
         $entryLines = (Get-Lines $entry).Count
         $entryChars = $entry.Length
@@ -1081,7 +1093,7 @@ function Test-OctoAgentDocs {
                 [void]$sb.AppendLine('| When you change | Read first |')
                 [void]$sb.AppendLine('|---|---|')
             }
-            foreach ($r in ($routes | Sort-Object { $_.file })) {
+            foreach ($r in (Invoke-OctoAgentDocsOrdinalSort -Items @($routes) -Key { $_.file })) {
                 $globs = ($r.globs | ForEach-Object { "``$_``" }) -join ', '
                 if ($withDesc) {
                     # A '|' in a description would add a column and corrupt the table.

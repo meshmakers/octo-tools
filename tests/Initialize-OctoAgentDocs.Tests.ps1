@@ -280,3 +280,21 @@ Describe 'review pass - a declined shim stays declined' {
         Test-Path (Join-Path $r 'CLAUDE.md') | Should -BeFalse
     }
 }
+
+Describe 'review pass - action summary and brief command path' {
+    It 'carries the success and exitCode summary like every action command' {
+        $r = New-Repo
+        $res = Get-Init $r
+        $res.data.success | Should -BeTrue
+        $res.data.exitCode | Should -Be 0
+        '# Legacy' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        (Get-Init $r).data.success | Should -BeFalse
+    }
+    It 'prints the path the user typed in the brief, not the folder name' {
+        $r = New-Repo
+        '# Legacy' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        Get-Init $r | Out-Null
+        $brief = Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw
+        $brief | Should -Match ("Test-OctoAgentDocs -Path " + [regex]::Escape((Format-OctoAgentDocsArgument -Value $r)) + "``")
+    }
+}

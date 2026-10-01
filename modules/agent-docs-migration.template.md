@@ -49,7 +49,7 @@ The checker holds the result to these limits. They are context cost for the agen
 
 ## Steps
 
-Run `Test-OctoAgentDocs -Path {{REPO}}` after every step, not only at the end. The output names the
+Run `Test-OctoAgentDocs -Path {{PATH}}` after every step, not only at the end. The output names the
 rule behind each finding; `Test-OctoAgentDocs -Explain -Rule <id>` explains why it exists and
 what to do.
 
@@ -63,7 +63,7 @@ what to do.
    Shortening, merging and deleting are the developer's decisions, made in review, not the
    agent's; what you believe is obsolete goes into a list for the developer, not into the bin.
    Give each doc `applies_to` globs for the paths it explains, or `background: true`.
-4. **Replace `CLAUDE.md` with the shim.** Run `Test-OctoAgentDocs -Path {{REPO}} -Fix`. It writes
+4. **Replace `CLAUDE.md` with the shim.** Run `Test-OctoAgentDocs -Path {{PATH}} -Fix`. It writes
    the shim only when `CLAUDE.md` is already empty of real content, so empty the file first by
    moving its last sections, then run `-Fix`. Never pass `-Force` to skip that check.
 5. **Generate the routing table** with the same `-Fix` run. The table is derived from the docs'

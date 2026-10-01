@@ -75,10 +75,11 @@ function Initialize-OctoAgentDocs {
     # ------------------------------------------------------------------ ruleset
     # Normalised by the shared loader, so every rule is [severity, options].
     $config = Read-OctoAgentDocsBuiltInRuleset -RuleIds $script:AgentDocsRuleIds
-    $sections = @($config.rules['required-sections'][1]['sections'])
-    if ($sections.Count -eq 0) { $sections = @('Read before you change', 'Build & test', 'Before you commit', 'Rules') }
-    $shimLines = @($config.rules['shim-valid'][1]['content'])
-    if ($shimLines.Count -eq 0) { $shimLines = @('@AGENTS.md') }
+    # @($null) has a Count of 1, so empty values are filtered rather than counted; the
+    # ruleset is the only source of these lists - there is no second copy in code.
+    $sections = @($config.rules['required-sections'][1]['sections'] | Where-Object { $_ })
+    $shimLines = @($config.rules['shim-valid'][1]['content'] | Where-Object { $_ })
+    if ($shimLines.Count -eq 0) { throw "The built-in ruleset defines no shim-valid.content; nothing to write as the shim" }
     $briefName = Get-OctoAgentDocsConstant BriefName
     $startMarker = Get-OctoAgentDocsConstant RoutingStart
     $endMarker = Get-OctoAgentDocsConstant RoutingEnd
@@ -95,13 +96,12 @@ function Initialize-OctoAgentDocs {
     # verdict (its JSON 'shim' field, computed whatever severity the rule has), because a
     # repository may override shim-valid.content; the built-in text is only the fallback
     # for when the checker is not loaded.
-    $expectedShim = $shimLines -join "`n"
     function Get-ClaudeState {
         param($Check)
         if (-not (Test-Path -LiteralPath $claudePath)) { return 'absent' }
-        $text = ConvertTo-OctoAgentDocsLf (Read-OctoAgentDocsText $claudePath)
+        $text = Read-OctoAgentDocsText $claudePath
         $isShim = if ($Check -and $Check.data.PSObject.Properties['shim']) { $Check.data.shim -eq 'ok' }
-                  else { $text.Trim() -ceq $expectedShim }
+                  else { (Get-OctoAgentDocsShimVerdict -Text $text -ExpectedLines $shimLines) -eq 'ok' }
         if ($isShim) { return 'shim' }
         if (Test-OctoAgentDocsShimLike $text) { return 'import' }
         return 'real content'
@@ -139,7 +139,7 @@ function Initialize-OctoAgentDocs {
     elseif ((Get-ClaudeState) -eq 'real content') {
         $state = 'migration'
         if (-not $hasBrief -and $PSCmdlet.ShouldProcess($briefName, 'Write the migration brief')) {
-            Write-OctoAgentDocsText $briefPath (Format-MigrationBrief -Repo $repoName -Config $config -Sections $sections -ShimLines $shimLines)
+            Write-OctoAgentDocsText $briefPath (Format-MigrationBrief -Repo $repoName -PathArgument (Format-OctoAgentDocsArgument -Value $Path) -Config $config -Sections $sections -ShimLines $shimLines)
             $written.Add($briefName)
         }
     }
@@ -243,13 +243,16 @@ function Initialize-OctoAgentDocs {
 
     # ------------------------------------------------------------------ output
     if ($Json) {
-        Write-OctoJson -Command 'Initialize-OctoAgentDocs' -Data ([ordered]@{
+        # An action command carries the success/exitCode summary like every other one in
+        # octo-tools; success means nothing is left open.
+        $open = @($rows | Where-Object { $_.done -eq $false }).Count
+        Write-OctoJson -Command 'Initialize-OctoAgentDocs' -Data (New-OctoActionResult -Success ($open -eq 0) -ExitCode 0 -Extra ([ordered]@{
             repository   = $repoName
             state        = $state
             checklist    = @($rows)
             filesWritten = @($written)
             nextSteps    = @($next)
-        })
+        }))
         return
     }
     # Green only when nothing is open: a 'created' run that left work behind is not green.
@@ -275,7 +278,7 @@ function Initialize-OctoAgentDocs {
 # the brief an agent reads carries the same numbers the checker will hold it to. Returns the
 # text; writing it is the caller's decision.
 function Format-MigrationBrief {
-    param([string]$Repo, [hashtable]$Config, [string[]]$Sections, [string[]]$ShimLines)
+    param([string]$Repo, [string]$PathArgument, [hashtable]$Config, [string[]]$Sections, [string[]]$ShimLines)
 
     $templatePath = Join-Path $PSScriptRoot 'agent-docs-migration.template.md'
     if (-not (Test-Path -LiteralPath $templatePath)) { throw "Migration brief template missing at $templatePath" }
@@ -326,6 +329,7 @@ function Format-MigrationBrief {
     }
 
     $t = $t.Replace('{{REPO}}', $Repo)
+    $t = $t.Replace('{{PATH}}', $PathArgument)
     $t = $t.Replace('{{DATE}}', (Get-Date).ToString('yyyy-MM-dd'))
     $t = $t.Replace('{{BRIEF}}', (Get-OctoAgentDocsConstant BriefName))
     $t = $t.Replace('{{START_MARKER}}', (Get-OctoAgentDocsConstant RoutingStart))
