@@ -158,7 +158,7 @@ Test-OctoAgentDocs -Fix                              # rewrite the generated reg
 Test-OctoAgentDocs -Fix -WhatIf -Diff                # show what -Fix would write, write nothing
 Test-OctoAgentDocs -Explain                          # the check, plus why and fix for each rule that fired
 Test-OctoAgentDocs -Explain -All                     # every rule: severity, limits, why, fix; no scan
-Test-OctoAgentDocs -Explain -Rule doc-size           # one rule; no scan
+Test-OctoAgentDocs -Explain doc-size                 # one rule (the name after each finding); no scan
 Test-OctoAgentDocs -Mode enforce -Json               # for a pipeline step
 ```
 

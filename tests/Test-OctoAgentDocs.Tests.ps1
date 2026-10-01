@@ -1171,7 +1171,7 @@ Describe 'tiered report - order inside a tier' {
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @(('a' * 130 + ' b'), 'short', ('c' * 130 + ' d'), ('e' * 130 + ' f'))
         $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
-        $lines = @($out -split "`n" | Where-Object { $_ -match 'line-length CLAUDE\.md:(\d+)' } | ForEach-Object { [int]$Matches[1] })
+        $lines = @($out -split "`n" | Where-Object { $_ -match 'CLAUDE\.md:(\d+): line is' } | ForEach-Object { [int]$Matches[1] })
         $lines.Count | Should -BeGreaterThan 1
         ($lines -join ',') | Should -Be (($lines | Sort-Object) -join ',')
     }
@@ -1218,5 +1218,29 @@ Describe 'tiered report - counts, precedence and JSON shape' {
         (Get-Content -LiteralPath (Join-Path $spaced 'CLAUDE.md') -Raw).Replace('## Rules', '## Other') |
             Set-Content -LiteralPath (Join-Path $spaced 'CLAUDE.md') -NoNewline
         (Get-Result $spaced).data.startHere | Should -Match "-Path '"
+    }
+}
+
+Describe 'explain - the rule id is positional' {
+    It 'accepts -Explain <rule> after -Path' {
+        $r = New-Fixture
+        $res = (Test-OctoAgentDocs -Path $r -Explain line-length -Json 3>$null) | ConvertFrom-Json
+        $res.data.rules.Count | Should -Be 1
+        $res.data.rules[0].rule | Should -Be 'line-length'
+    }
+    It 'accepts -Explain <rule> without -Path' {
+        $res = (Test-OctoAgentDocs -Explain doc-size,line-length -Json 3>$null) | ConvertFrom-Json
+        @($res.data.rules | ForEach-Object { $_.rule }) | Should -Be @('doc-size', 'line-length')
+    }
+    It 'still treats a real path as the path' {
+        $r = New-Fixture
+        $res = (Test-OctoAgentDocs $r -Explain -Json 3>$null) | ConvertFrom-Json
+        $res.data.PSObject.Properties.Name | Should -Contain 'findings'
+    }
+    It 'names the rule after each finding so it can be passed to -Explain' {
+        $r = New-Fixture
+        $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
+        $out | Should -Match '\(rule routing-current\)'
+        $out | Should -Match '-Explain <rule>'
     }
 }

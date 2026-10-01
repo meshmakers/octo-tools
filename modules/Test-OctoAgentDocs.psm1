@@ -124,7 +124,9 @@ function Test-OctoAgentDocs {
     With -Explain, list every rule instead of the ones that fired.
 
     .PARAMETER Rule
-    With -Explain, list these rule ids instead of the ones that fired.
+    With -Explain, list these rule ids instead of the ones that fired. Positional, so
+    'Test-OctoAgentDocs -Explain line-length' and '-Explain doc-size,line-length' work;
+    the ids are the names printed as '(rule ...)' after each finding.
 
     .PARAMETER Force
     With -Fix, allow the CLAUDE.md shim to replace a CLAUDE.md that still has real
@@ -161,14 +163,20 @@ function Test-OctoAgentDocs {
     Test-OctoAgentDocs -Explain -All
 
     .EXAMPLE
-    Test-OctoAgentDocs -Explain -Rule doc-size
+    Test-OctoAgentDocs -Explain line-length
 
     .EXAMPLE
     Test-OctoAgentDocs -Fix -WhatIf -Diff
     #>
 
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    # Two parameter sets so the one positional argument can be either the repository
+    # ('Test-OctoAgentDocs octo-tools') or, with -Explain, the rule ids
+    # ('Test-OctoAgentDocs -Explain doc-size,line-length'). A single word binds to both
+    # and falls to the default set, Check; the fallback below then recognises a rule id.
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low', DefaultParameterSetName = 'Check')]
     param(
+        [Parameter(Position = 0, ParameterSetName = 'Check')]
+        [Parameter(ParameterSetName = 'Reference')]
         [string]$Path = ".",
         [switch]$Fix,
         [switch]$Force,
@@ -179,10 +187,19 @@ function Test-OctoAgentDocs {
         [switch]$Diff,
         [switch]$Explain,
         [switch]$All,
+        [Parameter(Position = 0, ParameterSetName = 'Reference')]
         [string[]]$Rule
     )
 
     $ErrorActionPreference = 'Stop'
+
+    # 'Test-OctoAgentDocs -Explain line-length' puts the rule id where -Path binds. A rule
+    # id is never a repository name, so when -Explain is on and the "path" is a known rule
+    # that does not exist on disk, it is the rule.
+    if ($Explain -and -not $Rule -and $Path -ne '.' -and ($script:AgentDocsRuleIds -contains $Path) -and -not (Test-Path -LiteralPath $Path)) {
+        $Rule = @($Path)
+        $Path = '.'
+    }
 
     # Resolve -Path as given; if that misses, fall back to a repository name under
     # $Global:ROOTPATH, the way the other octo-tools cmdlets address repositories.
@@ -400,7 +417,7 @@ function Test-OctoAgentDocs {
                 }) -join ', '
         }
         Write-Host ""
-        Write-Host "$Indent$($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
+        Write-Host "${Indent}rule $($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
         if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host "" }
         if ($Row.why) { Write-Host "$Indent  why: $($Row.why)" }
         if ($Row.fix) { Write-Host "$Indent  fix: $($Row.fix)" }
@@ -1170,8 +1187,9 @@ function Test-OctoAgentDocs {
                 $group = @($findings | Where-Object { $_.tier -eq $t } | Sort-Object -Stable @{ e = { if ($_.severity -eq 'error') { 0 } else { 1 } } }, @{ e = { ($_.file -split ':')[0] } })
                 foreach ($f in $group) {
                     $colour = if ($f.severity -eq 'error') { 'Red' } else { 'DarkYellow' }
-                    $where = if ($f.file) { " $($f.file):" } else { '' }
-                    Write-Host "     [$($f.severity)] $($f.rule)$where $($f.message)" -ForegroundColor $colour
+                    $where = if ($f.file) { "$($f.file): " } else { '' }
+                    Write-Host "     [$($f.severity)] $where$($f.message)" -ForegroundColor $colour -NoNewline
+                    Write-Host "  (rule $($f.rule))" -ForegroundColor DarkGray
                 }
                 if ($Explain) {
                     foreach ($id in @($group | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Write-RuleRow (Get-RuleRow $id) -Indent '     ' }
@@ -1193,7 +1211,7 @@ function Test-OctoAgentDocs {
             Write-Host "  0 error(s), 0 warning(s)" -ForegroundColor Gray
             if ($Explain) { Write-Host "  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All" -ForegroundColor Gray }
         }
-        elseif (-not $Explain) { Write-Host "  add -Explain to see why each rule exists and how to fix it" -ForegroundColor Gray }
+        elseif (-not $Explain) { Write-Host "  add -Explain to see why each rule exists and how to fix it, or -Explain <rule> for one rule" -ForegroundColor Gray }
     }
 
     if ($config.mode -eq 'enforce' -and -not $ok) {
