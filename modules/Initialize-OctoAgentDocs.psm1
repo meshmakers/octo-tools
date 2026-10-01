@@ -99,7 +99,7 @@ function Initialize-OctoAgentDocs {
     function Get-ClaudeState {
         param($Check)
         if (-not (Test-Path -LiteralPath $claudePath)) { return 'absent' }
-        $text = ((Read-OctoAgentDocsText $claudePath) -replace "`r`n", "`n") -replace "`r", "`n"
+        $text = ConvertTo-OctoAgentDocsLf (Read-OctoAgentDocsText $claudePath)
         $isShim = if ($Check -and $Check.data.PSObject.Properties['shim']) { $Check.data.shim -eq 'ok' }
                   else { $text.Trim() -ceq $expectedShim }
         if ($isShim) { return 'shim' }

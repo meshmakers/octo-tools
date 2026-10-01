@@ -6,6 +6,7 @@
 BeforeAll {
     $script:ModuleDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'modules'
     Import-Module (Join-Path $ModuleDir 'OctoJsonOutput.psm1') -Force
+    Import-Module (Join-Path $ModuleDir 'OctoAgentDocs.Common.psm1') -Force
     Import-Module (Join-Path $ModuleDir 'Test-OctoAgentDocs.psm1') -Force
 
     # A minimal, clean repository: entry point with markers, one routed doc.
@@ -1263,15 +1264,18 @@ Describe 'review pass - case and resolution' {
             Set-Content -LiteralPath (Join-Path $r 'AGENTS.md') -NoNewline
         (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 1
     }
-    It 'treats a word that is both a rule id and a folder under the current directory as the folder' {
+    It 'treats a known rule id as the rule even when a folder of that name exists' {
         $r = New-Fixture
         Push-Location $r
         try {
             New-Item -ItemType Directory -Path (Join-Path $r 'doc-size') -Force | Out-Null
             $res = (Test-OctoAgentDocs -Explain doc-size -Json 3>$null) | ConvertFrom-Json
-            $res.data.PSObject.Properties.Name | Should -Contain 'findings'
+            $res.data.PSObject.Properties.Name | Should -Contain 'rules'
         }
         finally { Pop-Location }
+    }
+    It 'names both readings when the word after -Explain is neither a path nor a rule' {
+        { Test-OctoAgentDocs -Explain octo-comunication-operator 3>$null } | Should -Throw '*neither a repository path nor a rule id*'
     }
 }
 
@@ -1323,8 +1327,8 @@ Describe 'review pass - inputs the checker must survive' {
         '{"schemaVersion":1,"rules":{"routing-current":["off"]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
         (Get-Rules (Get-Result $r) 'required-sections').Count | Should -Be 0
     }
-    It 'reports a mistyped rule after -Explain as an unknown rule, not a missing path' {
-        { Test-OctoAgentDocs -Explain doc-sizee 3>$null } | Should -Throw '*Unknown rule*'
+    It 'reports a mistyped rule after -Explain with the list of rules' {
+        { Test-OctoAgentDocs -Explain doc-sizee 3>$null } | Should -Throw '*Rules: entry-point-lines*'
     }
     It 'matches allowlist subdomains without regard to case' {
         $r = New-Fixture
@@ -1362,5 +1366,52 @@ Describe 'review pass - inputs the checker must survive' {
         $out = & (Get-Process -Id $PID).Path -NoProfile -File $script 2>&1
         Remove-Item -LiteralPath $script -ErrorAction SilentlyContinue
         (($out -join '') | ConvertFrom-Json).command | Should -Be 'Test-OctoAgentDocs'
+    }
+}
+
+Describe 'review pass - references, links, hosts, files' {
+    It 'does not read a glob in backticks as a missing file' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value 'Every `docs/*.md` starts with frontmatter.'
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'resolves a root-relative link from the repository root' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see [the entry](/CLAUDE.md) and [self](/docs/one.md)'
+        (Get-Rules (Get-Result $r) 'reference-resolves' | Where-Object { $_.message -like 'Link target not found*' }).Count | Should -Be 0
+    }
+    It 'refuses a -ConfigPath that does not exist' {
+        $r = New-Fixture
+        { Test-OctoAgentDocs -Path $r -ConfigPath (Join-Path $r 'nope.json') 3>$null } | Should -Throw '*does not exist*'
+    }
+    It 'parses an IPv6 literal URL and checks its host' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see http://[2001:db8::1]:8080/x'
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"],"ignoreLocal":false}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'link-hosts'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match '2001:db8::1'
+    }
+    It 'finds a lowercase readme.md and reports it under its real name' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        'see [x](missing.md)' | Set-Content -LiteralPath (Join-Path $r 'readme.md')
+        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -BeExactly 'readme.md'
+    }
+    It 'measures a doc the same with CRLF and LF line endings' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $p = Join-Path $r 'docs/one.md'
+        $body = (1..600 | ForEach-Object { 'x' * 40 }) -join "`n"          # 24,599 chars with LF
+        [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) + "`n" + $body), [System.Text.UTF8Encoding]::new($false))
+        (Get-Rules (Get-Result $r) 'doc-size').Count | Should -Be 0
+        [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
+        (Get-Rules (Get-Result $r) 'doc-size').Count | Should -Be 0
     }
 }

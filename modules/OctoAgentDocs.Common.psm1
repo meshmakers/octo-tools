@@ -88,6 +88,17 @@ function Format-OctoAgentDocsArgument {
     return "'" + ($Value -replace "'", "''") + "'"
 }
 
+function ConvertTo-OctoAgentDocsLf {
+    <#
+    .SYNOPSIS
+    CRLF and lone CR become LF, so every size, line count and comparison in these tools
+    sees the same text whatever the checkout's line endings.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
+    return (($Text -replace "`r`n", "`n") -replace "`r", "`n")
+}
+
 function Test-OctoAgentDocsShimLike {
     <#
     .SYNOPSIS
@@ -100,7 +111,7 @@ function Test-OctoAgentDocsShimLike {
     #>
     param([AllowNull()][AllowEmptyString()][string]$Content)
     if ([string]::IsNullOrEmpty($Content)) { return $true }
-    $lines = @((($Content -replace "`r`n", "`n") -replace "`r", "`n") -split "`n")
+    $lines = @((ConvertTo-OctoAgentDocsLf $Content) -split "`n")
     $meaningful = @($lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^<!--.*-->$' })
     if ($meaningful.Count -eq 0) { return $true }
     return ($meaningful.Count -eq 1 -and $meaningful[0].Trim() -match '^@\S+$')
@@ -192,6 +203,6 @@ function Get-OctoAgentDocsTierHeading {
 Export-ModuleMember -Function @(
     'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList', 'Get-OctoAgentDocsSeverityList',
     'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
-    'Test-OctoAgentDocsShimLike', 'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
+    'ConvertTo-OctoAgentDocsLf', 'Test-OctoAgentDocsShimLike', 'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
     'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
 )

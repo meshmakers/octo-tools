@@ -199,13 +199,15 @@ function Test-OctoAgentDocs {
 
     $ErrorActionPreference = 'Stop'
 
-    # 'Test-OctoAgentDocs -Explain line-length' puts the rule id where -Path binds. When
-    # -Explain is on and the "path" resolves to nothing - neither as given nor under
-    # ROOTPATH, the same lookup the real path gets - it is a rule id, and a mistyped one
-    # gets the unknown-rule message with the valid ids rather than a missing-path error.
-    if ($Explain -and -not $Rule -and $Path -ne '.' -and -not (Resolve-OctoAgentDocsRepository -Path $Path -AsNullIfMissing)) {
-        $Rule = @($Path)
-        $Path = '.'
+    # 'Test-OctoAgentDocs -Explain line-length' puts the rule id where -Path binds. A known
+    # rule id is the rule, whatever the file system holds; a word that is neither a rule nor
+    # a path - as given or under ROOTPATH - is reported as both at once, because it is a
+    # typo of one or the other and the tool cannot know which.
+    if ($Explain -and -not $Rule -and $Path -ne '.') {
+        if ($script:AgentDocsRuleIds -contains $Path) { $Rule = @($Path); $Path = '.' }
+        elseif (-not (Resolve-OctoAgentDocsRepository -Path $Path -AsNullIfMissing)) {
+            throw "'$Path' is neither a repository path nor a rule id. Rules: $($script:AgentDocsRuleIds -join ', ')"
+        }
     }
 
     $repo = Resolve-OctoAgentDocsRepository -Path $Path
@@ -268,6 +270,9 @@ function Test-OctoAgentDocs {
     $severityRank = @{ off = 0; warn = 1; error = 2 }
     $modeRank = @{ logOnly = 0; enforce = 1 }
 
+    # The repository's own file is optional; a -ConfigPath somebody typed is not - a typo
+    # there would otherwise run CI against the org defaults without a word.
+    if ($ConfigPath -and -not (Test-Path -LiteralPath $ConfigPath)) { throw "-ConfigPath '$ConfigPath' does not exist" }
     $layers = @(
         @{ path = (Join-Path $repo '.agent-docs.json'); trusted = $false }
         @{ path = $ConfigPath; trusted = $true }
@@ -572,7 +577,7 @@ function Test-OctoAgentDocs {
         # template is LF, so both are normalised or every migrated repo fails on Windows.
         # A lone CR is normalised too, and BEFORE Test-IsShimLike sees the text, or a
         # CR-separated shim reads as one line of real content that -Fix refuses to touch.
-        $current = if ($hasClaude) { ((Read-Text $claudePath) -replace "`r`n", "`n") -replace "`r", "`n" } else { $null }
+        $current = if ($hasClaude) { ConvertTo-OctoAgentDocsLf (Read-Text $claudePath) } else { $null }
         # Case-sensitive: '@agents.md' does not resolve to AGENTS.md on a case-sensitive
         # checkout, so it is not the shim.
         $shimVerdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -cne $expected) { 'differs' } else { 'ok' }
@@ -619,7 +624,9 @@ function Test-OctoAgentDocs {
 
     $routes = [System.Collections.Generic.List[object]]::new()
     foreach ($d in $docs) {
-        $content = Read-Text $d.FullName
+        # Normalised like the entry point, so a doc reports the same size and line count
+        # on every checkout whatever its line endings.
+        $content = ConvertTo-OctoAgentDocsLf (Read-Text $d.FullName)
         $fm = Get-Frontmatter $content
         $rel = "docs/$($d.Name)"
         $lineCount = (Get-Lines $content).Count
@@ -697,8 +704,10 @@ function Test-OctoAgentDocs {
     # coverage - every docs/adr/0001-*.md would suddenly owe frontmatter and a route.
     $checkFiles = @()
     if ($entryPath) { $checkFiles += $entryPath }
-    $readme = Join-Path $repo 'README.md'
-    if (Test-Path -LiteralPath $readme) { $checkFiles += $readme }
+    # By name, not by probing 'README.md': a case-insensitive file system would answer yes
+    # for readme.md and the report would then name a file that does not exist on Linux CI.
+    $readme = Get-ChildItem -LiteralPath $repo -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq 'README.md' } | Select-Object -First 1
+    if ($readme) { $checkFiles += $readme.FullName }
     $checkFiles += ($docs | ForEach-Object { $_.FullName })
 
     # INTEGRITY rules ask whether text an agent might read is hiding something, and that
@@ -828,23 +837,23 @@ function Test-OctoAgentDocs {
             $candidates = [System.Collections.Generic.List[string]]::new()
             foreach ($h in [regex]::Matches($content, '(?is)\bhref\s*=\s*(["''])(.*?)\1')) {
                 $v = ([System.Net.WebUtility]::HtmlDecode($h.Groups[2].Value)) -replace '[\t\r\n]', ''
-                if ($v -match '(?i)^\s*https?:[/\\]*([^/\\?#]+)') { $candidates.Add($Matches[1]) }
+                if ($v -match '(?i)^\s*https?:[/\\]*(\[[^\]\s]+\](?::\d+)?|[^/\\?#]+)') { $candidates.Add($Matches[1]) }
             }
             $decoded = [System.Net.WebUtility]::HtmlDecode($content)
-            foreach ($m in [regex]::Matches($decoded, '(?i)\bhttps?:[/\\]*((?:[^\s/\\<>)"''`\]]|[\t\r])+)')) {
+            # The authority is either a bracketed IPv6 literal with an optional port, or
+            # everything up to the first '/', '\' or whitespace. The backslash ends it
+            # because browsers follow the WHATWG rule that '\' is '/' in http(s): in
+            # 'https://evil.example\@docs.claude.com/' the host is evil.example, whatever
+            # follows the '@'. System.Uri does not mimic that - it rejects the host - so the
+            # cut happens here, in the regex, and only the authority is handed to System.Uri
+            # for userinfo, port, IDN and IPv6 handling.
+            foreach ($m in [regex]::Matches($decoded, '(?i)\bhttps?:[/\\]*(\[[^\]\s]+\](?::\d+)?|(?:[^\s/\\<>)"''`\]\[]|[\t\r])+)')) {
                 $candidates.Add(($m.Groups[1].Value -replace '[\t\r]', ''))
             }
             foreach ($candidate in $candidates) {
-                # The host is whatever a BROWSER would connect to. Browsers follow the
-                # WHATWG rule that '\' is '/' in http(s), so in
-                # 'https://evil.example\@docs.claude.com/' the authority ends at the
-                # backslash and the host is evil.example, whatever follows the '@'.
-                # System.Uri does not mimic that - it rejects the host outright - so the
-                # authority is cut at the first backslash here, and only then handed to
-                # System.Uri for userinfo, port and IDN handling. A string .NET still
-                # refuses falls back to the textual host so that a malformed link is
-                # checked rather than silently skipped.
-                $authority = ($candidate -split '\\')[0].TrimEnd('.', ',')
+                # A string .NET still refuses falls back to the textual host so that a
+                # malformed link is checked rather than silently skipped.
+                $authority = $candidate.TrimEnd('.', ',')
                 if (-not $authority) { continue }
                 $uri = $null
                 if ([System.Uri]::TryCreate("http://$authority", [System.UriKind]::Absolute, [ref]$uri) -and $uri.IdnHost) {
@@ -920,7 +929,10 @@ function Test-OctoAgentDocs {
                 $parts = $target -split '#', 2
                 $filePart = $parts[0]
                 $anchor = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-                $resolved = if ([string]::IsNullOrEmpty($filePart)) { $f } else { Join-Path $base $filePart }
+                # A leading '/' is the repository root on GitHub, not the file system root.
+                $resolved = if ([string]::IsNullOrEmpty($filePart)) { $f }
+                            elseif ($filePart.StartsWith('/')) { Join-Path $repo $filePart.TrimStart('/') }
+                            else { Join-Path $base $filePart }
                 if (-not (Test-Path -LiteralPath $resolved)) {
                     Add-Finding 'reference-resolves' $rel "Link target not found: $target"; continue
                 }
@@ -945,6 +957,7 @@ function Test-OctoAgentDocs {
                 }
                 if ($ref -notmatch '/') { continue }
                 if ($ref -match '^\.\.') { continue }
+                if ($ref -match '[*?\[{]') { continue }   # `docs/*.md` describes files, it does not name one
                 if ($siblingPattern -and $ref -match $siblingPattern) {
                     # A sibling that is not checked out is skipped silently, as before.
                     if (Test-PointsAtShim (Join-Path $siblingRoot $ref)) {
@@ -1004,7 +1017,7 @@ function Test-OctoAgentDocs {
         # saved. The ORIGINAL is kept for -Fix, which splices the new block into it with the
         # file's own line endings rather than rewriting every line of a CRLF file.
         $entryRaw = Read-Text $entryPath
-        $entry = ($entryRaw -replace "`r`n", "`n") -replace "`r", "`n"
+        $entry = ConvertTo-OctoAgentDocsLf $entryRaw
         $entryEol = if ($entryRaw.Contains("`r`n")) { "`r`n" } else { "`n" }
         $entryLines = (Get-Lines $entry).Count
         $entryChars = $entry.Length
