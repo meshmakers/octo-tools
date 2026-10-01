@@ -113,25 +113,44 @@ function Initialize-OctoAgentDocs {
     $claudeIsShimLike = (-not $hasClaude) -or (Test-IsShimLike ([System.IO.File]::ReadAllText($claudePath)))
 
     $written = [System.Collections.Generic.List[string]]::new()
-    $next = [System.Collections.Generic.List[string]]::new()
+    # Each next step is what to do and, when there is one, the command that does it, kept
+    # apart so the command is clean to copy and the text is not mistaken for syntax.
+    $next = [System.Collections.Generic.List[object]]::new()
+    function Add-Next { param([string]$What, [string]$Command) $next.Add([ordered]@{ what = $What; command = $Command }) }
+    $checkCmd = "Test-OctoAgentDocs -Path $Path"
+    $hasChecker = [bool](Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)
 
     if ($hasAgents) {
         $state = 'initialised'
-        $next.Add("Test-OctoAgentDocs -Path $repoName -Fix   # regenerate the routing table and the shim")
-        if (Test-Path -LiteralPath $briefPath) { $next.Add("Finish the steps in $briefName and delete it") }
+        # Nothing to scaffold, so the honest next step comes from what the check finds -
+        # suggesting -Fix to a repository whose generated regions are current would imply
+        # something is stale.
+        $check = $null
+        if ($hasChecker) { $check = try { (Test-OctoAgentDocs -Path $repo -Json 3>$null 6>$null) | ConvertFrom-Json } catch { $null } }
+        if ($null -eq $check) {
+            Add-Next 'Check the repository' $checkCmd
+        }
+        else {
+            $stale = @($check.data.findings | Where-Object { $_.rule -in @('routing-current', 'shim-valid') })
+            $other = @($check.data.findings | Where-Object { $_.rule -notin @('routing-current', 'shim-valid') })
+            if ($stale.Count -gt 0) { Add-Next 'Regenerate the routing table and the shim' "$checkCmd -Fix" }
+            if ($other.Count -gt 0) { Add-Next "Resolve $($other.Count) other finding(s)" "$checkCmd -Explain" }
+            if ($stale.Count -eq 0 -and $other.Count -eq 0) { Add-Next 'Clean - nothing to do' $null }
+        }
+        if (Test-Path -LiteralPath $briefPath) { Add-Next "Finish the steps in $briefName and delete it" $null }
     }
     elseif (-not $claudeIsShimLike) {
         $state = 'migration'
         if (Test-Path -LiteralPath $briefPath) {
-            $next.Add("$briefName already exists - continue with its steps")
+            Add-Next "$briefName already exists - continue with its steps" $null
         }
         elseif ($PSCmdlet.ShouldProcess($briefName, 'Write the migration brief')) {
             Write-Text $briefPath (New-MigrationBrief -Repo $repoName -Config $config -Sections $sections -ShimLines $shimLines)
             $written.Add($briefName)
         }
-        $next.Add("Open $briefName with your coding agent and follow its steps")
-        $next.Add("Test-OctoAgentDocs -Path $repoName   # after every step")
-        $next.Add("Delete $briefName in the migration commit")
+        Add-Next "Open $briefName with your coding agent and follow its steps" $null
+        Add-Next 'Check after every step' $checkCmd
+        Add-Next "Delete $briefName in the migration commit" $null
     }
     else {
         $state = 'created'
@@ -154,13 +173,11 @@ function Initialize-OctoAgentDocs {
             # Fills the (empty) routing table so the first check is clean. Quiet: the
             # summary below is the report. The checker ships beside this module, but a
             # standalone import is possible, so its absence is a next step, not a crash.
-            if (Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue) {
-                $null = Test-OctoAgentDocs -Path $repo -Fix -Json 3>$null 6>$null
-            }
-            else { $next.Add("Import Test-OctoAgentDocs.psm1 and run Test-OctoAgentDocs -Path $repoName -Fix") }
+            if ($hasChecker) { $null = Test-OctoAgentDocs -Path $repo -Fix -Json 3>$null 6>$null }
+            else { Add-Next 'Import Test-OctoAgentDocs.psm1 and fill the routing table' "$checkCmd -Fix" }
         }
-        $next.Add("Write the sections in AGENTS.md; the checker reports a missing one, never fills it")
-        $next.Add("Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then Test-OctoAgentDocs -Path $repoName -Fix")
+        Add-Next 'Write the sections in AGENTS.md; the checker reports a missing one, never fills it' $null
+        Add-Next "Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then regenerate the table" "$checkCmd -Fix"
     }
 
     # ------------------------------------------------------------------ output
@@ -176,7 +193,10 @@ function Initialize-OctoAgentDocs {
     Write-Host "Agent docs init: $repoName - $state" -ForegroundColor Yellow
     if ($written.Count -gt 0) { Write-Host "  wrote $($written -join ', ')" -ForegroundColor Cyan }
     elseif (-not $WhatIfPreference) { Write-Host "  nothing written" -ForegroundColor Cyan }
-    foreach ($n in $next) { Write-Host "  next: $n" -ForegroundColor Gray }
+    foreach ($n in $next) {
+        Write-Host "  next: $($n.what)" -ForegroundColor Gray
+        if ($n.command) { Write-Host "        $($n.command)" -ForegroundColor White }
+    }
 }
 
 # Renders modules/agent-docs-migration.template.md with the values the ruleset enforces, so

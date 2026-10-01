@@ -985,11 +985,11 @@ Describe 'AB#5457 - explain' {
         }
         foreach ($id in $rules.ruleDocs.Keys) { $rules.rules.ContainsKey($id) | Should -BeTrue -Because "ruleDocs names '$id', which is not a rule" }
     }
-    It 'lists every rule with its effective severity and reason, and scans nothing' {
+    It 'with -All lists every rule with its effective severity and reason, and scans nothing' {
         $r = New-Fixture
-        # No -Fix run here: a scan would report the routing table as stale. -Explain must
-        # not report that, because it must not scan.
-        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        # No -Fix run here: a scan would report the routing table as stale. The reference
+        # must not report that, because it must not scan.
+        $res = (Test-OctoAgentDocs -Path $r -Explain -All -Json 3>$null) | ConvertFrom-Json
         $res.data.rules.Count | Should -Be 14
         ($res.data.rules | Where-Object { $_.rule -eq 'doc-size' }).why | Should -Match 'loaded whole'
         $res.data.PSObject.Properties.Name | Should -Not -Contain 'findings'
@@ -1004,7 +1004,7 @@ Describe 'AB#5457 - explain' {
     }
     It 'marks the non-relaxable rules' {
         $r = New-Fixture
-        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        $res = (Test-OctoAgentDocs -Path $r -Explain -All -Json 3>$null) | ConvertFrom-Json
         ($res.data.rules | Where-Object { $_.rule -eq 'no-invisible-characters' }).nonRelaxable | Should -BeTrue
         ($res.data.rules | Where-Object { $_.rule -eq 'doc-size' }).nonRelaxable | Should -BeFalse
     }
@@ -1015,7 +1015,29 @@ Describe 'AB#5457 - explain' {
     It 'points a finding at -Explain' {
         $r = New-Fixture
         $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
-        $out | Should -Match 'Test-OctoAgentDocs -Explain -Rule .*routing-current'
+        $out | Should -Match 'add -Explain'
+    }
+    It 'by default runs the check and explains only the rules that fired' {
+        $r = New-Fixture
+        # Fresh fixture: the routing table is stale, nothing else is wrong.
+        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        (Get-Rules $res 'routing-current').Count | Should -Be 1
+        @($res.data.explanations).Count | Should -Be 1
+        $res.data.explanations[0].rule | Should -Be 'routing-current'
+        $res.data.explanations[0].fix | Should -Match '-Fix'
+    }
+    It 'explains nothing on a clean repository and points at the reference' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $res = (Test-OctoAgentDocs -Path $r -Explain -Json 3>$null) | ConvertFrom-Json
+        @($res.data.explanations).Count | Should -Be 0
+        $out = Test-OctoAgentDocs -Path $r -Explain 6>&1 3>$null | Out-String
+        $out | Should -Match '-Explain -All'
+    }
+    It 'warns when -All is given without -Explain' {
+        $r = New-Fixture
+        $warn = Test-OctoAgentDocs -Path $r -All -Json 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        ($warn | Out-String) | Should -Match 'only widens -Explain'
     }
 }
 

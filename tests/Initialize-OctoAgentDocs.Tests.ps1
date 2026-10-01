@@ -47,7 +47,7 @@ Describe 'greenfield repository' {
         $check.data.summary.errors | Should -Be 0
         $check.data.summary.warnings | Should -Be 0
     }
-    It 'is idempotent' {
+    It 'is idempotent and says so' {
         $r = New-Repo
         Get-Init $r | Out-Null
         $agents = Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw
@@ -55,6 +55,27 @@ Describe 'greenfield repository' {
         $res.data.state | Should -Be 'initialised'
         $res.data.filesWritten.Count | Should -Be 0
         Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw | Should -Be $agents
+        # A current repository must not be told to -Fix anything.
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Clean'
+        ($res.data.nextSteps | ForEach-Object { $_.command }) -join ' ' | Should -Not -Match '-Fix'
+    }
+    It 'suggests -Fix for an initialised repository only when a generated region is stale' {
+        $r = New-Repo
+        Get-Init $r | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $r 'docs') -Force | Out-Null
+        "---`ndescription: A doc.`napplies_to: src/**`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'initialised'
+        $steps = @($res.data.nextSteps)
+        ($steps | Where-Object { $_.command -like '*-Fix' }).Count | Should -Be 1
+        ($steps | Where-Object { $_.command -like '*-Fix' })[0].what | Should -Match 'routing table'
+    }
+    It 'keeps the command apart from the explanation in the output' {
+        $r = New-Repo
+        $out = Initialize-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
+        $out | Should -Match '(?m)^\s+next: Add docs/<topic>\.md'
+        $out | Should -Match '(?m)^\s+Test-OctoAgentDocs -Path .* -Fix\s*$'
+        $out | Should -Not -Match '#'
     }
     It 'writes nothing with -WhatIf' {
         $r = New-Repo

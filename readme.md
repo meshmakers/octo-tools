@@ -156,14 +156,15 @@ Test-OctoAgentDocs                                   # current repo, report only
 Test-OctoAgentDocs -Path octo-communication-operator # or a repo name under $ROOTPATH
 Test-OctoAgentDocs -Fix                              # rewrite the generated regions
 Test-OctoAgentDocs -Fix -WhatIf -Diff                # show what -Fix would write, write nothing
-Test-OctoAgentDocs -Explain                          # every rule: severity, limits, why, fix
-Test-OctoAgentDocs -Explain -Rule doc-size           # one rule
+Test-OctoAgentDocs -Explain                          # the check, plus why and fix for each rule that fired
+Test-OctoAgentDocs -Explain -All                     # every rule: severity, limits, why, fix; no scan
+Test-OctoAgentDocs -Explain -Rule doc-size           # one rule; no scan
 Test-OctoAgentDocs -Mode enforce -Json               # for a pipeline step
 ```
 
-Every finding names its rule, and `-Explain -Rule <id>` says why the rule exists and what to do
-about it. That text lives in the ruleset (`ruleDocs`), so the explanation, this README and the
-migration brief below cannot drift from what is enforced.
+Every finding names its rule. `-Explain` adds, for each rule that fired, why it exists and what to
+do about it; `-Explain -All` is the full reference. That text lives in the ruleset (`ruleDocs`), so
+the explanation, this README and the migration brief below cannot drift from what is enforced.
 
 It checks two things that are easy to get wrong by hand and one that is impossible to
 see: that the always-loaded entry point stays inside its budget, that every doc is

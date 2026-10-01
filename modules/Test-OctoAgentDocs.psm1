@@ -115,13 +115,16 @@ function Test-OctoAgentDocs {
     block that -Fix would write. Combine with -Fix -WhatIf to preview a rewrite.
 
     .PARAMETER Explain
-    Print every rule with its effective severity, its options and the reason it exists,
-    then return without checking anything. The text comes from 'ruleDocs' in the ruleset,
-    so it cannot drift from what is enforced. Overrides in the repository's own
-    .agent-docs.json are applied, so the output is what THIS repository is held to.
+    Run the check and, for every rule that produced a finding, add why the rule exists and
+    what to do about it. The text comes from 'ruleDocs' in the ruleset, so it cannot drift
+    from what is enforced. With -All or -Rule nothing is scanned: the rules are listed as a
+    reference, with the severity this repository ends up with after its own overrides.
+
+    .PARAMETER All
+    With -Explain, list every rule instead of the ones that fired.
 
     .PARAMETER Rule
-    With -Explain, restrict the output to these rule ids.
+    With -Explain, list these rule ids instead of the ones that fired.
 
     .PARAMETER Force
     With -Fix, allow the CLAUDE.md shim to replace a CLAUDE.md that still has real
@@ -149,6 +152,12 @@ function Test-OctoAgentDocs {
     Test-OctoAgentDocs -Mode enforce -Json
 
     .EXAMPLE
+    Test-OctoAgentDocs -Path octo-communication-operator -Explain
+
+    .EXAMPLE
+    Test-OctoAgentDocs -Explain -All
+
+    .EXAMPLE
     Test-OctoAgentDocs -Explain -Rule doc-size
 
     .EXAMPLE
@@ -166,6 +175,7 @@ function Test-OctoAgentDocs {
         [switch]$Json,
         [switch]$Diff,
         [switch]$Explain,
+        [switch]$All,
         [string[]]$Rule
     )
 
@@ -350,54 +360,63 @@ function Test-OctoAgentDocs {
     function Test-RuleOn { param([string]$Id) (Get-Severity $Id) -ne 'off' }
 
     # ---------------------------------------------------------------- explain
-    # One screen that answers "what will this check, and why": the rule, the severity
-    # this repository ends up with after its overrides, the thresholds, and the reason.
-    # Nothing is scanned. The reason text lives in the ruleset, so this output, the
-    # README and the migration brief cannot say three different things.
+    # The reason text lives in the ruleset, so this output, the README and the migration
+    # brief cannot say three different things. Two shapes: a REFERENCE (-All or -Rule) that
+    # scans nothing and lists the rules with the severity this repository ends up with,
+    # and the default, which runs the check and explains only the rules that fired - the
+    # question people actually have is "why is my repository failing".
     if ($Rule -and -not $Explain) { Write-Warning "-Rule only filters -Explain output; ignored without -Explain" }
-    if ($Explain) {
+    if ($All -and -not $Explain) { Write-Warning "-All only widens -Explain output; ignored without -Explain" }
+    function Get-RuleRow {
+        param([string]$Id)
+        $o = if ($config.rules[$Id].Count -gt 1) { $config.rules[$Id][1] } else { @{} }
+        $doc = if ($ruleDocs[$Id] -is [hashtable]) { $ruleDocs[$Id] } else { @{} }
+        [ordered]@{
+            rule         = $Id
+            severity     = Get-Severity $Id
+            nonRelaxable = ($floor -contains $Id)
+            options      = $o
+            why          = [string]$doc['why']
+            fix          = [string]$doc['fix']
+        }
+    }
+    function Write-RuleRow {
+        param($Row, [switch]$WithOptions)
+        $colour = switch ($Row.severity) { 'error' { 'Red' } 'warn' { 'DarkYellow' } default { 'DarkGray' } }
+        $lock = if ($Row.nonRelaxable) { ' (non-relaxable)' } else { '' }
+        # Scalars inline, lists as a count: 'allow' has six hosts and the table does not
+        # need them, -Json has the full options.
+        $opts = ''
+        if ($WithOptions) {
+            $opts = @(foreach ($k in ($Row.options.Keys | Sort-Object)) {
+                    $v = $Row.options[$k]
+                    if ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) { "$k=[$(@($v).Count)]" } else { "$k=$v" }
+                }) -join ', '
+        }
+        Write-Host ""
+        Write-Host "  $($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
+        if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host "" }
+        if ($Row.why) { Write-Host "    why: $($Row.why)" }
+        if ($Row.fix) { Write-Host "    fix: $($Row.fix)" }
+    }
+    if ($Explain -and ($All -or $Rule)) {
         $ids = @($script:AgentDocsRuleIds)
         if ($Rule) {
             $unknown = @($Rule | Where-Object { $script:AgentDocsRuleIds -notcontains $_ })
             if ($unknown.Count -gt 0) { throw "Unknown rule(s): $($unknown -join ', '). Known: $($script:AgentDocsRuleIds -join ', ')" }
             $ids = @($Rule)
         }
-        $rows = foreach ($id in $ids) {
-            $o = if ($config.rules[$id].Count -gt 1) { $config.rules[$id][1] } else { @{} }
-            $doc = if ($ruleDocs[$id] -is [hashtable]) { $ruleDocs[$id] } else { @{} }
-            [ordered]@{
-                rule         = $id
-                severity     = Get-Severity $id
-                nonRelaxable = ($floor -contains $id)
-                options      = $o
-                why          = [string]$doc['why']
-                fix          = [string]$doc['fix']
-            }
-        }
+        $rows = @(foreach ($id in $ids) { Get-RuleRow $id })
         if ($Json) {
             Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{
                 repository = Split-Path -Leaf $repo
                 mode       = $config.mode
-                rules      = @($rows)
+                rules      = $rows
             })
             return
         }
         Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode); severity after this repository's overrides)" -ForegroundColor Yellow
-        foreach ($r in $rows) {
-            $colour = switch ($r.severity) { 'error' { 'Red' } 'warn' { 'DarkYellow' } default { 'DarkGray' } }
-            $lock = if ($r.nonRelaxable) { ' (non-relaxable)' } else { '' }
-            # Scalars inline, lists as a count: 'allow' has six hosts and the table does
-            # not need them, -Json has the full options.
-            $opts = @(foreach ($k in ($r.options.Keys | Sort-Object)) {
-                    $v = $r.options[$k]
-                    if ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) { "$k=[$(@($v).Count)]" } else { "$k=$v" }
-                }) -join ', '
-            Write-Host ""
-            Write-Host "  $($r.rule)  [$($r.severity)]$lock" -ForegroundColor $colour -NoNewline
-            if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host "" }
-            if ($r.why) { Write-Host "    why: $($r.why)" }
-            if ($r.fix) { Write-Host "    fix: $($r.fix)" }
-        }
+        foreach ($r in $rows) { Write-RuleRow $r -WithOptions }
         Write-Host ""
         Write-Host "  Overrides: .agent-docs.json in the repository, then -ConfigPath, then -Mode. Non-relaxable rules can be raised there, never lowered." -ForegroundColor Gray
         return
@@ -1087,6 +1106,7 @@ function Test-OctoAgentDocs {
             diffs        = @($diffs)
             routes       = $routes
             findings     = $findings
+            explanations = @(if ($Explain) { foreach ($id in @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Get-RuleRow $id } })
             ruleSet      = $config.rules
             summary      = [ordered]@{ errors = $errors.Count; warnings = $warnings.Count; success = $ok }
         })
@@ -1110,10 +1130,13 @@ function Test-OctoAgentDocs {
             }
         }
         Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s)" -ForegroundColor Gray
-        if ($findings.Count -gt 0) {
-            $ruleIds = @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)
-            Write-Host "  why and how to fix: Test-OctoAgentDocs -Explain -Rule $($ruleIds -join ',')" -ForegroundColor Gray
+        $firedRules = @($findings | ForEach-Object { $_.rule } | Sort-Object -Unique)
+        if ($Explain -and $firedRules.Count -gt 0) {
+            foreach ($id in $firedRules) { Write-RuleRow (Get-RuleRow $id) }
+            Write-Host ""
         }
+        elseif ($Explain) { Write-Host "  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All" -ForegroundColor Gray }
+        elseif ($firedRules.Count -gt 0) { Write-Host "  add -Explain to see why each rule exists and how to fix it" -ForegroundColor Gray }
     }
 
     if ($config.mode -eq 'enforce' -and -not $ok) {
