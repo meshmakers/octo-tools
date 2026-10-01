@@ -1075,3 +1075,18 @@ Describe 'AB#5457 - migration-pending' {
         (Get-Rules (Get-Result $r) 'migration-pending').Count | Should -Be 0
     }
 }
+
+Describe 'AB#5457 - review pass' {
+    It 'shows no shim diff for a CLAUDE.md that -Fix would refuse to touch' {
+        $r = New-Fixture -Agents
+        '# real content' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        $res = (Test-OctoAgentDocs -Path $r -Diff -Json 3>$null) | ConvertFrom-Json
+        @($res.data.diffs | Where-Object { $_.region -eq 'shim' }).Count | Should -Be 0
+        (Get-Rules $res 'shim-valid').Count | Should -Be 1
+    }
+    It 'warns when -Rule is given without -Explain' {
+        $r = New-Fixture
+        $warn = Test-OctoAgentDocs -Path $r -Rule doc-size -Json 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        ($warn | Out-String) | Should -Match 'only filters -Explain'
+    }
+}

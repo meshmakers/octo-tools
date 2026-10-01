@@ -152,8 +152,12 @@ function Initialize-OctoAgentDocs {
         }
         if ($written.Contains('AGENTS.md')) {
             # Fills the (empty) routing table so the first check is clean. Quiet: the
-            # summary below is the report.
-            $null = Test-OctoAgentDocs -Path $repo -Fix -Json 3>$null 6>$null
+            # summary below is the report. The checker ships beside this module, but a
+            # standalone import is possible, so its absence is a next step, not a crash.
+            if (Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue) {
+                $null = Test-OctoAgentDocs -Path $repo -Fix -Json 3>$null 6>$null
+            }
+            else { $next.Add("Import Test-OctoAgentDocs.psm1 and run Test-OctoAgentDocs -Path $repoName -Fix") }
         }
         $next.Add("Write the sections in AGENTS.md; the checker reports a missing one, never fills it")
         $next.Add("Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then Test-OctoAgentDocs -Path $repoName -Fix")

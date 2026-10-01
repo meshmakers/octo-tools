@@ -354,6 +354,7 @@ function Test-OctoAgentDocs {
     # this repository ends up with after its overrides, the thresholds, and the reason.
     # Nothing is scanned. The reason text lives in the ruleset, so this output, the
     # README and the migration brief cannot say three different things.
+    if ($Rule -and -not $Explain) { Write-Warning "-Rule only filters -Explain output; ignored without -Explain" }
     if ($Explain) {
         $ids = @($script:AgentDocsRuleIds)
         if ($Rule) {
@@ -568,7 +569,9 @@ function Test-OctoAgentDocs {
         $current = if ($hasClaude) { ((Read-Text $claudePath) -replace "`r`n", "`n") -replace "`r", "`n" } else { $null }
         if (($null -eq $current) -or ($current.Trim() -ne $expected)) {
             $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
-            Add-Diff 'CLAUDE.md' 'shim' ([string]$current) "$expected`n"
+            # A diff shows what -Fix WOULD write. For a CLAUDE.md with real content -Fix
+            # writes nothing, so printing the whole file as removed lines would be a lie.
+            if ($safe) { Add-Diff 'CLAUDE.md' 'shim' ([string]$current) "$expected`n" }
             if ($Fix -and $safe -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) {
                 Write-Text $claudePath "$expected`n"
                 $written.Add('CLAUDE.md')
