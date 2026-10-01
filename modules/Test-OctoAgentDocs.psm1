@@ -126,7 +126,7 @@ function Test-OctoAgentDocs {
     .PARAMETER Rule
     With -Explain, list these rule ids instead of the ones that fired. Positional, so
     'Test-OctoAgentDocs -Explain line-length' and '-Explain doc-size,line-length' work;
-    the ids are the names printed as '(rule ...)' after each finding.
+    the ids are the names in the second column of every finding.
 
     .PARAMETER Force
     With -Fix, allow the CLAUDE.md shim to replace a CLAUDE.md that still has real
@@ -1185,11 +1185,15 @@ function Test-OctoAgentDocs {
                 # stable, so the findings of one file keep the order they were detected in
                 # - line 7 before line 13, the "N further" summary last.
                 $group = @($findings | Where-Object { $_.tier -eq $t } | Sort-Object -Stable @{ e = { if ($_.severity -eq 'error') { 0 } else { 1 } } }, @{ e = { ($_.file -split ':')[0] } })
+                # Severity, then the rule NAME in its own column so it reads as the id to
+                # pass to -Explain, then file and message aligned after it.
+                $width = ($group | ForEach-Object { $_.rule.Length } | Measure-Object -Maximum).Maximum
                 foreach ($f in $group) {
                     $colour = if ($f.severity -eq 'error') { 'Red' } else { 'DarkYellow' }
                     $where = if ($f.file) { "$($f.file): " } else { '' }
-                    Write-Host "     [$($f.severity)] $where$($f.message)" -ForegroundColor $colour -NoNewline
-                    Write-Host "  (rule $($f.rule))" -ForegroundColor DarkGray
+                    Write-Host "     [$($f.severity)]".PadRight(13) -ForegroundColor $colour -NoNewline
+                    Write-Host $f.rule.PadRight($width + 2) -ForegroundColor Cyan -NoNewline
+                    Write-Host "$where$($f.message)" -ForegroundColor $colour
                 }
                 if ($Explain) {
                     foreach ($id in @($group | ForEach-Object { $_.rule } | Sort-Object -Unique)) { Write-RuleRow (Get-RuleRow $id) -Indent '     ' }

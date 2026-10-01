@@ -1237,10 +1237,11 @@ Describe 'explain - the rule id is positional' {
         $res = (Test-OctoAgentDocs $r -Explain -Json 3>$null) | ConvertFrom-Json
         $res.data.PSObject.Properties.Name | Should -Contain 'findings'
     }
-    It 'names the rule after each finding so it can be passed to -Explain' {
+    It 'leads each finding with its severity and rule name' {
         $r = New-Fixture
         $out = Test-OctoAgentDocs -Path $r 6>&1 3>$null | Out-String
-        $out | Should -Match '\(rule routing-current\)'
+        $out | Should -Match '(?m)^\s+\[error\]\s+$'          # severity record, then the rule name record
+        $out | Should -Match '(?m)^routing-current\s+$'
         $out | Should -Match '-Explain <rule>'
     }
 }
