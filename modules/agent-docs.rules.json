@@ -118,9 +118,7 @@
     ],
     "migration-pending": [
       "warn",
-      {
-        "file": "AGENTS-MIGRATION.md"
-      }
+      {}
     ]
   },
   "tiers": {
@@ -221,6 +219,6 @@
   "_nonRelaxable_note": "A repository's own .agent-docs.json may RAISE these rules but never lower them, because that file lives in the branch under review and the pull request carrying a payload can carry the opt-out with it. -ConfigPath is exempt: it comes from whoever runs the tool. To change one of these, change this file.",
   "_scan_note": "The integrity rules (no-invisible-characters, link-hosts) read every *.md in the repository, dotfolders included, minus these path segments - a nested AGENTS.md or a .claude/ rule is loaded by an agent without appearing in any routing table. The structural rules stay on the routed set.",
   "_ruleDocs_note": "The single source for Test-OctoAgentDocs -Explain, the README rules table and the migration brief. One sentence each: 'why' states the cost the rule prevents, 'fix' names the first thing to do. English only.",
-  "_migration_pending_note": "Initialize-OctoAgentDocs writes AGENTS-MIGRATION.md into a repository that still has a real CLAUDE.md. The brief is meant to be deleted in the migration commit; this rule nags until it is.",
+  "_migration_pending_note": "Initialize-OctoAgentDocs writes AGENTS-MIGRATION.md into a repository that still has a real CLAUDE.md. The brief is meant to be deleted in the migration commit; this rule nags until it is. The file name is fixed, defined once in OctoAgentDocs.Common.psm1.",
   "_tiers_note": "The order findings are reported in and the order the migration brief says to fix them. Each ruleDocs entry names its tier. Severity is unaffected: a tier is about what to do first, not about how wrong something is."
 }

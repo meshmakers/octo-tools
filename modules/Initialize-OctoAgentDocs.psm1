@@ -1,38 +1,44 @@
+# Plain import, not -Force: a forced import from inside a module re-homes the shared module
+# into this module's scope and removes it from the session, which breaks the other callers.
+Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
+
 function Initialize-OctoAgentDocs {
     <#
     .SYNOPSIS
     Gives a repository the minimal agent-docs shape, or a migration brief when it already has
-    a hand-written CLAUDE.md.
+    a hand-written CLAUDE.md, and reports how far the migration has come.
 
     .DESCRIPTION
     Every run ends with the same five-row checklist - AGENTS.md, CLAUDE.md, docs/, the
     migration brief, the check - marked done (check mark), open (cross) or not applicable
-    yet (dot), and
-    the next steps are derived from the open rows. Four states, decided from what is
-    already in the repository, and the cmdlet never overwrites a file in any of them:
+    yet (dot), and the next steps are derived from the open rows. Four states, decided from
+    what is already in the repository, and the cmdlet never overwrites a file in any of them:
 
       migrated     AGENTS.md exists, CLAUDE.md is the shim and no migration brief is left.
                    Nothing is written. The next step follows from the check: -Fix when a
                    generated region is stale, -Explain when something else is open,
                    otherwise none.
-      migrating    AGENTS.md exists but CLAUDE.md still has real content, or the
-                   migration brief is still present. Nothing is written; the next steps
-                   name what is left.
+      migrating    AGENTS.md exists but CLAUDE.md is not yet the shim - real content, or a
+                   thin import pointing elsewhere - or the migration brief is still present.
+                   Nothing is written; the next steps name what is left.
       migration    no AGENTS.md, but a CLAUDE.md with real content. Only
                    AGENTS-MIGRATION.md is written: a brief for the coding agent and the
                    developer doing the migration, rendered from the ruleset so it carries
                    the budgets, the required sections and the shim text as enforced.
                    Test-OctoAgentDocs warns while the brief exists (migration-pending).
-      created      neither file, or only a shim-like CLAUDE.md. AGENTS.md is written with the
-                   required sections and the routing markers, CLAUDE.md with the shim, and
-                   Test-OctoAgentDocs -Fix fills the routing table. No docs/ folder and no
-                   .agent-docs.json: the first routed doc creates the folder, and an override
-                   file is something a repository adds when it has a reason.
+      created      neither file, or a CLAUDE.md that holds nothing but comments and an
+                   @import. AGENTS.md is written with the required sections and the routing
+                   markers; CLAUDE.md is written with the shim only when it is absent - an
+                   existing import, however thin, is left for Test-OctoAgentDocs -Fix,
+                   which has the guard for replacing it. No docs/ folder and no
+                   .agent-docs.json: the first routed doc creates the folder, and an
+                   override file is something a repository adds when it has a reason.
 
     Section names, the shim text and the budgets come from the BUILT-IN ruleset shipped with
     octo-tools, not from a repository override: a repository being initialised has no
     override yet, and a repository being migrated should see the org defaults it will be
-    held to.
+    held to. The check this cmdlet runs for the checklist always runs in logOnly mode: it
+    wants the data, not the gate.
 
     .PARAMETER Path
     Repository to initialise: a path, or a repository name resolved under $Global:ROOTPATH
@@ -50,7 +56,6 @@ function Initialize-OctoAgentDocs {
 
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the octo-tools profile contract')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'AgentDocs is the name of the thing being initialised')]
     param(
         [string]$Path = ".",
@@ -59,17 +64,7 @@ function Initialize-OctoAgentDocs {
 
     $ErrorActionPreference = 'Stop'
 
-    $repo = try { (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path } catch { $null }
-    if (-not $repo -and $Global:ROOTPATH) {
-        $underRoot = Join-Path $Global:ROOTPATH $Path
-        $repo = try { (Resolve-Path -LiteralPath $underRoot -ErrorAction Stop).Path } catch { $null }
-    }
-    if (-not $repo) {
-        $tried = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
-        $msg = "Path '$Path' does not exist (resolved to '$tried')"
-        if ($Global:ROOTPATH) { $msg += " and not under ROOTPATH '$Global:ROOTPATH'" }
-        throw $msg
-    }
+    $repo = Resolve-OctoAgentDocsRepository -Path $Path
     $repoName = Split-Path -Leaf $repo
 
     # ------------------------------------------------------------------ ruleset
@@ -84,44 +79,34 @@ function Initialize-OctoAgentDocs {
         if ($r.Count -gt 1 -and $r[1] -is [hashtable]) { return $r[1] }
         return @{}
     }
-    function Get-RuleSeverity {
-        param([string]$Id)
-        $r = $config.rules[$Id]
-        if ($r -is [string]) { return $r }
-        return [string]$r[0]
-    }
 
     $sections = @((Get-RuleOptions 'required-sections')['sections'])
     if ($sections.Count -eq 0) { $sections = @('Read before you change', 'Build & test', 'Before you commit', 'Rules') }
     $shimLines = @((Get-RuleOptions 'shim-valid')['content'])
     if ($shimLines.Count -eq 0) { $shimLines = @('@AGENTS.md') }
-    $briefName = [string]((Get-RuleOptions 'migration-pending')['file'])
-    if (-not $briefName) { $briefName = 'AGENTS-MIGRATION.md' }
-    $startMarker = '<!-- >>> generated: routing -->'
-    $endMarker = '<!-- <<< end generated: routing -->'
+    $briefName = Get-OctoAgentDocsConstant BriefName
+    $startMarker = Get-OctoAgentDocsConstant RoutingStart
+    $endMarker = Get-OctoAgentDocsConstant RoutingEnd
 
-    function Write-Text {
-        param([string]$P, [string]$Content)
-        [System.IO.File]::WriteAllText($P, $Content, [System.Text.UTF8Encoding]::new($false))
-    }
-
-    # Same test as Test-OctoAgentDocs uses before it will replace a CLAUDE.md: nothing but
-    # HTML comments and at most one @import line means nobody's work is in the file.
-    function Test-IsShimLike {
-        param([string]$Content)
-        $lines = @(($Content -replace "`r`n", "`n") -replace "`r", "`n" -split "`n")
-        $meaningful = @($lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^<!--.*-->$' })
-        if ($meaningful.Count -eq 0) { return $true }
-        return ($meaningful.Count -eq 1 -and $meaningful[0].Trim() -match '^@\S+$')
-    }
-
-    # ------------------------------------------------------------------ state
+    # -------------------------------------------------------------------- state
     $agentsPath = Join-Path $repo 'AGENTS.md'
     $claudePath = Join-Path $repo 'CLAUDE.md'
     $briefPath = Join-Path $repo $briefName
     $hasAgents = Test-Path -LiteralPath $agentsPath
     $hasClaude = Test-Path -LiteralPath $claudePath
-    $claudeIsShimLike = (-not $hasClaude) -or (Test-IsShimLike ([System.IO.File]::ReadAllText($claudePath)))
+    $hasBrief = Test-Path -LiteralPath $briefPath
+    # Four answers: absent; 'shim' (exactly the org shim, compared the way the checker does);
+    # 'import' (thin - comments and one @import - but pointing somewhere else, so not done);
+    # 'real content'.
+    $expectedShim = $shimLines -join "`n"
+    function Get-ClaudeState {
+        if (-not (Test-Path -LiteralPath $claudePath)) { return 'absent' }
+        $text = ((Read-OctoAgentDocsText $claudePath) -replace "`r`n", "`n") -replace "`r", "`n"
+        if ($text.Trim() -ceq $expectedShim) { return 'shim' }
+        if (Test-OctoAgentDocsShimLike $text) { return 'import' }
+        return 'real content'
+    }
+    $claudeState = Get-ClaudeState
 
     $written = [System.Collections.Generic.List[string]]::new()
     # Each next step is what to do and, when there is one, the command that does it, kept
@@ -130,19 +115,25 @@ function Initialize-OctoAgentDocs {
     function Add-Next { param([string]$What, [string]$Command) $next.Add([ordered]@{ what = $What; command = $Command }) }
     $checkCmd = "Test-OctoAgentDocs -Path $(if ($Path -match '\s') { "'$Path'" } else { $Path })"
     $hasChecker = [bool](Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)
+    # The checklist wants the check's DATA, never its gate: a repository that opted up to
+    # enforce must not turn a status report into a throw.
+    function Invoke-Check {
+        param([switch]$Fix)
+        if (-not $hasChecker) { return $null }
+        try { return ((Test-OctoAgentDocs -Path $repo -Mode logOnly -Json -Fix:$Fix 3>$null 6>$null) | ConvertFrom-Json) }
+        catch { return $null }
+    }
 
     # ----------------------------------------------------------------- actions
-    $hasBrief = Test-Path -LiteralPath $briefPath
-    $claudeState = if (-not $hasClaude) { 'absent' } elseif ($claudeIsShimLike) { 'shim' } else { 'real content' }
-
+    $check = $null
     if ($hasAgents) {
         # Nothing to scaffold; the checklist below says whether the migration is finished.
-        $state = if ($hasBrief -or $claudeState -eq 'real content') { 'migrating' } else { 'migrated' }
+        $state = if ($hasBrief -or $claudeState -ne 'shim') { 'migrating' } else { 'migrated' }
     }
     elseif ($claudeState -eq 'real content') {
         $state = 'migration'
         if (-not $hasBrief -and $PSCmdlet.ShouldProcess($briefName, 'Write the migration brief')) {
-            Write-Text $briefPath (Format-MigrationBrief -Repo $repoName -Config $config -Sections $sections -ShimLines $shimLines)
+            Write-OctoAgentDocsText $briefPath (Format-MigrationBrief -Repo $repoName -Config $config -Sections $sections -ShimLines $shimLines)
             $written.Add($briefName)
         }
     }
@@ -156,17 +147,20 @@ function Initialize-OctoAgentDocs {
             if ($first) { [void]$sb.Append("$startMarker`n$endMarker`n`n"); $first = $false }
         }
         if ($PSCmdlet.ShouldProcess('AGENTS.md', 'Write the entry point with the required sections and routing markers')) {
-            Write-Text $agentsPath ($sb.ToString())
+            Write-OctoAgentDocsText $agentsPath ($sb.ToString())
             $written.Add('AGENTS.md')
         }
-        if ($PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) {
-            Write-Text $claudePath (($shimLines -join "`n") + "`n")
+        # The shim is written only where there is no CLAUDE.md at all. A thin existing one
+        # (a comment and an @import to somewhere else) is still somebody's pointer; replacing
+        # it is what Test-OctoAgentDocs -Fix is for, with its guard and its -WhatIf.
+        if (-not $hasClaude -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) {
+            Write-OctoAgentDocsText $claudePath (($shimLines -join "`n") + "`n")
             $written.Add('CLAUDE.md')
         }
-        # Fills the (empty) routing table so the first check is clean. Quiet: the checklist
-        # below is the report. The checker ships beside this module, but a standalone
-        # import is possible, so its absence is a row in the list, not a crash.
-        if ($written.Contains('AGENTS.md') -and $hasChecker) { $null = Test-OctoAgentDocs -Path $repo -Fix -Json 3>$null 6>$null }
+        # One pass fills the (empty) routing table and returns the data the checklist needs,
+        # so the first check is clean and the repository is scanned once. Only when the shim
+        # was ours to write: otherwise -Fix would replace the existing CLAUDE.md.
+        if ($written.Contains('AGENTS.md') -and -not $hasClaude) { $check = Invoke-Check -Fix }
     }
 
     # --------------------------------------------------------------- checklist
@@ -177,11 +171,8 @@ function Initialize-OctoAgentDocs {
     $whatIf = [bool]$WhatIfPreference
     $hasAgentsNow = Test-Path -LiteralPath $agentsPath
     $hasBriefNow = Test-Path -LiteralPath $briefPath
-    $claudeNow = if (-not (Test-Path -LiteralPath $claudePath)) { 'absent' }
-                 elseif (Test-IsShimLike ([System.IO.File]::ReadAllText($claudePath))) { 'shim' }
-                 else { 'real content' }
-    $check = $null
-    if ($hasAgentsNow -and $hasChecker) { $check = try { (Test-OctoAgentDocs -Path $repo -Json 3>$null 6>$null) | ConvertFrom-Json } catch { $null } }
+    $claudeNow = Get-ClaudeState
+    if ($hasAgentsNow -and -not $check) { $check = Invoke-Check }
 
     $rows = [System.Collections.Generic.List[object]]::new()
     function Add-Row { param([string]$Item, $Done, [string]$Fact) $rows.Add([ordered]@{ item = $Item; done = $Done; fact = $Fact }) }
@@ -192,6 +183,7 @@ function Initialize-OctoAgentDocs {
 
     switch ($claudeNow) {
         'shim' { Add-Row 'CLAUDE.md' $true 'shim' }
+        'import' { Add-Row 'CLAUDE.md' $false 'imports something else - not the shim' }
         'real content' { Add-Row 'CLAUDE.md' $false 'real content' }
         default { if ($state -eq 'created' -and $whatIf) { Add-Row 'CLAUDE.md' $null 'would be written' } else { Add-Row 'CLAUDE.md' $false 'absent' } }
     }
@@ -201,7 +193,8 @@ function Initialize-OctoAgentDocs {
         if ($n -gt 0) { Add-Row 'docs/' $true "$n routed" } else { Add-Row 'docs/' $null 'none yet' }
     }
     elseif (-not $hasAgentsNow) { Add-Row 'docs/' $null 'not read until AGENTS.md exists' }
-    else { Add-Row 'docs/' $null 'not read - checker not loaded' }
+    elseif (-not $hasChecker) { Add-Row 'docs/' $null 'not read - checker not loaded' }
+    else { Add-Row 'docs/' $null 'not read - the check failed' }
 
     if ($hasBriefNow -and $written.Contains($briefName)) { Add-Row $briefName $null 'written - delete it when the migration is done' }
     elseif ($hasBriefNow) { Add-Row $briefName $false 'present' }
@@ -216,12 +209,13 @@ function Initialize-OctoAgentDocs {
         if ($e -eq 0 -and $w -eq 0) { Add-Row 'check' $true 'clean' } else { Add-Row 'check' $false "$e error(s), $w warning(s)" }
     }
     elseif (-not $hasAgentsNow) { Add-Row 'check' $null 'not run until AGENTS.md exists' }
-    else { Add-Row 'check' $null 'not run - checker not loaded' }
+    elseif (-not $hasChecker) { Add-Row 'check' $null 'not run - checker not loaded' }
+    else { Add-Row 'check' $null 'failed - run it directly to see why' }
 
     # -------------------------------------------------------------- next steps
+    # State-specific guidance first, then one step per open row, whatever the state.
     switch ($state) {
         'created' {
-            if (-not $hasChecker) { Add-Next 'Import Test-OctoAgentDocs.psm1 and fill the routing table' "$checkCmd -Fix" }
             Add-Next 'Write the AGENTS.md sections; the checker reports a missing one but never writes it' $null
             Add-Next "Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then regenerate the table" "$checkCmd -Fix"
         }
@@ -230,13 +224,16 @@ function Initialize-OctoAgentDocs {
             Add-Next 'Check after every step' $checkCmd
             Add-Next "Delete $briefName in the migration commit" $null
         }
-        default {
-            if ($claudeNow -eq 'real content') { Add-Next 'Move the remaining content out of CLAUDE.md into AGENTS.md or docs/, then let -Fix write the shim' "$checkCmd -Fix" }
-            if ($hasBriefNow) { Add-Next "Finish the steps in $briefName and delete it" $null }
-            if ($stale.Count -gt 0 -and $claudeNow -ne 'real content') { Add-Next 'Regenerate the routing table and the shim' "$checkCmd -Fix" }
-            if ($other.Count -gt 0) { Add-Next "Resolve $($other.Count) open finding(s)" "$checkCmd -Explain" }
-            if (-not $hasChecker) { Add-Next 'Import Test-OctoAgentDocs.psm1 and check the repository' $checkCmd }
+    }
+    if ($state -ne 'migration') {
+        if ($claudeNow -eq 'real content') { Add-Next 'Move the remaining content out of CLAUDE.md into AGENTS.md or docs/, then let -Fix write the shim' "$checkCmd -Fix" }
+        elseif ($claudeNow -eq 'import' -and $hasAgentsNow) { Add-Next 'Replace the existing CLAUDE.md import with the shim and fill the routing table' "$checkCmd -Fix" }
+        if ($hasBriefNow) { Add-Next "Finish the steps in $briefName and delete it" $null }
+        if ($stale.Count -gt 0 -and $claudeNow -ne 'real content' -and -not ($next | Where-Object { $_.command -like '*-Fix' })) {
+            Add-Next 'Regenerate the routing table and the shim' "$checkCmd -Fix"
         }
+        if ($other.Count -gt 0) { Add-Next "Resolve $($other.Count) open finding(s)" "$checkCmd -Explain" }
+        if (-not $hasChecker) { Add-Next 'Import Test-OctoAgentDocs.psm1 and check the repository' $checkCmd }
     }
 
     # ------------------------------------------------------------------ output
@@ -269,13 +266,14 @@ function Initialize-OctoAgentDocs {
 }
 
 # Renders modules/agent-docs-migration.template.md with the values the ruleset enforces, so
-# the brief an agent reads carries the same numbers the checker will hold it to.
+# the brief an agent reads carries the same numbers the checker will hold it to. Returns the
+# text; writing it is the caller's decision.
 function Format-MigrationBrief {
     param([string]$Repo, [hashtable]$Config, [string[]]$Sections, [string[]]$ShimLines)
 
     $templatePath = Join-Path $PSScriptRoot 'agent-docs-migration.template.md'
     if (-not (Test-Path -LiteralPath $templatePath)) { throw "Migration brief template missing at $templatePath" }
-    $t = [System.IO.File]::ReadAllText($templatePath)
+    $t = Read-OctoAgentDocsText $templatePath
 
     function Opt { param([string]$Id, [string]$Name)
         $r = $Config.rules[$Id]
@@ -329,6 +327,9 @@ function Format-MigrationBrief {
 
     $t = $t.Replace('{{REPO}}', $Repo)
     $t = $t.Replace('{{DATE}}', (Get-Date).ToString('yyyy-MM-dd'))
+    $t = $t.Replace('{{BRIEF}}', (Get-OctoAgentDocsConstant BriefName))
+    $t = $t.Replace('{{START_MARKER}}', (Get-OctoAgentDocsConstant RoutingStart))
+    $t = $t.Replace('{{END_MARKER}}', (Get-OctoAgentDocsConstant RoutingEnd))
     $t = $t.Replace('{{SHIM}}', $shim)
     $t = $t.Replace('{{SECTIONS}}', $sectionList)
     $t = $t.Replace('{{BUDGETS}}', $budgets.ToString().TrimEnd("`n"))

@@ -4,6 +4,7 @@
 BeforeAll {
     $script:ModuleDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'modules'
     Import-Module (Join-Path $ModuleDir 'OctoJsonOutput.psm1') -Force
+    Import-Module (Join-Path $ModuleDir 'OctoAgentDocs.Common.psm1') -Force
     Import-Module (Join-Path $ModuleDir 'Test-OctoAgentDocs.psm1') -Force
     Import-Module (Join-Path $ModuleDir 'Initialize-OctoAgentDocs.psm1') -Force
 
@@ -191,5 +192,47 @@ Describe 'repository with only a shim-like CLAUDE.md' {
 Describe 'path resolution' {
     It 'names the resolved path when the repository does not exist' {
         { Initialize-OctoAgentDocs -Path 'no-such-repo-xyz' 3>$null } | Should -Throw '*does not exist*'
+    }
+}
+
+Describe 'review pass - never overwrite, never throw, always a step per open row' {
+    It 'leaves a thin CLAUDE.md that imports something else alone and hands it to -Fix' {
+        $r = New-Repo
+        "<!-- keep this note -->`n@docs/other.md`n" | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'created'
+        @($res.data.filesWritten) | Should -Be @('AGENTS.md')
+        Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw | Should -Match 'keep this note'
+        ($res.data.nextSteps | Where-Object { $_.what -like 'Replace the existing CLAUDE.md*' }).command | Should -Match '-Fix$'
+    }
+    It 'reports the checklist for a repository in enforce mode instead of swallowing the gate' {
+        $r = New-Repo
+        Get-Init $r | Out-Null
+        '{"schemaVersion":1,"mode":"enforce","rules":{"required-sections":["error",{"sections":["Deployment"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $global:LASTEXITCODE = 0
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'migrated'
+        (Get-Row $res 'check').done | Should -BeFalse
+        (Get-Row $res 'check').fact | Should -Match '1 error'
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'Resolve 1 open finding'
+        $global:LASTEXITCODE | Should -Be 0
+    }
+    It 'names a step for a stale brief even in a freshly created repository' {
+        $r = New-Repo
+        '# stale' | Set-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md')
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'created'
+        (Get-Row $res 'AGENTS-MIGRATION.md').done | Should -BeFalse
+        ($res.data.nextSteps | ForEach-Object { $_.what }) -join ' ' | Should -Match 'delete it'
+    }
+    It 'renders the brief name and the markers from the shared constants' {
+        $r = New-Repo
+        '# Legacy' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        Get-Init $r | Out-Null
+        $brief = Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw
+        $brief | Should -Match ([regex]::Escape((Get-OctoAgentDocsConstant RoutingStart)))
+        $brief | Should -Match 'Delete this file.*AGENTS-MIGRATION\.md'
+        $brief | Should -Not -Match '\{\{'
     }
 }

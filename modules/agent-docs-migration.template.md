@@ -1,8 +1,8 @@
 # Agent docs migration brief for {{REPO}}
 
-<!-- Written by Initialize-OctoAgentDocs on {{DATE}}. This is a WORKING FILE for the migration:
-     Test-OctoAgentDocs warns while it exists (rule migration-pending). Delete it in the
-     commit that completes the migration. -->
+<!-- Written by Initialize-OctoAgentDocs on {{DATE}}. {{BRIEF}} is a WORKING FILE for the
+     migration: Test-OctoAgentDocs warns while it exists (rule migration-pending). Delete it
+     in the commit that completes the migration. -->
 
 This repository still carries its agent instructions in `CLAUDE.md`. The target shape is one
 canonical entry point, `AGENTS.md`, that every coding agent reads, a two-line `CLAUDE.md` shim that
@@ -24,8 +24,8 @@ docs/<topic>.md    one topic per file, with frontmatter that routes it (see belo
 {{SECTIONS}}
 
 ```markdown
-<!-- >>> generated: routing -->
-<!-- <<< end generated: routing -->
+{{START_MARKER}}
+{{END_MARKER}}
 ```
 
 Every `docs/*.md` starts with a frontmatter block. `applies_to` is a comma-separated list of path
@@ -70,7 +70,7 @@ what to do.
    frontmatter and is regenerated on every `-Fix`; never edit it by hand.
 6. **Fix every finding** until the checker reports clean. Use `-Diff` to see what a `-Fix` would
    write, and `-Fix -WhatIf` to confirm it writes nothing else.
-7. **Delete this file** (`AGENTS-MIGRATION.md`) in the same commit. The commit message follows the
+7. **Delete this file** (`{{BRIEF}}`) in the same commit. The commit message follows the
    repository's convention and names the work item.
 
 Rules for the agent during the migration:

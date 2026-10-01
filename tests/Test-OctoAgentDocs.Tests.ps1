@@ -1223,13 +1223,13 @@ Describe 'tiered report - counts, precedence and JSON shape' {
 }
 
 Describe 'explain - the rule id is positional' {
-    It 'accepts -Explain <rule> after -Path' {
+    It 'accepts -Explain RULE after -Path' {
         $r = New-Fixture
         $res = (Test-OctoAgentDocs -Path $r -Explain line-length -Json 3>$null) | ConvertFrom-Json
         $res.data.rules.Count | Should -Be 1
         $res.data.rules[0].rule | Should -Be 'line-length'
     }
-    It 'accepts -Explain <rule> without -Path' {
+    It 'accepts -Explain RULE without -Path' {
         $res = (Test-OctoAgentDocs -Explain doc-size,line-length -Json 3>$null) | ConvertFrom-Json
         @($res.data.rules | ForEach-Object { $_.rule }) | Should -Be @('doc-size', 'line-length')
     }
@@ -1244,5 +1244,33 @@ Describe 'explain - the rule id is positional' {
         $out | Should -Match '(?m)^\s+\[error\]\s+$'          # severity record, then the rule name record
         $out | Should -Match '(?m)^routing-current\s+$'
         $out | Should -Match '-Explain <rule>'
+    }
+}
+
+Describe 'review pass - case and resolution' {
+    It 'does not accept a shim whose import differs only in case' {
+        # '@agents.md' resolves to nothing on a case-sensitive checkout.
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        (Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw).Replace('@AGENTS.md', '@agents.md') |
+            Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        (Get-Rules (Get-Result $r) 'shim-valid').Count | Should -Be 1
+    }
+    It 'reports a routing table that differs only in case as stale' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        (Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw).Replace('docs/one.md', 'docs/One.md') |
+            Set-Content -LiteralPath (Join-Path $r 'AGENTS.md') -NoNewline
+        (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 1
+    }
+    It 'treats a word that is both a rule id and a folder under the current directory as the folder' {
+        $r = New-Fixture
+        Push-Location $r
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $r 'doc-size') -Force | Out-Null
+            $res = (Test-OctoAgentDocs -Explain doc-size -Json 3>$null) | ConvertFrom-Json
+            $res.data.PSObject.Properties.Name | Should -Contain 'findings'
+        }
+        finally { Pop-Location }
     }
 }

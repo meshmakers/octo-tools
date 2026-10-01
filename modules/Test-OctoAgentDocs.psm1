@@ -1,3 +1,7 @@
+# Plain import, not -Force: a forced import from inside a module re-homes the shared module
+# into this module's scope and removes it from the session, which breaks the other callers.
+Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
+
 $script:AgentDocsRuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
     'frontmatter-present', 'doc-reachable', 'reference-resolves',
@@ -198,27 +202,14 @@ function Test-OctoAgentDocs {
 
     # 'Test-OctoAgentDocs -Explain line-length' puts the rule id where -Path binds. A rule
     # id is never a repository name, so when -Explain is on and the "path" is a known rule
-    # that does not exist on disk, it is the rule.
-    if ($Explain -and -not $Rule -and $Path -ne '.' -and ($script:AgentDocsRuleIds -contains $Path) -and -not (Test-Path -LiteralPath $Path)) {
+    # that resolves to nothing - neither as given nor under ROOTPATH, the same lookup the
+    # real path gets - it is the rule.
+    if ($Explain -and -not $Rule -and $Path -ne '.' -and ($script:AgentDocsRuleIds -contains $Path) -and -not (Resolve-OctoAgentDocsRepository -Path $Path -AsNullIfMissing)) {
         $Rule = @($Path)
         $Path = '.'
     }
 
-    # Resolve -Path as given; if that misses, fall back to a repository name under
-    # $Global:ROOTPATH, the way the other octo-tools cmdlets address repositories.
-    # The Octo profile starts you at the monorepo root, so a bare repo name is the
-    # form people actually type.
-    $repo = try { (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path } catch { $null }
-    if (-not $repo -and $Global:ROOTPATH) {
-        $underRoot = Join-Path $Global:ROOTPATH $Path
-        $repo = try { (Resolve-Path -LiteralPath $underRoot -ErrorAction Stop).Path } catch { $null }
-    }
-    if (-not $repo) {
-        $tried = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
-        $msg = "Path '$Path' does not exist (resolved to '$tried')"
-        if ($Global:ROOTPATH) { $msg += " and not under ROOTPATH '$Global:ROOTPATH'" }
-        throw $msg
-    }
+    $repo = Resolve-OctoAgentDocsRepository -Path $Path
 
     # ------------------------------------------------------------------ config
     # A broken built-in ruleset is a broken install and throws. A broken repository
@@ -466,11 +457,8 @@ function Test-OctoAgentDocs {
         $findings.Add([ordered]@{ severity = $sev; rule = $Rule; tier = (Get-Tier $Rule); file = $File; message = $Message })
     }
 
-    function Read-Text { param([string]$P) [System.IO.File]::ReadAllText($P) }
-    function Write-Text {
-        param([string]$P, [string]$Content)
-        [System.IO.File]::WriteAllText($P, $Content, [System.Text.UTF8Encoding]::new($false))
-    }
+    function Read-Text { param([string]$P) Read-OctoAgentDocsText -Path $P }
+    function Write-Text { param([string]$P, [string]$Content) Write-OctoAgentDocsText -Path $P -Content $Content }
 
     # -Diff output: one entry per stale generated region. A plain LCS line diff is
     # enough here - the regions are a two-line shim and a table of at most a dozen rows.
@@ -482,13 +470,13 @@ function Test-OctoAgentDocs {
         $lcs = New-Object 'int[,]' ($n + 1), ($m + 1)
         for ($i = $n - 1; $i -ge 0; $i--) {
             for ($j = $m - 1; $j -ge 0; $j--) {
-                $lcs[$i, $j] = if ($Old[$i] -eq $New[$j]) { $lcs[($i + 1), ($j + 1)] + 1 } else { [Math]::Max($lcs[($i + 1), $j], $lcs[$i, ($j + 1)]) }
+                $lcs[$i, $j] = if ($Old[$i] -ceq $New[$j]) { $lcs[($i + 1), ($j + 1)] + 1 } else { [Math]::Max($lcs[($i + 1), $j], $lcs[$i, ($j + 1)]) }
             }
         }
         $out = [System.Collections.Generic.List[string]]::new()
         $i = 0; $j = 0
         while ($i -lt $n -and $j -lt $m) {
-            if ($Old[$i] -eq $New[$j]) { $out.Add("  $($Old[$i])"); $i++; $j++ }
+            if ($Old[$i] -ceq $New[$j]) { $out.Add("  $($Old[$i])"); $i++; $j++ }
             elseif ($lcs[($i + 1), $j] -ge $lcs[$i, ($j + 1)]) { $out.Add("- $($Old[$i])"); $i++ }
             else { $out.Add("+ $($New[$j])"); $j++ }
         }
@@ -593,12 +581,7 @@ function Test-OctoAgentDocs {
 
     # A CLAUDE.md is safe to replace with the shim when it holds nothing but HTML
     # comments and at most one @import line. Anything else is somebody's work.
-    function Test-IsShimLike {
-        param([string]$Content)
-        $meaningful = @((Get-Lines $Content) | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^<!--.*-->$' })
-        if ($meaningful.Count -eq 0) { return $true }
-        return ($meaningful.Count -eq 1 -and $meaningful[0].Trim() -match '^@\S+$')
-    }
+    function Test-IsShimLike { param([string]$Content) Test-OctoAgentDocsShimLike -Content $Content }
 
     # ----------------------------------------------------------- entry + shim
     $agentsPath = Join-Path $repo 'AGENTS.md'
@@ -620,7 +603,9 @@ function Test-OctoAgentDocs {
         # A lone CR is normalised too, and BEFORE Test-IsShimLike sees the text, or a
         # CR-separated shim reads as one line of real content that -Fix refuses to touch.
         $current = if ($hasClaude) { ((Read-Text $claudePath) -replace "`r`n", "`n") -replace "`r", "`n" } else { $null }
-        if (($null -eq $current) -or ($current.Trim() -ne $expected)) {
+        # Case-sensitive: '@agents.md' does not resolve to AGENTS.md on a case-sensitive
+        # checkout, so it is not the shim.
+        if (($null -eq $current) -or ($current.Trim() -cne $expected)) {
             $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
             # A diff shows what -Fix WOULD write. For a CLAUDE.md with real content -Fix
             # writes nothing, so printing the whole file as removed lines would be a lie.
@@ -648,8 +633,8 @@ function Test-OctoAgentDocs {
     # Initialize-OctoAgentDocs leaves a brief for the agent doing the migration. It is a
     # working file, and the rule nags until the migration commit deletes it.
     if (Test-RuleOn 'migration-pending') {
-        $briefName = [string](Get-Opt 'migration-pending' 'file' 'AGENTS-MIGRATION.md')
-        if ($briefName -and (Test-Path -LiteralPath (Join-Path $repo $briefName))) {
+        $briefName = Get-OctoAgentDocsConstant BriefName
+        if (Test-Path -LiteralPath (Join-Path $repo $briefName)) {
             Add-Finding 'migration-pending' $briefName 'Migration brief is still present - follow its steps and delete it in the migration commit'
         }
     }
@@ -1037,8 +1022,8 @@ function Test-OctoAgentDocs {
     }
 
     # ----------------------------------------------------- entry point budgets
-    $startMarker = '<!-- >>> generated: routing -->'
-    $endMarker = '<!-- <<< end generated: routing -->'
+    $startMarker = Get-OctoAgentDocsConstant RoutingStart
+    $endMarker = Get-OctoAgentDocsConstant RoutingEnd
 
     if ($entryPath) {
         $entry = Read-Text $entryPath
@@ -1111,7 +1096,7 @@ function Test-OctoAgentDocs {
                 $tail = $entry.Substring($ei)
                 $currentBlock = $entry.Substring($si + $startMarker.Length, $ei - $si - $startMarker.Length)
                 $desired = "`n$generated`n"
-                if ($currentBlock -ne $desired) {
+                if ($currentBlock -cne $desired) {
                     Add-Diff $entryName 'routing' $currentBlock.Trim("`n") $generated
                     if ($Fix -and $PSCmdlet.ShouldProcess($entryName, 'Regenerate the routing table')) {
                         Write-Text $entryPath ($head + $desired + $tail); $written.Add($entryName)
