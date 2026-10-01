@@ -174,6 +174,9 @@ function Test-OctoAgentDocs {
     # ('Test-OctoAgentDocs -Explain doc-size,line-length'). A single word binds to both
     # and falls to the default set, Check; the fallback below then recognises a rule id.
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low', DefaultParameterSetName = 'Check')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH and $global:LASTEXITCODE are the octo-tools profile contract')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'AgentDocs is the name of the thing being checked')]
     param(
         [Parameter(Position = 0, ParameterSetName = 'Check')]
         [Parameter(ParameterSetName = 'Reference')]
@@ -438,7 +441,7 @@ function Test-OctoAgentDocs {
             })
             return
         }
-        Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode); severity after this repository's overrides; in the order to fix them)" -ForegroundColor Yellow
+        Write-Host "Agent docs rules for $(Split-Path -Leaf $repo) (mode: $($config.mode)) - effective severity, in the order to fix them" -ForegroundColor Yellow
         foreach ($t in @($rows | ForEach-Object { $_.tier } | Sort-Object -Unique)) {
             $info = $tierInfo["$t"]
             $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $t" }
@@ -472,6 +475,7 @@ function Test-OctoAgentDocs {
     # -Diff output: one entry per stale generated region. A plain LCS line diff is
     # enough here - the regions are a two-line shim and a table of at most a dozen rows.
     $diffs = [System.Collections.Generic.List[object]]::new()
+    $wantDiff = [bool]$Diff
     function Get-LineDiff {
         param([string[]]$Old, [string[]]$New)
         $n = $Old.Count; $m = $New.Count
@@ -496,7 +500,7 @@ function Test-OctoAgentDocs {
     }
     function Add-Diff {
         param([string]$File, [string]$Region, [string]$Current, [string]$Generated)
-        if (-not $Diff) { return }
+        if (-not $wantDiff) { return }
         # Get-Lines returns its array comma-wrapped so a one-line file stays an array;
         # assign first, or @() wraps that array inside another one.
         $oldLines = Get-Lines $Current
@@ -557,7 +561,7 @@ function Test-OctoAgentDocs {
         return $map
     }
 
-    # GitHub keeps Unicode letters in anchors ("Größe" -> #größe) and maps EACH space
+    # GitHub keeps Unicode letters in anchors (an umlaut survives) and maps EACH space
     # to a hyphen, so runs of whitespace must not be collapsed.
     function Get-Anchors {
         param([string]$Content)
@@ -646,7 +650,7 @@ function Test-OctoAgentDocs {
     if (Test-RuleOn 'migration-pending') {
         $briefName = [string](Get-Opt 'migration-pending' 'file' 'AGENTS-MIGRATION.md')
         if ($briefName -and (Test-Path -LiteralPath (Join-Path $repo $briefName))) {
-            Add-Finding 'migration-pending' $briefName 'Migration brief is still present - finish its steps and delete it in the same commit'
+            Add-Finding 'migration-pending' $briefName 'Migration brief is still present - follow its steps and delete it in the migration commit'
         }
     }
 
@@ -1217,7 +1221,7 @@ function Test-OctoAgentDocs {
             Write-Host "  0 error(s), 0 warning(s)" -ForegroundColor Gray
             if ($Explain) { Write-Host "  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All" -ForegroundColor Gray }
         }
-        elseif (-not $Explain) { Write-Host "  add -Explain to see why each rule exists and how to fix it, or -Explain <rule> for one rule" -ForegroundColor Gray }
+        elseif (-not $Explain) { Write-Host "  add -Explain for why and how to fix, or -Explain <rule> for one rule" -ForegroundColor Gray }
     }
 
     if ($config.mode -eq 'enforce' -and -not $ok) {

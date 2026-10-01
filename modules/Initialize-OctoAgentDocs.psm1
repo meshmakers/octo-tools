@@ -6,7 +6,8 @@ function Initialize-OctoAgentDocs {
 
     .DESCRIPTION
     Every run ends with the same five-row checklist - AGENTS.md, CLAUDE.md, docs/, the
-    migration brief, the check - marked done (✓), open (✗) or not applicable yet (·), and
+    migration brief, the check - marked done (check mark), open (cross) or not applicable
+    yet (dot), and
     the next steps are derived from the open rows. Four states, decided from what is
     already in the repository, and the cmdlet never overwrites a file in any of them:
 
@@ -48,6 +49,9 @@ function Initialize-OctoAgentDocs {
     #>
 
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the octo-tools profile contract')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'AgentDocs is the name of the thing being initialised')]
     param(
         [string]$Path = ".",
         [switch]$Json
@@ -138,7 +142,7 @@ function Initialize-OctoAgentDocs {
     elseif ($claudeState -eq 'real content') {
         $state = 'migration'
         if (-not $hasBrief -and $PSCmdlet.ShouldProcess($briefName, 'Write the migration brief')) {
-            Write-Text $briefPath (New-MigrationBrief -Repo $repoName -Config $config -Sections $sections -ShimLines $shimLines)
+            Write-Text $briefPath (Format-MigrationBrief -Repo $repoName -Config $config -Sections $sections -ShimLines $shimLines)
             $written.Add($briefName)
         }
     }
@@ -168,8 +172,8 @@ function Initialize-OctoAgentDocs {
     # --------------------------------------------------------------- checklist
     # The same five rows in every state, read off the repository AFTER any writes, so the
     # list shows the result rather than the plan. Under -WhatIf nothing was written and the
-    # rows say what would happen. done is $true (✓), $false (✗, work left) or $null (·, not
-    # applicable yet), and the next steps are derived from the ✗ rows.
+    # rows say what would happen. done is $true (check mark), $false (cross, work left) or
+    # $null (dot, not applicable yet), and the next steps are derived from the open rows.
     $whatIf = [bool]$WhatIfPreference
     $hasAgentsNow = Test-Path -LiteralPath $agentsPath
     $hasBriefNow = Test-Path -LiteralPath $briefPath
@@ -218,7 +222,7 @@ function Initialize-OctoAgentDocs {
     switch ($state) {
         'created' {
             if (-not $hasChecker) { Add-Next 'Import Test-OctoAgentDocs.psm1 and fill the routing table' "$checkCmd -Fix" }
-            Add-Next 'Write the sections in AGENTS.md; the checker reports a missing one, never fills it' $null
+            Add-Next 'Write the AGENTS.md sections; the checker reports a missing one but never writes it' $null
             Add-Next "Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then regenerate the table" "$checkCmd -Fix"
         }
         'migration' {
@@ -231,7 +235,7 @@ function Initialize-OctoAgentDocs {
             if ($hasBriefNow) { Add-Next "Finish the steps in $briefName and delete it" $null }
             if ($stale.Count -gt 0 -and $claudeNow -ne 'real content') { Add-Next 'Regenerate the routing table and the shim' "$checkCmd -Fix" }
             if ($other.Count -gt 0) { Add-Next "Resolve $($other.Count) open finding(s)" "$checkCmd -Explain" }
-            if (-not $check -and $hasChecker -eq $false) { Add-Next 'Import Test-OctoAgentDocs.psm1 and check the repository' $checkCmd }
+            if (-not $hasChecker) { Add-Next 'Import Test-OctoAgentDocs.psm1 and check the repository' $checkCmd }
         }
     }
 
@@ -251,7 +255,9 @@ function Initialize-OctoAgentDocs {
     Write-Host $state -ForegroundColor $stateColour
     if ($written.Count -gt 0) { Write-Host "  wrote $($written -join ', ')" -ForegroundColor Cyan }
     foreach ($row in $rows) {
-        $mark, $colour = switch ($row.done) { $true { '✓', 'Green' } $false { '✗', 'DarkYellow' } default { '·', 'DarkGray' } }
+        # U+2713 check mark, U+2717 cross, U+00B7 middle dot - as code points so the file
+        # stays ASCII, like every other module here.
+        $mark, $colour = switch ($row.done) { $true { [string][char]0x2713, 'Green' } $false { [string][char]0x2717, 'DarkYellow' } default { [string][char]0x00B7, 'DarkGray' } }
         Write-Host "  $mark " -ForegroundColor $colour -NoNewline
         Write-Host $row.item.PadRight(21) -ForegroundColor Gray -NoNewline
         Write-Host $row.fact -ForegroundColor $(if ($row.done -eq $false) { 'DarkYellow' } else { 'Gray' })
@@ -264,7 +270,7 @@ function Initialize-OctoAgentDocs {
 
 # Renders modules/agent-docs-migration.template.md with the values the ruleset enforces, so
 # the brief an agent reads carries the same numbers the checker will hold it to.
-function New-MigrationBrief {
+function Format-MigrationBrief {
     param([string]$Repo, [hashtable]$Config, [string[]]$Sections, [string[]]$ShimLines)
 
     $templatePath = Join-Path $PSScriptRoot 'agent-docs-migration.template.md'
