@@ -1691,3 +1691,49 @@ Describe 'review pass - CRLF marker lookup, YAML scalars, advice, exit code' {
         (Get-Rules (Get-Result $r) 'line-length').Count | Should -Be 1
     }
 }
+
+Describe 'CommonMark edge cases - fences, destinations, reference definitions' {
+    It 'strips a fence opened and closed with four backticks' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @('````markdown', '```', '[x](docs/nope.md)', '```', '````')
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+    }
+    It 'checks the host of a protocol-relative link in an href and in a Markdown destination' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value @('<a href="//evil.example/x">x</a>', '[y](//also.example/y)', '[z]: //third.example/z', 'see [ok](/docs/one.md)')
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $res = Get-Result $r
+        @(Get-Rules $res 'link-hosts' | ForEach-Object { $_.message }) -join ' ' | Should -Match 'evil\.example'
+        @(Get-Rules $res 'link-hosts' | ForEach-Object { $_.message }) -join ' ' | Should -Match 'also\.example'
+        @(Get-Rules $res 'link-hosts' | ForEach-Object { $_.message }) -join ' ' | Should -Match 'third\.example'
+        (Get-Rules $res 'reference-resolves').Count | Should -Be 0
+    }
+    It 'follows a reference-style definition and ignores a footnote' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @('See [the guide][guide] and [more][missing].[^1]', '', '[guide]: docs/one.md "Routed doc"', '[missing]: <docs/nope.md>', '[^1]: Footnote text, not a path.')
+        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'docs/nope\.md'
+    }
+    It 'reads a destination with balanced parentheses to its end' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        '# V2' | Set-Content -LiteralPath (Join-Path $r 'docs/Foo_(v2).md')
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value '[v2](docs/Foo_(v2).md) and [gone](docs/Bar_(v3).md)'
+        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'Bar_\(v3\)\.md'
+    }
+    It 'keeps a block scalar line that looks like a key as description text' {
+        $r = New-Fixture
+        "---`ndescription: >`n  Setup first,`n  note: then build.`napplies_to: src/**`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $route = (Get-Result $r).data.routes[0]
+        $route.description | Should -Be 'Setup first, note: then build.'
+        @($route.globs) | Should -Be @('src/**')
+    }
+}

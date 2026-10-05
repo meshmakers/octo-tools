@@ -524,6 +524,12 @@ function Test-OctoAgentDocs {
         $key = $null
         $block = $false
         for ($i = 1; $i -lt $end; $i++) {
+            # Inside a block scalar every indented line is text, even one that looks like
+            # a key ("  note: see below"), so the continuation is tried before the key.
+            if ($block -and $lines[$i] -match '^\s+(\S.*?)\s*$') {
+                $map[$key] = if ($map[$key]) { "$($map[$key]) $($Matches[1])" } else { $Matches[1] }
+                continue
+            }
             if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') {
                 $key = $Matches[1]; $value = $Matches[2].Trim()
                 # A block scalar ('>' or '|') takes its text from the indented lines below.
@@ -532,10 +538,6 @@ function Test-OctoAgentDocs {
                 continue
             }
             if (-not $key) { continue }
-            if ($block -and $lines[$i] -match '^\s+(\S.*?)\s*$') {
-                $map[$key] = if ($map[$key]) { "$($map[$key]) $($Matches[1])" } else { $Matches[1] }
-                continue
-            }
             # A YAML block list under the previous key ("applies_to:" then "  - src/**")
             # is the same value as the inline comma form.
             if ($lines[$i] -match '^\s*-\s+(.+?)\s*$') {
@@ -552,7 +554,11 @@ function Test-OctoAgentDocs {
     }
 
     # GitHub keeps Unicode letters in anchors (an umlaut survives) and maps EACH space
-    # to a hyphen, so runs of whitespace must not be collapsed.
+    # to a hyphen, so runs of whitespace must not be collapsed. The set compares without
+    # regard to case on purpose: github.com lowercases the fragment before it looks the
+    # heading up, and VS Code slugifies the fragment the same way it slugifies headings,
+    # so '#Build--test' reaches '## Build & test' in both. Reporting it would be a false
+    # positive, and a case-only miss elsewhere is the lesser risk.
     function Get-Anchors {
         param([string]$Content)
         $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -579,9 +585,6 @@ function Test-OctoAgentDocs {
         # case-insensitive comparer is lost with it.
         return , $set
     }
-
-    # A CLAUDE.md is safe to replace with the shim when it holds nothing but HTML
-    # comments and at most one @import line. Anything else is somebody's work.
 
     # ----------------------------------------------------------- entry + shim
     $agentsPath = Join-Path $repo 'AGENTS.md'
@@ -883,7 +886,9 @@ function Test-OctoAgentDocs {
             $candidates = [System.Collections.Generic.List[string]]::new()
             foreach ($h in [regex]::Matches($content, '(?is)\bhref\s*=\s*(["''])(.*?)\1')) {
                 $v = ([System.Net.WebUtility]::HtmlDecode($h.Groups[2].Value)) -replace '[\t\r\n]', ''
-                if ($v -match '(?i)^\s*https?:[/\\]*(\[[^\]\s]+\](?::\d+)?|[^/\\?#]+)') { $candidates.Add($Matches[1]) }
+                # '//host/path' is protocol-relative: the browser supplies https, so the
+                # host counts the same as in a full URL.
+                if ($v -match '(?i)^\s*(?:https?:[/\\]*|[/\\]{2})(\[[^\]\s]+\](?::\d+)?|[^/\\?#]+)') { $candidates.Add($Matches[1]) }
             }
             $decoded = [System.Net.WebUtility]::HtmlDecode($content)
             # The authority is either a bracketed IPv6 literal with an optional port, or
@@ -893,7 +898,12 @@ function Test-OctoAgentDocs {
             # follows the '@'. System.Uri does not mimic that - it rejects the host - so the
             # cut happens here, in the regex, and only the authority is handed to System.Uri
             # for userinfo, port, IDN and IPv6 handling.
-            foreach ($m in [regex]::Matches($decoded, '(?i)\bhttps?:[/\\]*(\[[^\]\s]+\](?::\d+)?|(?:[^\s/\\<>)"''`\]\[]|[\t\r])+)')) {
+            $authorityPattern = '(\[[^\]\s]+\](?::\d+)?|(?:[^\s/\\<>)"''`\]\[]|[\t\r])+)'
+            foreach ($m in [regex]::Matches($decoded, "(?i)\bhttps?:[/\\]*$authorityPattern")) {
+                $candidates.Add(($m.Groups[1].Value -replace '[\t\r]', ''))
+            }
+            # A Markdown destination or reference definition may be protocol-relative too.
+            foreach ($m in [regex]::Matches($decoded, "(?m)(?:\]\(|^[ \t]{0,3}\[[^\]\n]+\]:)[ \t]*<?[/\\]{2}$authorityPattern")) {
                 $candidates.Add(($m.Groups[1].Value -replace '[\t\r]', ''))
             }
             foreach ($candidate in $candidates) {
@@ -963,7 +973,7 @@ function Test-OctoAgentDocs {
         $full = (Resolve-Path -LiteralPath $Path).Path
         if (-not $shimCache.ContainsKey($full)) {
             $agents = Join-Path (Split-Path -Parent $full) 'AGENTS.md'
-            $shimCache[$full] = (Test-Path -LiteralPath $agents) -and (Test-OctoAgentDocsShimLike (Read-OctoAgentDocsText $full))
+            $shimCache[$full] = (Test-Path -LiteralPath $agents) -and (Test-OctoAgentDocsShimLike (Get-CachedText $full))
         }
         return $shimCache[$full]
     }
@@ -981,11 +991,22 @@ function Test-OctoAgentDocs {
             # An inline code span is quoted syntax, not a link to follow; the backtick
             # references below need the spans, so only the link scan drops them.
             $linkText = [regex]::Replace($prose, '`[^`\n]*`', '')
-            # Destination, optionally in <...>, optionally followed by a "title".
-            foreach ($m in [regex]::Matches($linkText, '\]\(\s*(?:<([^>]+)>|([^)\s>]+))(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
+            # Inline destination, optionally in <...>, optionally followed by a "title"; a
+            # bare destination may carry one level of balanced parentheses ('Foo_(v2).md').
+            $targets = [System.Collections.Generic.List[string]]::new()
+            foreach ($m in [regex]::Matches($linkText, '\]\(\s*(?:<([^>]+)>|((?:[^()\s>]|\([^()\s]*\))+))(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
+                $targets.Add($(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }))
+            }
+            # Reference definitions ('[guide]: docs/guide.md "Title"') are followed the same
+            # way; a footnote ('[^1]: text') is prose, not a destination.
+            foreach ($m in [regex]::Matches($linkText, '(?m)^[ \t]{0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<([^>\n]+)>|(\S+))')) {
+                $targets.Add($(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }))
+            }
+            foreach ($rawTarget in $targets) {
                 # Percent-encoding is how a space travels in a link; the file is unencoded.
-                $target = [System.Uri]::UnescapeDataString($(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }))
+                $target = [System.Uri]::UnescapeDataString($rawTarget)
                 if ($target -match '^[A-Za-z][A-Za-z0-9+.-]*:') { continue }   # any URI scheme
+                if ($target -match '^[/\\]{2}') { continue }                   # protocol-relative; link-hosts checks it
                 $parts = $target -split '#', 2
                 $filePart = $parts[0]
                 $anchor = if ($parts.Count -gt 1) { $parts[1] } else { '' }
@@ -1007,7 +1028,7 @@ function Test-OctoAgentDocs {
                 }
                 if ($anchor -and $resolved -like '*.md') {
                     $full = (Resolve-Path -LiteralPath $resolved).Path
-                    if (-not $anchorCache.ContainsKey($full)) { $anchorCache[$full] = Get-Anchors (Read-OctoAgentDocsText $full) }
+                    if (-not $anchorCache.ContainsKey($full)) { $anchorCache[$full] = Get-Anchors (Get-CachedText $full) }
                     if (-not $anchorCache[$full].Contains($anchor)) { Add-Finding 'reference-resolves' $rel "Anchor not found: $target" }
                 }
             }
@@ -1130,7 +1151,8 @@ function Test-OctoAgentDocs {
                 [void]$sb.AppendLine('| When you change | Read first |')
                 [void]$sb.AppendLine('|---|---|')
             }
-            foreach ($r in (Invoke-OctoAgentDocsOrdinalSort -Items @($routes) -Key { $_.file })) {
+            # $routes follows $docs, which is already in ordinal order.
+            foreach ($r in $routes) {
                 $globs = ($r.globs | ForEach-Object { "``$_``" }) -join ', '
                 if ($withDesc) {
                     # A '|' in a description would add a column and corrupt the table.

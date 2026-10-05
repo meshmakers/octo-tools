@@ -11,10 +11,11 @@ $script:Constants = @{
     BriefName    = 'AGENTS-MIGRATION.md'
 }
 $script:Severities = @('off', 'warn', 'error')
-# CommonMark fences open and close with three backticks OR three tildes. '\r?' before the
-# anchors: in .NET, (?m)$ does not match before a carriage return, and the pattern also
-# runs over raw text that may still carry CRLF.
-$script:FencePattern = '(?ms)^[ \t]*(```|~~~)[^\n]*\n.*?^[ \t]*\1[ \t]*\r?$'
+# CommonMark fences open with three OR MORE backticks or tildes and close with a run of
+# the same character at least as long - four backticks is how a Markdown example quotes
+# a three-backtick block. '\r?' before the anchors: in .NET, (?m)$ does not match before
+# a carriage return, and the pattern also runs over raw text that may still carry CRLF.
+$script:FencePattern = '(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[`~]*[ \t]*\r?$'
 # Every rule the built-in ruleset must define, in report order within the tiers. The
 # schema's two enums mirror this list.
 $script:RuleIds = @(
