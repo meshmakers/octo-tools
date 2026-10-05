@@ -96,10 +96,16 @@ function Initialize-OctoAgentDocs {
     # verdict (its JSON 'shim' field, computed whatever severity the rule has), because a
     # repository may override shim-valid.content; the built-in text is only the fallback
     # for when the checker is not loaded.
+    # CLAUDE.md is read once; the cache is dropped after the one place that writes it.
+    $script:claudeText = $null
+    function Get-ClaudeText {
+        if ($null -eq $script:claudeText) { $script:claudeText = Read-OctoAgentDocsText $claudePath }
+        return $script:claudeText
+    }
     function Get-ClaudeState {
         param($Check)
         if (-not (Test-Path -LiteralPath $claudePath)) { return 'absent' }
-        $text = Read-OctoAgentDocsText $claudePath
+        $text = Get-ClaudeText
         $isShim = if ($Check -and $Check.data.PSObject.Properties['shim']) { $Check.data.shim -eq 'ok' }
                   else { (Get-OctoAgentDocsShimVerdict -Text $text -ExpectedLines $shimLines) -eq 'ok' }
         if ($isShim) { return 'shim' }
@@ -164,13 +170,14 @@ function Initialize-OctoAgentDocs {
         if (-not $hasClaude -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) {
             Write-OctoAgentDocsText $claudePath (($shimLines -join "`n") + "`n")
             $written.Add('CLAUDE.md')
+            $script:claudeText = $null
         }
         # One pass fills the (empty) routing table and returns the data the checklist needs,
         # so the first check is clean and the repository is scanned once. Only when the shim
         # was ours to write: otherwise -Fix would replace the existing CLAUDE.md.
         # Safe whenever CLAUDE.md IS the shim - ours from a moment ago, or one that was
         # already there - because -Fix never touches a CLAUDE.md that already matches.
-        $shimInPlace = (Test-Path -LiteralPath $claudePath) -and ((Get-OctoAgentDocsShimVerdict -Text (Read-OctoAgentDocsText $claudePath) -ExpectedLines $shimLines) -eq 'ok')
+        $shimInPlace = (Test-Path -LiteralPath $claudePath) -and ((Get-OctoAgentDocsShimVerdict -Text (Get-ClaudeText) -ExpectedLines $shimLines) -eq 'ok')
         if ($written.Contains('AGENTS.md') -and $shimInPlace) { $check = Invoke-Check -Fix }
     }
 

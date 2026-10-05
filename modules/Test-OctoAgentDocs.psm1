@@ -522,18 +522,31 @@ function Test-OctoAgentDocs {
         # YAML quotes are syntax, not value: a glob starting with '*' has to be quoted.
         function Unquote { param([string]$V) if ($V -match '^(["''])(.*)\1$') { $Matches[2] } else { $V } }
         $key = $null
+        $block = $false
         for ($i = 1; $i -lt $end; $i++) {
-            if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') { $key = $Matches[1]; $map[$key] = Unquote $Matches[2].Trim(); continue }
+            if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') {
+                $key = $Matches[1]; $value = $Matches[2].Trim()
+                # A block scalar ('>' or '|') takes its text from the indented lines below.
+                $block = $value -match '^[>|][+-]?$'
+                $map[$key] = if ($block) { '' } else { Unquote $value }
+                continue
+            }
+            if (-not $key) { continue }
+            if ($block -and $lines[$i] -match '^\s+(\S.*?)\s*$') {
+                $map[$key] = if ($map[$key]) { "$($map[$key]) $($Matches[1])" } else { $Matches[1] }
+                continue
+            }
             # A YAML block list under the previous key ("applies_to:" then "  - src/**")
             # is the same value as the inline comma form.
-            if ($key -and $lines[$i] -match '^\s*-\s+(.+?)\s*$') {
+            if ($lines[$i] -match '^\s*-\s+(.+?)\s*$') {
                 $item = Unquote $Matches[1]
                 $map[$key] = if ($map[$key]) { "$($map[$key]), $item" } else { $item }
             }
         }
-        # A flow sequence ("[a, b]") is the same list in one line.
+        # A flow sequence ("[a, b]") is the same list in one line; split the way the inline
+        # form is split, so a brace expansion inside an item survives.
         foreach ($k in @($map.Keys)) {
-            if ($map[$k] -match '^\[(.*)\]$') { $map[$k] = (($Matches[1] -split ',') | ForEach-Object { Unquote $_.Trim() } | Where-Object { $_ }) -join ', ' }
+            if ($map[$k] -match '^\[(.*)\]$') { $map[$k] = ((Split-GlobList $Matches[1]) | ForEach-Object { Unquote $_ } | Where-Object { $_ }) -join ', ' }
         }
         return $map
     }
@@ -622,9 +635,13 @@ function Test-OctoAgentDocs {
             elseif ($Fix) {
                 Add-Finding 'shim-valid' 'CLAUDE.md' 'Has real content while AGENTS.md is canonical - migrate it by hand, or re-run with -Force to replace it with the shim'
             }
-            else {
+            elseif ($safe) {
                 $why = if ($hasClaude) { 'CLAUDE.md must contain exactly the shim and nothing else' } else { 'CLAUDE.md shim is absent' }
                 Add-Finding 'shim-valid' 'CLAUDE.md' "$why (run with -Fix)"
+            }
+            else {
+                # The same advice -Fix itself would give: it will not replace this file.
+                Add-Finding 'shim-valid' 'CLAUDE.md' 'Has real content while AGENTS.md is canonical - migrate it by hand, or run -Fix -Force to replace it with the shim'
             }
         }
     }
@@ -925,6 +942,7 @@ function Test-OctoAgentDocs {
     # ------------------------------------------------- references + line length
     $siblingPattern = Get-Opt 'reference-resolves' 'siblingRepoPattern'
     $anchorCache = @{}
+    $dirCache = @{}
 
     # A reference to a CLAUDE.md that has become the shim still RESOLVES, so nothing
     # above reports it - but an agent that opens it with its Read tool gets the raw text,
@@ -981,7 +999,7 @@ function Test-OctoAgentDocs {
                 # Exists, but with this spelling? Test-Path says yes to 'Guide.md' for
                 # guide.md on macOS and Windows; GitHub and Linux say no.
                 $relToRepo = [System.IO.Path]::GetRelativePath($repo, [System.IO.Path]::GetFullPath($resolved))
-                if ($filePart -and -not $relToRepo.StartsWith('..') -and -not (Test-OctoAgentDocsPathExact -Root $repo -RelativePath $relToRepo)) {
+                if ($filePart -and -not $relToRepo.StartsWith('..') -and -not (Test-OctoAgentDocsPathExact -Root $repo -RelativePath $relToRepo -Cache $dirCache)) {
                     Add-Finding 'reference-resolves' $rel "Link target differs in case from the file on disk: $target"; continue
                 }
                 if ($filePart -and (Test-PointsAtShim $resolved)) {
@@ -1031,16 +1049,16 @@ function Test-OctoAgentDocs {
             $listCap = Get-Opt 'line-length' 'maxReported'
             $skipCode = [bool](Get-Opt 'line-length' 'ignoreCodeBlocks')
             $skipUnbroken = [bool](Get-Opt 'line-length' 'ignoreNoWhitespace')
-            $inCode = $false
             $inFrontmatter = $false
             $hits = 0
-            $lines = Get-Lines $content
+            # Code lines are decided by the same fence pattern every other rule uses, with the
+            # line numbers preserved; with ignoreCodeBlocks off the raw lines are measured.
+            $lines = Get-Lines $(if ($skipCode) { ConvertTo-OctoAgentDocsProse $content -KeepLineNumbers } else { $content })
             for ($i = 0; $i -lt $lines.Count; $i++) {
                 $line = $lines[$i]
                 if ($i -eq 0 -and $line.Trim() -eq '---') { $inFrontmatter = $true; continue }
                 if ($inFrontmatter) { if ($line.Trim() -eq '---') { $inFrontmatter = $false }; continue }
-                if ($line -match '^\s*(```|~~~)') { $inCode = -not $inCode; continue }
-                if ($inCode -and $skipCode) { continue }
+                if ($line -match '^\s*(```|~~~)') { continue }
                 $isTable = $line.TrimStart().StartsWith('|')
                 $limit = if ($isTable) { $maxTable } else { $maxLine }
                 if ($line.Length -le $limit) { continue }
@@ -1252,7 +1270,10 @@ function Test-OctoAgentDocs {
         elseif (-not $Explain) { Write-Host "  add -Explain for why and how to fix, or -Explain <rule> for one rule" -ForegroundColor Gray }
     }
 
-    # -Explain is a person asking why; the gate is for pipelines, which do not ask.
+    # -Explain is a person asking why; the gate is for pipelines, which do not ask. The exit
+    # code is set on both paths, so a stale non-zero from an earlier native command does not
+    # read as this check's verdict.
+    $global:LASTEXITCODE = 0
     if ($config.mode -eq 'enforce' -and -not $ok -and -not $Explain) {
         $global:LASTEXITCODE = 1
         throw "Test-OctoAgentDocs: $($errors.Count) error-severity finding(s) in $(Split-Path -Leaf $repo)"

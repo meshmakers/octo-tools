@@ -19,7 +19,8 @@ CLAUDE.md          the shim, exactly these lines and nothing else:
 docs/<topic>.md    one topic per file, with frontmatter that routes it (see below)
 ```
 
-`AGENTS.md` carries these level-2 sections, in this order, with the routing markers under the first:
+`AGENTS.md` carries these level-2 sections (the checker requires their presence, not their order), with
+the routing markers under the first:
 
 {{SECTIONS}}
 

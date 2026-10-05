@@ -11,8 +11,10 @@ $script:Constants = @{
     BriefName    = 'AGENTS-MIGRATION.md'
 }
 $script:Severities = @('off', 'warn', 'error')
-# CommonMark fences open and close with three backticks OR three tildes.
-$script:FencePattern = '(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$'
+# CommonMark fences open and close with three backticks OR three tildes. '\r?' before the
+# anchors: in .NET, (?m)$ does not match before a carriage return, and the pattern also
+# runs over raw text that may still carry CRLF.
+$script:FencePattern = '(?ms)^[ \t]*(```|~~~)[^\n]*\n.*?^[ \t]*\1[ \t]*\r?$'
 # Every rule the built-in ruleset must define, in report order within the tiers. The
 # schema's two enums mirror this list.
 $script:RuleIds = @(
@@ -107,9 +109,13 @@ function ConvertTo-OctoAgentDocsProse {
     illustration, not structure - a heading, link or reference inside it is never followed -
     so every structural scan runs on the text this returns.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$Text)
+    param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
-    return [regex]::Replace((ConvertTo-OctoAgentDocsLf $Text), $script:FencePattern, '')
+    $lf = ConvertTo-OctoAgentDocsLf $Text
+    if (-not $KeepLineNumbers) { return [regex]::Replace($lf, $script:FencePattern, '') }
+    # Each fenced block becomes the same number of empty lines, so a line number in the
+    # result is a line number in the file - what a per-line rule needs.
+    return [regex]::Replace($lf, $script:FencePattern, { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) })
 }
 
 function Find-OctoAgentDocsMarker {
@@ -136,12 +142,19 @@ function Test-OctoAgentDocsPathExact {
     True when every segment of a relative path exists under the root with EXACTLY that
     spelling. Test-Path is case-insensitive on macOS and Windows, GitHub and Linux are not.
     #>
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RelativePath)
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RelativePath, [hashtable]$Cache)
+    # -Cache: one directory listing per directory per run; the caller owns the lifetime.
     $current = $Root
     foreach ($segment in ($RelativePath -split '[\\/]+' | Where-Object { $_ -and $_ -ne '.' })) {
         if ($segment -eq '..') { $current = Split-Path -Parent $current; continue }
-        $names = @([System.IO.Directory]::EnumerateFileSystemEntries($current) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
-        if ($names -cnotcontains $segment) { return $false }
+        $names = if ($null -ne $Cache -and $Cache.ContainsKey($current)) { $Cache[$current] }
+                 else {
+                     $list = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+                     foreach ($e in [System.IO.Directory]::EnumerateFileSystemEntries($current)) { [void]$list.Add([System.IO.Path]::GetFileName($e)) }
+                     if ($null -ne $Cache) { $Cache[$current] = $list }
+                     $list
+                 }
+        if (-not $names.Contains($segment)) { return $false }
         $current = Join-Path $current $segment
     }
     return $true

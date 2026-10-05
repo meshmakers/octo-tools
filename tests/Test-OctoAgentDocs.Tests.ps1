@@ -1645,3 +1645,49 @@ Describe 'review pass - markers in fences, YAML shapes, IPv6, case and tildes' {
         $f[0].message | Should -Match 'docs/my file\.md'
     }
 }
+
+Describe 'review pass - CRLF marker lookup, YAML scalars, advice, exit code' {
+    It 'does not write the table into a fenced example in a CRLF file either' {
+        $r = New-Fixture -Agents
+        $p = Join-Path $r 'AGENTS.md'
+        $example = "``````markdown`n<!-- >>> generated: routing -->`n<!-- <<< end generated: routing -->`n```````n`n"
+        [System.IO.File]::WriteAllText($p, (($example + [System.IO.File]::ReadAllText($p)) -replace "`r?`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $after = [System.IO.File]::ReadAllText($p)
+        $after.IndexOf('| `src/**` |') | Should -BeGreaterThan $after.IndexOf('```')
+        $after.IndexOf('| `src/**` |') | Should -BeGreaterThan $after.LastIndexOf('```')
+        (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 0
+    }
+    It 'keeps a brace expansion inside a flow sequence intact' {
+        $r = New-Fixture
+        "---`ndescription: Flow.`napplies_to: [src/**/*.{cs,csproj}, tests/**]`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        @((Get-Result $r).data.routes[0].globs) | Should -Be @('src/**/*.{cs,csproj}', 'tests/**')
+    }
+    It 'folds a YAML block scalar description into one line' {
+        $r = New-Fixture
+        "---`ndescription: >`n  Long text on`n  two lines.`napplies_to: src/**`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        (Get-Result $r).data.routes[0].description | Should -Be 'Long text on two lines.'
+    }
+    It 'gives the same shim advice with and without -Fix for a CLAUDE.md with real content' {
+        $r = New-Fixture -Agents
+        '# real content' | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md')
+        (Get-Rules (Get-Result $r) 'shim-valid')[0].message | Should -Match '-Fix -Force'
+        (Get-Rules (Get-Result $r) 'shim-valid')[0].message | Should -Not -Match '\(run with -Fix\)'
+    }
+    It 'resets LASTEXITCODE to 0 on a clean enforce run' {
+        $r = New-Fixture -Agents
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $global:LASTEXITCODE = 7
+        Test-OctoAgentDocs -Path $r -Mode enforce 6>$null | Out-Null
+        $global:LASTEXITCODE | Should -Be 0
+    }
+    It 'measures long lines with the same fence rules as every other check' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        # An unterminated fence: the shared pattern sees prose, so the long line is measured.
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @('```', ('word ' * 40))
+        (Get-Rules (Get-Result $r) 'line-length').Count | Should -Be 1
+    }
+}
