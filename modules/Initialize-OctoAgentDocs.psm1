@@ -122,9 +122,11 @@ function Initialize-OctoAgentDocs {
     $hasChecker = [bool](Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)
     # The checklist wants the check's DATA, never its gate: a repository that opted up to
     # enforce must not turn a status report into a throw.
+    $script:checkAttempted = $false
     function Invoke-Check {
         param([switch]$Fix)
         if (-not $hasChecker) { return $null }
+        $script:checkAttempted = $true
         try { return ((Test-OctoAgentDocs -Path $repo -Mode logOnly -Json -Fix:$Fix 3>$null 6>$null) | ConvertFrom-Json) }
         catch { return $null }
     }
@@ -166,7 +168,10 @@ function Initialize-OctoAgentDocs {
         # One pass fills the (empty) routing table and returns the data the checklist needs,
         # so the first check is clean and the repository is scanned once. Only when the shim
         # was ours to write: otherwise -Fix would replace the existing CLAUDE.md.
-        if ($written.Contains('AGENTS.md') -and $written.Contains('CLAUDE.md')) { $check = Invoke-Check -Fix }
+        # Safe whenever CLAUDE.md IS the shim - ours from a moment ago, or one that was
+        # already there - because -Fix never touches a CLAUDE.md that already matches.
+        $shimInPlace = (Test-Path -LiteralPath $claudePath) -and ((Get-OctoAgentDocsShimVerdict -Text (Read-OctoAgentDocsText $claudePath) -ExpectedLines $shimLines) -eq 'ok')
+        if ($written.Contains('AGENTS.md') -and $shimInPlace) { $check = Invoke-Check -Fix }
     }
 
     # --------------------------------------------------------------- checklist
@@ -177,7 +182,8 @@ function Initialize-OctoAgentDocs {
     $whatIf = [bool]$WhatIfPreference
     $hasAgentsNow = Test-Path -LiteralPath $agentsPath
     $hasBriefNow = Test-Path -LiteralPath $briefPath
-    if ($hasAgentsNow -and -not $check) { $check = Invoke-Check }
+    # A check that already failed is not run a second time to fail the same way.
+    if ($hasAgentsNow -and -not $check -and -not $script:checkAttempted) { $check = Invoke-Check }
     $claudeNow = Get-ClaudeState -Check $check
 
     $rows = [System.Collections.Generic.List[object]]::new()

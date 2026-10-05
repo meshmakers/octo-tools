@@ -304,3 +304,14 @@ Describe 'review pass - action summary and brief command path' {
 AfterAll {
     foreach ($p in $script:Fixtures) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
+Describe 'review pass - an existing shim is enough for the first -Fix' {
+    It 'fills the routing table when CLAUDE.md already is the shim' {
+        $r = New-Repo
+        (($Rules.rules.'shim-valid'[1].content) -join "`n") + "`n" | Set-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -NoNewline
+        $res = Get-Init $r
+        $res.data.state | Should -Be 'created'
+        (Get-Row $res 'CLAUDE.md').fact | Should -Be 'shim'
+        (Get-Row $res 'check').fact | Should -Be 'clean'
+    }
+}

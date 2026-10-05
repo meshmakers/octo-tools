@@ -11,6 +11,8 @@ $script:Constants = @{
     BriefName    = 'AGENTS-MIGRATION.md'
 }
 $script:Severities = @('off', 'warn', 'error')
+# CommonMark fences open and close with three backticks OR three tildes.
+$script:FencePattern = '(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$'
 # Every rule the built-in ruleset must define, in report order within the tiers. The
 # schema's two enums mirror this list.
 $script:RuleIds = @(
@@ -107,7 +109,42 @@ function ConvertTo-OctoAgentDocsProse {
     #>
     param([AllowNull()][AllowEmptyString()][string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
-    return [regex]::Replace((ConvertTo-OctoAgentDocsLf $Text), '(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$', '')
+    return [regex]::Replace((ConvertTo-OctoAgentDocsLf $Text), $script:FencePattern, '')
+}
+
+function Find-OctoAgentDocsMarker {
+    <#
+    .SYNOPSIS
+    The index of the first occurrence of a marker that sits OUTSIDE fenced code, or -1.
+    A marker quoted in a ```markdown example is documentation, not the region.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Marker)
+    $fences = @([regex]::Matches($Text, $script:FencePattern) | ForEach-Object { @{ s = $_.Index; e = $_.Index + $_.Length } })
+    $i = $Text.IndexOf($Marker, [System.StringComparison]::Ordinal)
+    while ($i -ge 0) {
+        $inside = $false
+        foreach ($f in $fences) { if ($i -ge $f.s -and $i -lt $f.e) { $inside = $true; break } }
+        if (-not $inside) { return $i }
+        $i = $Text.IndexOf($Marker, $i + 1, [System.StringComparison]::Ordinal)
+    }
+    return -1
+}
+
+function Test-OctoAgentDocsPathExact {
+    <#
+    .SYNOPSIS
+    True when every segment of a relative path exists under the root with EXACTLY that
+    spelling. Test-Path is case-insensitive on macOS and Windows, GitHub and Linux are not.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RelativePath)
+    $current = $Root
+    foreach ($segment in ($RelativePath -split '[\\/]+' | Where-Object { $_ -and $_ -ne '.' })) {
+        if ($segment -eq '..') { $current = Split-Path -Parent $current; continue }
+        $names = @([System.IO.Directory]::EnumerateFileSystemEntries($current) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+        if ($names -cnotcontains $segment) { return $false }
+        $current = Join-Path $current $segment
+    }
+    return $true
 }
 
 function Test-OctoAgentDocsShimLike {
@@ -153,10 +190,12 @@ function Get-OctoAgentDocsShimVerdict {
     Whether a CLAUDE.md is the shim: 'ok' (exactly the expected lines, compared
     case-sensitively after line-ending normalisation), 'absent' (no text), or 'differs'.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ExpectedLines)
+    # $Text is untyped on purpose: a [string] parameter turns $null into '' and the
+    # 'absent' verdict could never be reached.
+    param([AllowNull()]$Text, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ExpectedLines)
     if ($null -eq $Text) { return 'absent' }
     $expected = $ExpectedLines -join "`n"
-    if ((ConvertTo-OctoAgentDocsLf $Text).Trim() -ceq $expected) { return 'ok' }
+    if ((ConvertTo-OctoAgentDocsLf ([string]$Text)).Trim() -ceq $expected) { return 'ok' }
     return 'differs'
 }
 
@@ -258,7 +297,8 @@ function Get-OctoAgentDocsTierHeading {
 Export-ModuleMember -Function @(
     'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList',
     'Resolve-OctoAgentDocsRepository', 'Format-OctoAgentDocsArgument',
-    'ConvertTo-OctoAgentDocsLf', 'ConvertTo-OctoAgentDocsProse', 'Test-OctoAgentDocsShimLike', 'Get-OctoAgentDocsShimVerdict', 'Invoke-OctoAgentDocsOrdinalSort',
+    'ConvertTo-OctoAgentDocsLf', 'ConvertTo-OctoAgentDocsProse', 'Find-OctoAgentDocsMarker', 'Test-OctoAgentDocsPathExact',
+    'Test-OctoAgentDocsShimLike', 'Get-OctoAgentDocsShimVerdict', 'Invoke-OctoAgentDocsOrdinalSort',
     'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
     'ConvertTo-OctoAgentDocsRuleEntry', 'Read-OctoAgentDocsBuiltInRuleset', 'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
 )

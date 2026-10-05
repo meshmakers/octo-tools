@@ -1583,3 +1583,65 @@ Describe 'review pass - invisible characters, fences, links, line length' {
         { Test-OctoAgentDocs -Explain (Join-Path $r 'CLAUDE.md') 3>$null } | Should -Throw '*is a file*'
     }
 }
+
+Describe 'review pass - markers in fences, YAML shapes, IPv6, case and tildes' {
+    It 'does not write the routing table into a fenced example of the markers' {
+        $r = New-Fixture -Agents
+        $p = Join-Path $r 'AGENTS.md'
+        $example = "``````markdown`n<!-- >>> generated: routing -->`n<!-- <<< end generated: routing -->`n```````n`n"
+        [System.IO.File]::WriteAllText($p, ($example + [System.IO.File]::ReadAllText($p)), [System.Text.UTF8Encoding]::new($false))
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $after = [System.IO.File]::ReadAllText($p)
+        $after.IndexOf('| `src/**` |') | Should -BeGreaterThan $after.IndexOf('```markdown' + "`n<!-- >>> generated: routing -->`n<!-- <<< end generated: routing -->`n" + '```')
+        (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 0
+    }
+    It 'reads a column-zero block list and a flow sequence in frontmatter' {
+        $r = New-Fixture
+        "---`ndescription: Listed.`napplies_to:`n- src/**`n- tests/**`n---`n# Doc`n" | Set-Content -LiteralPath (Join-Path $r 'docs/one.md') -NoNewline
+        "---`ndescription: Flow.`napplies_to: [`"lib/**`", 'bin/**']`n---`n# Two`n" | Set-Content -LiteralPath (Join-Path $r 'docs/two.md') -NoNewline
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $res = Get-Result $r
+        (Get-Rules $res 'doc-reachable').Count | Should -Be 0
+        @(($res.data.routes | Where-Object { $_.file -eq 'docs/one.md' }).globs) | Should -Be @('src/**', 'tests/**')
+        @(($res.data.routes | Where-Object { $_.file -eq 'docs/two.md' }).globs) | Should -Be @('lib/**', 'bin/**')
+    }
+    It 'does not treat a public IPv6 literal as a local host' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'docs/one.md') -Value 'see http://[2606:4700::1111]/payload and http://[::1]/local and http://[fd12::1]/ula'
+        '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["github.com"]}]}}' | Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        $f = Get-Rules (Get-Result $r) 'link-hosts'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match '2606:4700::1111'
+    }
+    It 'strips tilde fences like backtick fences' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value @('~~~', '[x](docs/nope.md)', '## Fake Section', '~~~')
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        '{"schemaVersion":1,"rules":{"required-sections":["error",{"sections":["Fake Section"]}],"routing-current":["off"]}}' |
+            Set-Content -LiteralPath (Join-Path $r '.agent-docs.json')
+        (Get-Rules (Get-Result $r) 'required-sections').Count | Should -Be 1
+    }
+    It 'reports a link whose case differs from the file on disk' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value '[g](docs/One.md)'
+        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'differs in case'
+    }
+    It 'reports a missing CLAUDE.md as absent in the shim verdict' {
+        Get-OctoAgentDocsShimVerdict -Text $null -ExpectedLines @('@AGENTS.md') | Should -Be 'absent'
+        $r = New-Fixture -Agents
+        (Get-Result $r).data.shim | Should -Be 'absent'
+    }
+    It 'checks an angle-bracketed destination that contains a space' {
+        $r = New-Fixture
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        Add-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Value '[spec](<docs/my file.md>)'
+        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match 'docs/my file\.md'
+    }
+}

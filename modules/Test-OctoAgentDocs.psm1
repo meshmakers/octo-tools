@@ -430,8 +430,6 @@ function Test-OctoAgentDocs {
         $findings.Add([ordered]@{ severity = $sev; rule = $Rule; tier = (Get-Tier $Rule); file = $File; message = $Message })
     }
 
-    function Read-Text { param([string]$P) Read-OctoAgentDocsText -Path $P }
-    function Write-Text { param([string]$P, [string]$Content) Write-OctoAgentDocsText -Path $P -Content $Content }
 
     # -Diff output: one entry per stale generated region. A plain LCS line diff is
     # enough here - the regions are a two-line shim and a table of at most a dozen rows.
@@ -528,10 +526,14 @@ function Test-OctoAgentDocs {
             if ($lines[$i] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') { $key = $Matches[1]; $map[$key] = Unquote $Matches[2].Trim(); continue }
             # A YAML block list under the previous key ("applies_to:" then "  - src/**")
             # is the same value as the inline comma form.
-            if ($key -and $lines[$i] -match '^\s+-\s+(.+?)\s*$') {
+            if ($key -and $lines[$i] -match '^\s*-\s+(.+?)\s*$') {
                 $item = Unquote $Matches[1]
                 $map[$key] = if ($map[$key]) { "$($map[$key]), $item" } else { $item }
             }
+        }
+        # A flow sequence ("[a, b]") is the same list in one line.
+        foreach ($k in @($map.Keys)) {
+            if ($map[$k] -match '^\[(.*)\]$') { $map[$k] = (($Matches[1] -split ',') | ForEach-Object { Unquote $_.Trim() } | Where-Object { $_ }) -join ', ' }
         }
         return $map
     }
@@ -542,11 +544,8 @@ function Test-OctoAgentDocs {
         param([string]$Content)
         $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $seen = @{}
-        $inCode = $false
-        foreach ($line in ($Content -split "`r?`n")) {
-            # A '# ' inside a fenced block is shell or C# syntax, not a heading.
-            if ($line -match '^\s*```') { $inCode = -not $inCode; continue }
-            if ($inCode) { continue }
+        # A '# ' inside a fenced block is shell or C# syntax, not a heading.
+        foreach ($line in ((ConvertTo-OctoAgentDocsProse $Content) -split "`n")) {
             if ($line -match '^#{1,6}\s+(.*)$') {
                 # A link in a heading contributes its LABEL only: "## See [docs](x)" -> #see-docs.
                 $text = [regex]::Replace($Matches[1], '\[([^\]]*)\]\([^)]*\)', '$1')
@@ -570,7 +569,6 @@ function Test-OctoAgentDocs {
 
     # A CLAUDE.md is safe to replace with the shim when it holds nothing but HTML
     # comments and at most one @import line. Anything else is somebody's work.
-    function Test-IsShimLike { param([string]$Content) Test-OctoAgentDocsShimLike -Content $Content }
 
     # ----------------------------------------------------------- entry + shim
     $agentsPath = Join-Path $repo 'AGENTS.md'
@@ -599,21 +597,21 @@ function Test-OctoAgentDocs {
         $expected = ((Get-Opt 'shim-valid' 'content') -join "`n")
         # A Windows checkout with core.autocrlf reads the two-line shim as CRLF; the
         # template is LF, so both are normalised or every migrated repo fails on Windows.
-        # A lone CR is normalised too, and BEFORE Test-IsShimLike sees the text, or a
+        # A lone CR is normalised too, and BEFORE Test-OctoAgentDocsShimLike sees the text, or a
         # CR-separated shim reads as one line of real content that -Fix refuses to touch.
-        $current = if ($hasClaude) { ConvertTo-OctoAgentDocsLf (Read-Text $claudePath) } else { $null }
+        $current = if ($hasClaude) { ConvertTo-OctoAgentDocsLf (Read-OctoAgentDocsText $claudePath) } else { $null }
         # Case-sensitive: '@agents.md' does not resolve to AGENTS.md on a case-sensitive
         # checkout, so it is not the shim.
         $shimVerdict = Get-OctoAgentDocsShimVerdict -Text $current -ExpectedLines @(Get-Opt 'shim-valid' 'content')
     }
     if ($hasAgents -and (Test-RuleOn 'shim-valid')) {
         if ($shimVerdict -ne 'ok') {
-            $safe = (-not $hasClaude) -or (Test-IsShimLike $current) -or $Force
+            $safe = (-not $hasClaude) -or (Test-OctoAgentDocsShimLike $current) -or $Force
             # A diff shows what -Fix WOULD write. For a CLAUDE.md with real content -Fix
             # writes nothing, so printing the whole file as removed lines would be a lie.
             if ($safe) { Add-Diff 'CLAUDE.md' 'shim' ([string]$current) "$expected`n" }
             if ($Fix -and $safe -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) {
-                Write-Text $claudePath "$expected`n"
+                Write-OctoAgentDocsText $claudePath "$expected`n"
                 $written.Add('CLAUDE.md')
             }
             elseif ($Fix -and $safe) {
@@ -646,7 +644,7 @@ function Test-OctoAgentDocs {
     $textCache = @{}
     function Get-CachedText {
         param([string]$P)
-        if (-not $textCache.ContainsKey($P)) { $textCache[$P] = ConvertTo-OctoAgentDocsLf (Read-Text $P) }
+        if (-not $textCache.ContainsKey($P)) { $textCache[$P] = ConvertTo-OctoAgentDocsLf (Read-OctoAgentDocsText $P) }
         return $textCache[$P]
     }
 
@@ -904,11 +902,16 @@ function Test-OctoAgentDocs {
                 # test applies to IPv4 LITERALS only - '10.attacker.example' is a public
                 # domain that merely starts with '10.'.
                 $ip = $null
-                $isPrivateIp = [System.Net.IPAddress]::TryParse($linkHost, [ref]$ip) -and
-                    $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
-                    $linkHost -match '^(127|10|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.'
+                $isIp = [System.Net.IPAddress]::TryParse($linkHost, [ref]$ip)
+                $isPrivateIp = $isIp -and (
+                    ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+                        $linkHost -match '^(127|10|169\.254|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.') -or
+                    ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and
+                        ([System.Net.IPAddress]::IsLoopback($ip) -or $ip.IsIPv6LinkLocal -or $ip.IsIPv6SiteLocal -or (($ip.GetAddressBytes()[0] -band 0xFE) -eq 0xFC))))
+                # A name without a dot is a single-label local name - unless it is an IPv6
+                # literal, which has no dots and may well be public.
                 if ($skipLocal -and (
-                        -not $linkHost.Contains('.') -or
+                        (-not $isIp -and -not $linkHost.Contains('.')) -or
                         $linkHost -match '(?i)\.(local|localhost|internal|invalid)$' -or
                         $isPrivateIp
                     )) { continue }
@@ -942,7 +945,7 @@ function Test-OctoAgentDocs {
         $full = (Resolve-Path -LiteralPath $Path).Path
         if (-not $shimCache.ContainsKey($full)) {
             $agents = Join-Path (Split-Path -Parent $full) 'AGENTS.md'
-            $shimCache[$full] = (Test-Path -LiteralPath $agents) -and (Test-IsShimLike (Read-Text $full))
+            $shimCache[$full] = (Test-Path -LiteralPath $agents) -and (Test-OctoAgentDocsShimLike (Read-OctoAgentDocsText $full))
         }
         return $shimCache[$full]
     }
@@ -961,9 +964,9 @@ function Test-OctoAgentDocs {
             # references below need the spans, so only the link scan drops them.
             $linkText = [regex]::Replace($prose, '`[^`\n]*`', '')
             # Destination, optionally in <...>, optionally followed by a "title".
-            foreach ($m in [regex]::Matches($linkText, '\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
+            foreach ($m in [regex]::Matches($linkText, '\]\(\s*(?:<([^>]+)>|([^)\s>]+))(?:\s+(?:"[^"]*"|''[^'']*''))?\s*\)')) {
                 # Percent-encoding is how a space travels in a link; the file is unencoded.
-                $target = [System.Uri]::UnescapeDataString($m.Groups[1].Value)
+                $target = [System.Uri]::UnescapeDataString($(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }))
                 if ($target -match '^[A-Za-z][A-Za-z0-9+.-]*:') { continue }   # any URI scheme
                 $parts = $target -split '#', 2
                 $filePart = $parts[0]
@@ -975,12 +978,18 @@ function Test-OctoAgentDocs {
                 if (-not (Test-Path -LiteralPath $resolved)) {
                     Add-Finding 'reference-resolves' $rel "Link target not found: $target"; continue
                 }
+                # Exists, but with this spelling? Test-Path says yes to 'Guide.md' for
+                # guide.md on macOS and Windows; GitHub and Linux say no.
+                $relToRepo = [System.IO.Path]::GetRelativePath($repo, [System.IO.Path]::GetFullPath($resolved))
+                if ($filePart -and -not $relToRepo.StartsWith('..') -and -not (Test-OctoAgentDocsPathExact -Root $repo -RelativePath $relToRepo)) {
+                    Add-Finding 'reference-resolves' $rel "Link target differs in case from the file on disk: $target"; continue
+                }
                 if ($filePart -and (Test-PointsAtShim $resolved)) {
                     Add-Finding 'reference-to-shim' $rel "Link $(Get-ShimAdvice $filePart)"
                 }
                 if ($anchor -and $resolved -like '*.md') {
                     $full = (Resolve-Path -LiteralPath $resolved).Path
-                    if (-not $anchorCache.ContainsKey($full)) { $anchorCache[$full] = Get-Anchors (Read-Text $full) }
+                    if (-not $anchorCache.ContainsKey($full)) { $anchorCache[$full] = Get-Anchors (Read-OctoAgentDocsText $full) }
                     if (-not $anchorCache[$full].Contains($anchor)) { Add-Finding 'reference-resolves' $rel "Anchor not found: $target" }
                 }
             }
@@ -1030,7 +1039,7 @@ function Test-OctoAgentDocs {
                 $line = $lines[$i]
                 if ($i -eq 0 -and $line.Trim() -eq '---') { $inFrontmatter = $true; continue }
                 if ($inFrontmatter) { if ($line.Trim() -eq '---') { $inFrontmatter = $false }; continue }
-                if ($line -match '^\s*```') { $inCode = -not $inCode; continue }
+                if ($line -match '^\s*(```|~~~)') { $inCode = -not $inCode; continue }
                 if ($inCode -and $skipCode) { continue }
                 $isTable = $line.TrimStart().StartsWith('|')
                 $limit = if ($isTable) { $maxTable } else { $maxLine }
@@ -1055,7 +1064,7 @@ function Test-OctoAgentDocs {
         # section matching and the routing comparison do not depend on how the file was
         # saved. The ORIGINAL is kept for -Fix, which splices the new block into it with the
         # file's own line endings rather than rewriting every line of a CRLF file.
-        $entryRaw = Read-Text $entryPath
+        $entryRaw = Read-OctoAgentDocsText $entryPath
         $entry = Get-CachedText $entryPath
         $entryEol = if ($entryRaw.Contains("`r`n")) { "`r`n" } elseif ($entryRaw.Contains("`r")) { "`r" } else { "`n" }
         $entryLines = (Get-Lines $entry).Count
@@ -1116,8 +1125,10 @@ function Test-OctoAgentDocs {
             # LF template, so both sides are normalised or a current table reads as stale.
             $generated = ($sb.ToString() -replace "`r`n", "`n").TrimEnd("`n")
 
-            $si = $entry.IndexOf($startMarker)
-            $ei = $entry.IndexOf($endMarker)
+            # The first occurrence OUTSIDE fenced code: a marker quoted in an example is not
+            # the region, and writing the table into the example would hide the real one.
+            $si = Find-OctoAgentDocsMarker -Text $entry -Marker $startMarker
+            $ei = Find-OctoAgentDocsMarker -Text $entry -Marker $endMarker
             if ($si -lt 0 -or $ei -lt 0 -or $ei -lt $si) {
                 Add-Finding 'routing-current' $entryName "Add $startMarker and $endMarker around the routing table"
             }
@@ -1127,9 +1138,9 @@ function Test-OctoAgentDocs {
                 if ($currentBlock -cne $desired) {
                     Add-Diff $entryName 'routing' $currentBlock.Trim("`n") $generated
                     if ($Fix -and $PSCmdlet.ShouldProcess($entryName, 'Regenerate the routing table')) {
-                        $rsi = $entryRaw.IndexOf($startMarker); $rei = $entryRaw.IndexOf($endMarker)
+                        $rsi = Find-OctoAgentDocsMarker -Text $entryRaw -Marker $startMarker; $rei = Find-OctoAgentDocsMarker -Text $entryRaw -Marker $endMarker
                         $desiredRaw = $entryEol + ($generated -replace "`n", $entryEol) + $entryEol
-                        Write-Text $entryPath ($entryRaw.Substring(0, $rsi + $startMarker.Length) + $desiredRaw + $entryRaw.Substring($rei))
+                        Write-OctoAgentDocsText $entryPath ($entryRaw.Substring(0, $rsi + $startMarker.Length) + $desiredRaw + $entryRaw.Substring($rei))
                         $written.Add($entryName)
                     }
                     elseif ($Fix) { Add-Finding 'routing-current' $entryName 'Generated routing table would be rewritten (run without -WhatIf)' }
