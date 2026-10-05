@@ -335,7 +335,9 @@ function Test-OctoAgentDocs {
         }
         if (On 'link-hosts') {
             $seen = @{}
-            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?://([^/\s<>)"''`\]\[]+)')) {
+            # The authority ends at '/', '?', '#' or '\' (a browser reads '\' as '/'), so none
+            # of them can make an allowlisted name after '@' look like the host.
+            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?://([^/?#\\\s<>)"''`\]\[]+)')) {
                 $linkHost = (($m.Groups[1].Value -split '@')[-1] -split ':')[0].ToLowerInvariant().TrimEnd('.', ',')
                 if (-not $linkHost -or $seen.ContainsKey($linkHost)) { continue }
                 $seen[$linkHost] = $true

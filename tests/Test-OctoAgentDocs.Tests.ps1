@@ -482,6 +482,7 @@ Describe 'link-hosts' {
         @{ case = 'a host outside the allowlist, once per file'; text = '[a](https://evil.example/a) <https://evil.example/b> https://evil.example/c'; hosts = @('evil.example') }
         @{ case = 'the real host behind userinfo and a port'; text = 'https://user:pw@evil.example:8443/x'; hosts = @('evil.example') }
         @{ case = 'a lookalike that merely ends like an allowed host'; text = 'https://docs.claude.com.evil.example/x'; hosts = @('docs.claude.com.evil.example') }
+        @{ case = 'the real host when an allowed name hides after # ? or \ and @'; text = 'https://evil.example#@docs.claude.com https://evil.example?@docs.claude.com https://evil.example\@docs.claude.com'; hosts = @('evil.example') }
     ) {
         $r = New-Fixture
         Set-Override $r $script:on
