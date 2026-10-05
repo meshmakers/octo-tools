@@ -405,34 +405,11 @@ function Test-OctoAgentDocs {
                 Test-Reference $rel $agentsPath $ref 'Referenced file'
             }
         }
-        if ((On 'line-length') -and $f -eq $entryPath) {
-            $maxLine = Opt 'line-length' 'max'; $maxTable = Opt 'line-length' 'tables'; $cap = Opt 'line-length' 'maxReported'
-            $lines = Get-Lines (ConvertTo-OctoAgentDocsProse $content -KeepLineNumbers)
-            $hits = 0
-            for ($i = 0; $i -lt $lines.Count; $i++) {
-                $line = $lines[$i]
-                $isTable = $line.TrimStart().StartsWith('|')
-                $limit = if ($isTable) { $maxTable } else { $maxLine }
-                # A line without any whitespace (a URL, a hash) cannot be wrapped and is exempt.
-                if ($line.Length -le $limit -or $line -match '^\s*(```|~~~)' -or $line.Trim() -notmatch '\s') { continue }
-                $hits++
-                if ($hits -le $cap) { Add-Finding 'line-length' "${rel}:$($i + 1)" "$(if ($isTable) { 'table row' } else { 'line' }) is $($line.Length) characters, limit $limit" }
-            }
-            if ($hits -gt $cap) { Add-Finding 'line-length' $rel "$($hits - $cap) further over-length lines not listed" }
-        }
     }
 
     # --------------------------------------------- entry point: budgets, sections, routing
     if ($entryPath) {
         $entry = Get-Text $entryPath
-        $entryLines = (Get-Lines $entry).Count
-        $maxL = Opt 'entry-point-lines' 'max'
-        if ((On 'entry-point-lines') -and $entryLines -gt $maxL) { Add-Finding 'entry-point-lines' $entryName "$entryLines lines over the budget of $maxL - this file loads in every session. Move detail into docs/ and route it with applies_to" }
-        $maxC = Opt 'entry-point-characters' 'max'; $warnAt = Opt 'entry-point-characters' 'warnAt'
-        if (On 'entry-point-characters') {
-            if ($entry.Length -gt $maxC) { Add-Finding 'entry-point-characters' $entryName "$($entry.Length) characters over the budget of $maxC - move detail into docs/, or shorten the longest lines" }
-            elseif ($warnAt -gt 0 -and $entry.Length -gt $warnAt) { Add-Finding 'entry-point-characters' $entryName "$($entry.Length) characters, past the $warnAt target but under the $maxC limit - worth trimming before it grows" 'warn' }
-        }
         if (On 'required-sections') {
             # Level-2 headings outside fenced code, matched without regard to case. Nothing is
             # ever filled in: a missing section is reported, not written.
@@ -458,12 +435,40 @@ function Test-OctoAgentDocs {
                     $raw = [System.IO.File]::ReadAllText($entryPath)
                     $eol = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
                     $rsi = Find-OctoAgentDocsMarker -Text $raw -Marker $startMarker; $rei = Find-OctoAgentDocsMarker -Text $raw -Marker $endMarker
-                    Write-OctoAgentDocsText $entryPath ($raw.Substring(0, $rsi + $startMarker.Length) + $eol + ($generated -replace "`n", $eol) + $eol + $raw.Substring($rei))
+                    $newRaw = $raw.Substring(0, $rsi + $startMarker.Length) + $eol + ($generated -replace "`n", $eol) + $eol + $raw.Substring($rei)
+                    Write-OctoAgentDocsText $entryPath $newRaw
                     $written.Add($entryName)
+                    $textCache[$entryPath] = $newRaw.Replace("`r`n", "`n")
                 }
                 elseif ($Fix) { Add-Finding 'routing-current' $entryName 'Generated routing table would be rewritten (run without -WhatIf)' }
                 else { Add-Finding 'routing-current' $entryName 'Generated routing table is out of date (run with -Fix)' }
             }
+        }
+
+        # Budgets are measured on the text left behind, so a -Fix run and the next run agree.
+        $entry = Get-Text $entryPath
+        $entryLines = (Get-Lines $entry).Count
+        $maxL = Opt 'entry-point-lines' 'max'
+        if ((On 'entry-point-lines') -and $entryLines -gt $maxL) { Add-Finding 'entry-point-lines' $entryName "$entryLines lines over the budget of $maxL - this file loads in every session. Move detail into docs/ and route it with applies_to" }
+        $maxC = Opt 'entry-point-characters' 'max'; $warnAt = Opt 'entry-point-characters' 'warnAt'
+        if (On 'entry-point-characters') {
+            if ($entry.Length -gt $maxC) { Add-Finding 'entry-point-characters' $entryName "$($entry.Length) characters over the budget of $maxC - move detail into docs/, or shorten the longest lines" }
+            elseif ($warnAt -gt 0 -and $entry.Length -gt $warnAt) { Add-Finding 'entry-point-characters' $entryName "$($entry.Length) characters, past the $warnAt target but under the $maxC limit - worth trimming before it grows" 'warn' }
+        }
+        if (On 'line-length') {
+            $maxLine = Opt 'line-length' 'max'; $maxTable = Opt 'line-length' 'tables'; $cap = Opt 'line-length' 'maxReported'
+            $lines = Get-Lines (ConvertTo-OctoAgentDocsProse $entry -KeepLineNumbers)
+            $hits = 0
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                $isTable = $line.TrimStart().StartsWith('|')
+                $limit = if ($isTable) { $maxTable } else { $maxLine }
+                # A line without any whitespace (a URL, a hash) cannot be wrapped and is exempt.
+                if ($line.Length -le $limit -or $line -match '^\s*(```|~~~)' -or $line.Trim() -notmatch '\s') { continue }
+                $hits++
+                if ($hits -le $cap) { Add-Finding 'line-length' "${entryName}:$($i + 1)" "$(if ($isTable) { "table row is $($line.Length) characters, limit $limit - shorten the globs or the description in the doc's frontmatter" } else { "line is $($line.Length) characters, limit $limit" })" }
+            }
+            if ($hits -gt $cap) { Add-Finding 'line-length' $entryName "$($hits - $cap) further over-length lines not listed" }
         }
     }
 

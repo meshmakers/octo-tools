@@ -202,7 +202,7 @@ Describe 'entry point' {
         $f = Get-Rules (Get-Result $r) 'line-length'
         $f.Count | Should -Be 3
         $f[0].message | Should -Match '^line is 60 characters, limit 40'
-        $f[1].message | Should -Match '^table row is \d+ characters, limit 60'
+        $f[1].message | Should -Match '^table row is \d+ characters, limit 60 - shorten the globs'
         $f[2].message | Should -Match '2 further over-length lines not listed'
     }
 }
@@ -291,6 +291,12 @@ Describe 'routing table and -Fix' {
         (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
         { Test-OctoAgentDocs -Path $r -Fix -Mode enforce 6>$null } | Should -Not -Throw
         (Get-Result $r).data.findings.Count | Should -Be 0
+    }
+    It 'measures the budgets of the file -Fix leaves behind, so the next run agrees' {
+        $r = New-Fixture -NoFix
+        Set-Override $r '{"schemaVersion":1,"mode":"enforce","rules":{"entry-point-characters":["error",{"max":220,"warnAt":0}]}}'
+        { Test-OctoAgentDocs -Path $r -Fix 6>$null } | Should -Throw '*error-severity*'
+        (Get-Rules (Get-Result $r @{ Mode = 'logOnly' }) 'entry-point-characters').Count | Should -Be 1
     }
     It 'reports a table that differs only in case as stale' {
         $r = New-Fixture
