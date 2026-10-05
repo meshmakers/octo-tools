@@ -50,6 +50,7 @@ Describe 'created: a repository without agent files' {
         $init.data.state | Should -Be 'created'
         @($init.data.filesWritten) | Should -Be @('AGENTS.md')
         (Get-Row $init 'CLAUDE.md').fact | Should -Be 'no real content, but not the shim'
+        (Get-Row $init 'check').fact | Should -Be '2 error(s), 0 warning(s)'   # the check ran read-only: shim and the empty table
         @($init.data.nextSteps | Where-Object { $_.command -like '*-Fix' }).Count | Should -Be 1
         Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw | Should -Be "<!-- keep -->`n@docs/other.md`n"
     }
@@ -77,7 +78,7 @@ Describe 'migration: a repository with a hand-written CLAUDE.md' {
         $brief | Should -Match 'Never pass `-Force`'
         $brief | Should -Not -Match 'link-hosts'   # off, so not in the list of what the checker will say
     }
-    It 'prints the repository name in the brief when it resolves under ROOTPATH, the typed path otherwise' {
+    It 'prints the repository name in the brief under ROOTPATH, and a dot otherwise, so the command works from inside the repository' {
         $root = New-TempDir
         $r = Join-Path $root 'octo-thing'
         Write-File (Join-Path $r 'CLAUDE.md') "# Real`n"
@@ -89,7 +90,7 @@ Describe 'migration: a repository with a hand-written CLAUDE.md' {
             Remove-Item -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md')
             $Global:ROOTPATH = $null
             Get-Init $r | Out-Null
-            Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw | Should -Match "Test-OctoAgentDocs -Path $([regex]::Escape($r))``"
+            Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw | Should -Match 'Test-OctoAgentDocs -Path \.`'
         }
         finally { $Global:ROOTPATH = $saved }
     }

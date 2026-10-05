@@ -27,11 +27,15 @@ Describe 'clean repository' {
         @($res.PSObject.Properties.Name) | Should -Be @('schemaVersion', 'command', 'timestamp', 'data')
         @($res.data.PSObject.Properties.Name) | Should -Be @('repository', 'entryPoint', 'canonical', 'shim', 'mode', 'filesWritten', 'routes', 'findings', 'startHere', 'explanations', 'ruleSet', 'summary')
     }
-    It 'resets LASTEXITCODE to 0 on a clean enforce run' {
+    It 'resets LASTEXITCODE to 0 on a clean enforce run and on the rule reference' {
         $r = New-Fixture
         $global:LASTEXITCODE = 7
         Test-OctoAgentDocs -Path $r -Mode enforce 6>$null | Out-Null
         $global:LASTEXITCODE | Should -Be 0
+        $global:LASTEXITCODE = 7
+        Test-OctoAgentDocs -Explain -All 6>$null | Out-Null
+        $global:LASTEXITCODE | Should -Be 0
+        (Get-Output { Test-OctoAgentDocs -Path $r })[1] | Should -Match '^\s+clean - 1 routed doc$'
     }
 }
 
@@ -279,6 +283,13 @@ Describe 'routing table and -Fix' {
         $raw = [System.IO.File]::ReadAllText((Join-Path $r 'AGENTS.md'))
         $raw | Should -Not -Match "(?<!`r)`n"
         $raw | Should -Match "\| ``src/\*\*`` \| ``docs/one.md`` \|`r`n"
+        (Get-Result $r).data.findings.Count | Should -Be 0
+    }
+    It 'does not report a stale row of the generated table as a broken reference' {
+        $r = New-Fixture
+        Rename-Item -LiteralPath (Join-Path $r 'docs/one.md') -NewName 'two.md'
+        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        { Test-OctoAgentDocs -Path $r -Fix -Mode enforce 6>$null } | Should -Not -Throw
         (Get-Result $r).data.findings.Count | Should -Be 0
     }
     It 'reports a table that differs only in case as stale' {

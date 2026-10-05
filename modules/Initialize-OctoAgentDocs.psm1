@@ -57,10 +57,10 @@ function Initialize-OctoAgentDocs {
     $whatIf = [bool]$WhatIfPreference
     $written = [System.Collections.Generic.List[string]]::new()
 
-    # The command printed for copying: the repository name when it resolves under ROOTPATH
-    # (portable, and what the brief is committed with), otherwise the path as typed.
-    $pathArg = if ($Global:ROOTPATH -and (Join-Path $Global:ROOTPATH $repoName) -eq $repo) { $repoName } else { Format-OctoAgentDocsArgument -Value $Path }
-    $checkCmd = "Test-OctoAgentDocs -Path $pathArg"
+    # Commands printed for copying use the path as typed. The brief is committed and read
+    # inside the repository, so it gets the repository name under ROOTPATH, otherwise '.'.
+    $checkCmd = "Test-OctoAgentDocs -Path $(Format-OctoAgentDocsArgument -Value $Path)"
+    $briefPathArg = if ($Global:ROOTPATH -and (Join-Path $Global:ROOTPATH $repoName) -eq $repo) { $repoName } else { '.' }
 
     # CLAUDE.md is one of: absent, shim, thin (comments and at most one @import, not the
     # shim), real. Whether it IS the shim is the checker's verdict when a check ran.
@@ -92,7 +92,7 @@ function Initialize-OctoAgentDocs {
     elseif ($claudeBefore -eq 'real') {
         $state = 'migration'
         if (-not (Test-Path -LiteralPath $briefPath) -and $PSCmdlet.ShouldProcess($briefName, 'Write the migration brief')) {
-            Write-OctoAgentDocsText $briefPath (Format-MigrationBrief -Repo $repoName -PathArgument $pathArg -Config $config)
+            Write-OctoAgentDocsText $briefPath (Format-MigrationBrief -Repo $repoName -PathArgument $briefPathArg -Config $config)
             $written.Add($briefName)
         }
     }
@@ -104,8 +104,8 @@ function Initialize-OctoAgentDocs {
         # Test-OctoAgentDocs -Fix is for, with its guard and its -WhatIf.
         if ($claudeBefore -eq 'absent' -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) { Write-OctoAgentDocsText $claudePath (($shimLines -join "`n") + "`n"); $written.Add('CLAUDE.md') }
         # One -Fix pass fills the empty routing table, safe because -Fix never touches a
-        # CLAUDE.md that already is the shim.
-        if ($written.Contains('AGENTS.md') -and (Get-ClaudeState) -eq 'shim') { $check = Invoke-Check -Fix }
+        # CLAUDE.md that already is the shim; with a thin CLAUDE.md the check only reads.
+        if ($written.Contains('AGENTS.md')) { $check = Invoke-Check -Fix:((Get-ClaudeState) -eq 'shim') }
     }
 
     # --------------------------------------------------------------- checklist

@@ -162,6 +162,7 @@ function Test-OctoAgentDocs {
         $unknown = @($ids | Where-Object { $script:RuleIds -notcontains $_ })
         if ($unknown) { throw "Unknown rule(s): $($unknown -join ', '). Known: $($script:RuleIds -join ', ')" }
         $rows = @(foreach ($id in $ids) { Get-RuleRow $id })
+        $global:LASTEXITCODE = 0
         if ($Json) { Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{ repository = $repoName; mode = $config.mode; rules = $rows }); return }
         Write-Host "Agent docs rules for $repoName (mode: $($config.mode)) - effective severity, in the order to fix them" -ForegroundColor Yellow
         foreach ($t in @($rows.tier | Sort-Object -Unique)) {
@@ -366,10 +367,19 @@ function Test-OctoAgentDocs {
             if (-not $anchorCache[$full].Contains($anchor)) { Add-Finding 'reference-resolves' $Rel "Anchor not found: $Target" }
         }
     }
+    $startMarker = Get-OctoAgentDocsConstant RoutingStart
+    $endMarker = Get-OctoAgentDocsConstant RoutingEnd
     foreach ($f in $checkFiles) {
         $content = Get-Text $f
         $rel = [System.IO.Path]::GetRelativePath($repo, $f).Replace('\', '/')
         $prose = ConvertTo-OctoAgentDocsProse $content
+        if ($f -eq $entryPath) {
+            # The generated table is derived, not written: a stale row naming a doc that is
+            # gone is fixed by -Fix, not by a reference finding that would outlive the fix.
+            $si = Find-OctoAgentDocsMarker -Text $prose -Marker $startMarker
+            $ei = Find-OctoAgentDocsMarker -Text $prose -Marker $endMarker
+            if ($si -ge 0 -and $ei -gt $si) { $prose = $prose.Substring(0, $si) + $prose.Substring($ei) }
+        }
         if ((On 'reference-resolves') -or (On 'reference-to-shim')) {
             # Inline links, with code spans removed first: `[label](path.md)` is quoted syntax.
             foreach ($m in [regex]::Matches(($prose -replace '`[^`\n]*`', ''), '\]\(\s*<?([^)\s>]+)>?')) {
@@ -407,8 +417,6 @@ function Test-OctoAgentDocs {
     }
 
     # --------------------------------------------- entry point: budgets, sections, routing
-    $startMarker = Get-OctoAgentDocsConstant RoutingStart
-    $endMarker = Get-OctoAgentDocsConstant RoutingEnd
     if ($entryPath) {
         $entry = Get-Text $entryPath
         $entryLines = (Get-Lines $entry).Count
@@ -485,7 +493,7 @@ function Test-OctoAgentDocs {
     }
     else {
         Write-Host "Agent docs check: $repoName (entry point: $entryName, mode: $($config.mode))" -ForegroundColor Yellow
-        if ($findings.Count -eq 0) { Write-Host "  clean - $($routes.Count) routed docs" -ForegroundColor Green }
+        if ($findings.Count -eq 0) { Write-Host "  clean - $($routes.Count) routed doc$(if ($routes.Count -ne 1) { 's' })" -ForegroundColor Green }
         else {
             $fileCount = @($findings | ForEach-Object { ($_.file -split ':')[0] } | Where-Object { $_ } | Sort-Object -Unique).Count
             Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s) in $fileCount file(s)" -ForegroundColor Gray
