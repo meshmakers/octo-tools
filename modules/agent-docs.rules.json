@@ -15,8 +15,7 @@
       "dist",
       ".vs",
       ".idea"
-    ],
-    "maxFiles": 500
+    ]
   },
   "rules": {
     "entry-point-lines": [
@@ -37,17 +36,13 @@
       {
         "max": 120,
         "tables": 200,
-        "scope": "entryPoint",
-        "ignoreCodeBlocks": true,
-        "ignoreNoWhitespace": true,
         "maxReported": 5
       }
     ],
     "doc-size": [
       "warn",
       {
-        "maxCharacters": 25000,
-        "charactersPerToken": 4.0
+        "maxCharacters": 25000
       }
     ],
     "frontmatter-present": [
@@ -219,15 +214,5 @@
       "why": "AGENTS-MIGRATION.md is a working brief for the migration, not documentation; left behind, it misleads the next reader.",
       "fix": "Finish the steps it lists, then delete the file in the same commit."
     }
-  },
-  "_charactersPerToken_note": "A fixed yardstick, not a per-model calibration: 4 characters per token is OpenAI's published English rule of thumb, chosen so a document reports the same size on every model. Anthropic publish no ratio and newer tokenizers run ~30% heavier, so treat the figure as an order of magnitude, not a bill.",
-  "_maxCharacters_note": "A POLICY CHOICE, not a measurement. No study covers reference-document size for agents. 25000 borrows the order of magnitude from Anthropic's 25KB MEMORY.md load limit - a different file type, and the only first-party size number in this domain. Set it where it fires occasionally rather than never.",
-  "_required_sections_note": "Heading text is matched case-insensitively and at level 2 (## ) only.",
-  "_mode_note": "Mode is a property of the CALLER, not of a repository: a person who typed the command has already asked to be told, a pipeline reads nothing but the exit code. So this stays logOnly and CI passes -Mode enforce, or a repository opts up once clean. To flip: get every repo clean at error severity, change this key, drop the now-redundant per-repo 'mode'. A repo added after the flip is unblocked with -Mode logOnly in its pipeline, never with a line in its own file.",
-  "_severity_note": "error = decidable (a character either is U+200B or it is not). warn = a budget whose right number is a judgement. off = not decidable, so not a gate. Never soften a security rule to 'warn' to keep it from breaking a build - that is what logOnly is for, and a warning is a thing people scroll past.",
-  "_nonRelaxable_note": "A repository's own .agent-docs.json may RAISE these rules but never lower them, because that file lives in the branch under review and the pull request carrying a payload can carry the opt-out with it. -ConfigPath is exempt: it comes from whoever runs the tool. To change one of these, change this file.",
-  "_scan_note": "The integrity rules (no-invisible-characters, link-hosts) read every *.md in the repository, dotfolders included, minus these path segments - a nested AGENTS.md or a .claude/ rule is loaded by an agent without appearing in any routing table. The structural rules stay on the routed set.",
-  "_ruleDocs_note": "The single source for Test-OctoAgentDocs -Explain, the README rules table and the migration brief. One sentence each: 'why' states the cost the rule prevents, 'fix' names the first thing to do. English only.",
-  "_migration_pending_note": "Initialize-OctoAgentDocs writes AGENTS-MIGRATION.md into a repository that still has a real CLAUDE.md. The brief is meant to be deleted in the migration commit; this rule nags until it is. The file name is fixed, defined once in OctoAgentDocs.Common.psm1.",
-  "_tiers_note": "The order findings are reported in and the order the migration brief says to fix them. Each ruleDocs entry names its tier. Severity is unaffected: a tier is about what to do first, not about how wrong something is."
+  }
 }

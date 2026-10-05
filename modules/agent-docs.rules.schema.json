@@ -7,12 +7,6 @@
     "rules"
   ],
   "additionalProperties": false,
-  "patternProperties": {
-    "^_": {
-      "type": "string",
-      "description": "Note key. Underscore-prefixed properties carry the reasoning behind a threshold and are ignored by the loader."
-    }
-  },
   "properties": {
     "$schema": {
       "type": "string"
@@ -49,10 +43,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "maxFiles": {
-          "type": "integer",
-          "minimum": 1
         }
       }
     },
@@ -80,26 +70,56 @@
       },
       "additionalProperties": {
         "type": "object",
-        "required": ["tier", "why", "fix"],
+        "required": [
+          "tier",
+          "why",
+          "fix"
+        ],
         "additionalProperties": false,
         "properties": {
-          "tier": { "type": "integer", "minimum": 1, "maximum": 4 },
-          "why": { "type": "string", "minLength": 1 },
-          "fix": { "type": "string", "minLength": 1 }
+          "tier": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fix": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
     "tiers": {
       "description": "Report order. Findings are grouped by the tier their rule names, lowest first.",
       "type": "object",
-      "propertyNames": { "enum": ["1", "2", "3", "4"] },
+      "propertyNames": {
+        "enum": [
+          "1",
+          "2",
+          "3",
+          "4"
+        ]
+      },
       "additionalProperties": {
         "type": "object",
-        "required": ["title", "why"],
+        "required": [
+          "title",
+          "why"
+        ],
         "additionalProperties": false,
         "properties": {
-          "title": { "type": "string", "minLength": 1 },
-          "why": { "type": "string", "minLength": 1 }
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

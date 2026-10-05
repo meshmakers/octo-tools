@@ -7,8 +7,9 @@
 This repository still carries its agent instructions in `CLAUDE.md`. The target shape is one
 canonical entry point, `AGENTS.md`, that every coding agent reads, a two-line `CLAUDE.md` shim that
 imports it, and the detail moved into path-routed documents under `docs/`. These instructions are
-for the coding agent doing the migration together with a developer. Nothing here is generated
-from code; every value below comes from the ruleset that `Test-OctoAgentDocs` enforces.
+for the coding agent doing the migration together with a developer. Nothing here was derived
+from this repository's source; every value below comes from the ruleset that `Test-OctoAgentDocs`
+enforces.
 
 ## Target shape
 
@@ -29,8 +30,9 @@ the routing markers under the first:
 {{END_MARKER}}
 ```
 
-Every `docs/*.md` starts with a frontmatter block. `applies_to` is a comma-separated list of path
-globs; a change under one of those paths is what makes an agent open the file.
+Every `docs/*.md` starts with a frontmatter block of single-line `key: value` entries. `applies_to`
+is a comma-separated list of path globs; a change under one of those paths is what makes an agent
+open the file.
 
 ```yaml
 ---
@@ -69,8 +71,8 @@ what to do.
    moving its last sections, then run `-Fix`. Never pass `-Force` to skip that check.
 5. **Generate the routing table** with the same `-Fix` run. The table is derived from the docs'
    frontmatter and is regenerated on every `-Fix`; never edit it by hand.
-6. **Fix every finding** until the checker reports clean. Use `-Diff` to see what a `-Fix` would
-   write, and `-Fix -WhatIf` to confirm it writes nothing else.
+6. **Fix every finding** until the checker reports clean. `-Fix -WhatIf` names what a `-Fix`
+   would write without writing it.
 7. **Delete this file** (`{{BRIEF}}`) in the same commit. The commit message follows the
    repository's convention and names the work item.
 

@@ -155,7 +155,7 @@ its `CLAUDE.md` shim and `docs/` - and regenerates the parts of them that are de
 Test-OctoAgentDocs                                   # current repo, report only
 Test-OctoAgentDocs -Path octo-communication-operator # or a repo name under $ROOTPATH
 Test-OctoAgentDocs -Fix                              # rewrite the generated regions
-Test-OctoAgentDocs -Fix -WhatIf -Diff                # show what -Fix would write, write nothing
+Test-OctoAgentDocs -Fix -WhatIf                      # name what -Fix would write, write nothing
 Test-OctoAgentDocs -Explain                          # the check, plus why and fix for each rule that fired
 Test-OctoAgentDocs -Explain -All                     # every rule: severity, limits, why, fix; no scan
 Test-OctoAgentDocs -Explain doc-size                 # one rule (the name in each finding's second column); no scan
@@ -166,8 +166,8 @@ The report opens with the counts and a "start here" sentence naming the cause be
 findings, then groups them in the order to fix them: integrity, entry point, docs, budgets. Every
 finding names its rule. `-Explain` adds, for each rule that fired, why it exists and what to do
 about it; `-Explain -All` is the full reference in the same order. That text and the order live in
-the ruleset (`ruleDocs`, `tiers`), so the report, this README and the migration brief below cannot
-drift from what is enforced.
+the ruleset (`ruleDocs`, `tiers`), so the report and the migration brief below cannot drift from
+what is enforced.
 
 It checks two things that are easy to get wrong by hand and one that is impossible to
 see: that the always-loaded entry point stays inside its budget, that every doc is
@@ -184,7 +184,9 @@ Rules are configured like ESLint's - `[severity, options]` with `off | warn | er
 and cascade: the org defaults in `modules/agent-docs.rules.json`, then a repository's
 own `.agent-docs.json`, then `-ConfigPath`, then `-Mode`. A repository may raise a rule
 but not lower one listed in `nonRelaxable`, because that file lives in the branch under
-review. `Get-Help Test-OctoAgentDocs -Full` has the rest.
+review. The checker reads what these repositories write: single-line `key: value`
+frontmatter, inline Markdown links and backticked paths, LF or CRLF line endings. Other
+shapes are reported, not parsed. `Get-Help Test-OctoAgentDocs -Full` has the rest.
 
 ## Starting a repository
 
@@ -206,7 +208,7 @@ shim as enforced. The checker warns while that file exists (`migration-pending`)
 the migration commit. All of these files are English, like everything else that ships with a
 repository.
 
-Tests, from the `octo-tools` folder (Pester 5: `Install-Module Pester -Scope CurrentUser -MinimumVersion 5.0`):
+Tests, from the `octo-tools` folder (Pester 5 or later: `Install-Module Pester -Scope CurrentUser`):
 `Invoke-Pester ./tests`.
 
 # Support and Feedback
