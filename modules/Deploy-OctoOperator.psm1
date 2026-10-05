@@ -689,6 +689,11 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
                 )
             }
         }
+        # SECRET attribute key ring (AB#5536): the operator injects k1 (= the shared dev
+        # instance key Start-Octo hands the host-run services) into every workload with
+        # ReceivesClusterSecrets=true, so a kind-deployed adapter reads the SECRET values
+        # the host services wrote. Same derivation as on the clusters, where the value is
+        # Vault's instance_secret_key.
         if (-not $Json) { Write-Host "Deploying operator release '$ReleaseName' (image tag '$ImageTag', registry '$registry', pullPolicy '$pullPolicy', controller '$controllerUri', identity '$authUri')" -ForegroundColor Green }
 
         $helmOut = & helm upgrade --install $ReleaseName $chart `
@@ -703,6 +708,7 @@ Get-HostLanIPv4 so in-cluster pods can reach the host over the LAN.
             --set "image.pullPolicy=$pullPolicy" `
             --set "operator.communicationControllerUri=$controllerUri" `
             --set "operator.authUri=$authUri" `
+            --set-string "operator.clusterSecrets.instanceSecretKey=$(Get-OctoDevInstanceSecretKey)" `
             --set-file "serviceHooks.caKey=$certDir/ca-key.pem" `
             --set-file "serviceHooks.caCrt=$certDir/ca.pem" `
             --set-file "serviceHooks.svcKey=$certDir/svc-key.pem" `
