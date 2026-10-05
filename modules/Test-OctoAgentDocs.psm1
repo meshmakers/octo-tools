@@ -255,7 +255,13 @@ function Test-OctoAgentDocs {
         $current = if ($hasClaude) { Get-Text $claudePath } else { $null }
         $shimVerdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -ceq ($shimLines -join "`n")) { 'ok' } else { 'differs' }
     }
-    if ($hasAgents -and (On 'shim-valid') -and $shimVerdict -ne 'ok') {
+    # A 'claude.md' is not the shim, and on a case-insensitive file system writing CLAUDE.md
+    # would overwrite it - so nothing is written while the two names would collide.
+    $claudeAlias = $rootNames | Where-Object { $_ -ieq 'CLAUDE.md' -and $_ -cne 'CLAUDE.md' } | Select-Object -First 1
+    if ($hasAgents -and (On 'shim-valid') -and $claudeAlias) {
+        Add-Finding 'shim-valid' $claudeAlias "Named '$claudeAlias', not CLAUDE.md - rename it before -Fix can write the shim"
+    }
+    elseif ($hasAgents -and (On 'shim-valid') -and $shimVerdict -ne 'ok') {
         $safe = -not $hasClaude -or $Force -or (Test-OctoAgentDocsShimLike $current)
         $realContent = 'Has real content while AGENTS.md is canonical - migrate it by hand, or run -Fix -Force to replace it with the shim'
         if ($Fix -and $safe -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) { Write-OctoAgentDocsText $claudePath (($shimLines -join "`n") + "`n"); $written.Add('CLAUDE.md') }

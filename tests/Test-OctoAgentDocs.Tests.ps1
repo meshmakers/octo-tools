@@ -336,6 +336,16 @@ Describe 'CLAUDE.md shim' {
         Test-OctoAgentDocs -Path $r -Fix -Force 6>$null | Out-Null
         Get-Content -LiteralPath $p -Raw | Should -Be $script:Shim
     }
+    It 'never writes over a claude.md whose name differs only in case' {
+        $r = New-Fixture
+        Remove-Item -LiteralPath (Join-Path $r 'CLAUDE.md')
+        Write-File (Join-Path $r 'claude.md') "# Real`n"
+        $f = Get-Rules (Get-Result $r @{ Fix = $true }) 'shim-valid'
+        $f[0].file | Should -Be 'claude.md'
+        $f[0].message | Should -Match 'rename it'
+        @(Get-ChildItem -LiteralPath $r -File).Name | Should -Contain 'claude.md'
+        Get-Content -LiteralPath (Join-Path $r 'claude.md') -Raw | Should -Be "# Real`n"
+    }
     It 'never writes through a symbolic link' {
         $r = New-Fixture
         $outside = New-TempDir
