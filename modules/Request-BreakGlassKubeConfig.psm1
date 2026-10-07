@@ -24,7 +24,7 @@ function Request-BreakGlassKubeConfig {
           - Teams     (shared #ops-breakglass channel)
 
     .PARAMETER Cluster
-        Target cluster name. Must be one of test-2, staging-1, prod-1, prod-2.
+        Target cluster name. Must be one of test-2, staging-1, prod-1, prod-2, infra.
 
     .PARAMETER Reason
         Free-text justification, min 10 characters. Logged everywhere and
@@ -67,7 +67,7 @@ function Request-BreakGlassKubeConfig {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('test-2', 'staging-1', 'prod-1', 'prod-2')]
+        [ValidateSet('test-2', 'staging-1', 'prod-1', 'prod-2', 'infra')]
         [string]$Cluster,
 
         [Parameter(Mandatory = $true)]
