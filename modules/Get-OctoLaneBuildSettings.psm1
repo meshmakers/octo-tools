@@ -65,7 +65,14 @@ function Get-OctoLaneBuildSettings {
             $reason = "disabled by -laneIsolation Off"
         }
         default {
-            if ($configuredLocalFeeds.Count -eq 0) {
+            $laneUserProps = Join-Path -Path $laneRoot -ChildPath "Octo.User.props"
+            if (-not (Test-Path -Path $laneFeed -PathType Container) -and -not (Test-Path -Path $laneUserProps -PathType Leaf)) {
+                # Neither a nuget/ feed nor an Octo.User.props: not a lane checkout (e.g. a repo outside the
+                # lanes built with Invoke-Build). Never invent a cache next to it.
+                $isolated = $false
+                $reason = "$laneRoot is not a lane checkout (no nuget/ and no Octo.User.props) - legacy behaviour"
+            }
+            elseif ($configuredLocalFeeds.Count -eq 0) {
                 $isolated = $false
                 $reason = "no local feed in $nugetConfigPath - legacy behaviour"
             }
@@ -157,11 +164,182 @@ function Get-OctoRepoRestoreSourcesOverride {
     if (-not $laneSettings.isolated) {
         return $null
     }
-    $props = Join-Path -Path $repositoryPath -ChildPath "Directory.Build.props"
-    if ((Test-Path -Path $props -PathType Leaf) -and (Select-String -Path $props -Pattern '<RestoreSources' -SimpleMatch -Quiet)) {
-        return $null
+    # Like MSBuild, take the nearest Directory.Build.props above the path (Invoke-Publish may be pointed
+    # at a project folder inside the repo), but never look above the lane root.
+    $directory = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
+    while ($directory -and $directory.StartsWith($laneSettings.laneRoot, [StringComparison]::OrdinalIgnoreCase) -and $directory -ine $laneSettings.laneRoot) {
+        $props = Join-Path -Path $directory -ChildPath "Directory.Build.props"
+        if (Test-Path -Path $props -PathType Leaf) {
+            if (Select-String -Path $props -Pattern '<RestoreSources' -SimpleMatch -Quiet) {
+                return $null
+            }
+            break
+        }
+        $directory = Split-Path -Parent $directory
     }
     return $laneSettings.restoreSourcesOverride
+}
+
+<#
+.SYNOPSIS
+    The lane checkout a repository (or a folder inside it) belongs to: the nearest ancestor that holds an
+    Octo.User.props - the same file MSBuild finds via GetPathOfFileAbove. $null outside any lane.
+#>
+function Find-OctoLaneRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $directory = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path))
+    while ($directory) {
+        if (Test-Path -Path (Join-Path -Path $directory -ChildPath "Octo.User.props") -PathType Leaf) {
+            return $directory
+        }
+        $parent = Split-Path -Parent $directory
+        if ($parent -eq $directory) { break }
+        $directory = $parent
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Lane settings plus the complete environment for building ONE repository (Invoke-Build, Invoke-Publish).
+
+.DESCRIPTION
+    Same rules as Invoke-BuildAll: an isolated lane gets NUGET_PACKAGES + MSBUILDDISABLENODEREUSE, and in
+    DebugL a repo without its own <RestoreSources> additionally gets RestoreSources. Outside a lane, and in
+    the lane the user-level NuGet.Config points at (main), the environment is empty (legacy behaviour).
+#>
+function Get-OctoRepositoryBuildEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$repositoryPath,
+        [string]$configuration = "Release",
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto'
+    )
+
+    $environment = [ordered]@{}
+    $laneRoot = Find-OctoLaneRoot -path $repositoryPath
+    if ($null -eq $laneRoot) {
+        return [PSCustomObject][ordered]@{
+            laneRoot    = $null
+            isolated    = $false
+            reason      = "no Octo.User.props above $repositoryPath - not a lane checkout, legacy behaviour"
+            environment = $environment
+        }
+    }
+
+    $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $laneRoot -laneIsolation $laneIsolation
+    foreach ($name in $laneSettings.environment.Keys) {
+        $environment[$name] = $laneSettings.environment[$name]
+    }
+    if ($configuration -ieq "DebugL") {
+        $restoreSourcesOverride = Get-OctoRepoRestoreSourcesOverride -repositoryPath $repositoryPath -laneSettings $laneSettings
+        if ($null -ne $restoreSourcesOverride) {
+            $environment['RestoreSources'] = $restoreSourcesOverride
+        }
+    }
+    return [PSCustomObject][ordered]@{
+        laneRoot    = $laneSettings.laneRoot
+        isolated    = $laneSettings.isolated
+        reason      = $laneSettings.reason
+        environment = $environment
+    }
+}
+
+# Shared -DryRun output of Invoke-Build / Invoke-Publish.
+function Write-OctoLaneDryRun {
+    param(
+        [string]$command,
+        [string]$repositoryPath,
+        [string]$configuration,
+        $buildEnvironment,
+        [switch]$Json
+    )
+
+    if ($Json) {
+        Write-OctoJson -Command $command -Data ([ordered]@{
+            dryRun         = $true
+            repositoryPath = [IO.Path]::GetFullPath($repositoryPath)
+            configuration  = $configuration
+            laneRoot       = $buildEnvironment.laneRoot
+            isolated       = $buildEnvironment.isolated
+            reason         = $buildEnvironment.reason
+            environment    = $buildEnvironment.environment
+        })
+        return
+    }
+    Write-Host "Dry run ($command) - dotnet is not started" -ForegroundColor Yellow
+    Write-Host "Repository:      $([IO.Path]::GetFullPath($repositoryPath))"
+    Write-Host "Configuration:   $configuration"
+    Write-Host "Lane root:       $($buildEnvironment.laneRoot)"
+    Write-Host "Lane isolated:   $($buildEnvironment.isolated) ($($buildEnvironment.reason))"
+    foreach ($name in $buildEnvironment.environment.Keys) {
+        Write-Host "  env $name=$($buildEnvironment.environment[$name])"
+    }
+}
+
+<#
+.SYNOPSIS
+    Creates <lane>/Octo.User.props with the lane-local package cache, or checks an existing one.
+
+.DESCRIPTION
+    Octo.User.props is a per-checkout, uncommitted file that every OctoMesh repo's Directory.Build.props
+    imports (GetPathOfFileAbove). Its RestorePackagesPath=<lane>/.nuget-packages keeps Rider, dotnet and
+    MSBuild builds of one lane out of the other lane's 999.0.0 packages. This command is its source:
+    it writes the file only when it is MISSING. An existing file is never changed (main's carries more
+    settings); it is only checked for the RestorePackagesPath line and a warning is printed if it lacks it.
+
+.EXAMPLE
+    Initialize-OctoLaneUserProps -branch dev
+#>
+function Initialize-OctoLaneUserProps {
+    param(
+        [string]$branch = "",
+        [switch]$Json
+    )
+
+    $laneRoot = [IO.Path]::GetFullPath((Join-Path -Path $rootPath -ChildPath $branch))
+    if (-not (Test-Path -Path $laneRoot -PathType Container)) {
+        Write-Error "Lane root $laneRoot does not exist"
+        return
+    }
+    $propsPath = Join-Path -Path $laneRoot -ChildPath "Octo.User.props"
+    $status = ""
+    if (-not (Test-Path -Path $propsPath -PathType Leaf)) {
+        $content = @'
+<Project>
+    <!-- Lane-local NuGet package cache (generated by Initialize-OctoLaneUserProps, octo-tools).
+         Both lanes build the same 999.0.0 DebugL packages; a shared ~/.nuget/packages
+         lets whichever lane restored last poison the other. RestorePackagesPath is the
+         MSBuild equivalent of NUGET_PACKAGES and is honored by dotnet, MSBuild and Rider. -->
+    <PropertyGroup>
+        <RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath>
+    </PropertyGroup>
+</Project>
+'@
+        Set-Content -Path $propsPath -Value $content -NoNewline:$false
+        $status = "created"
+    }
+    elseif (Select-String -Path $propsPath -Pattern '<RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath>' -SimpleMatch -Quiet) {
+        $status = "ok"
+    }
+    else {
+        $status = "missing-restore-packages-path"
+    }
+
+    if ($Json) {
+        Write-OctoJson -Command 'Initialize-OctoLaneUserProps' -Data (New-OctoActionResult -Success ($status -ne "missing-restore-packages-path") -ExitCode 0 -Extra @{ path = $propsPath; status = $status })
+        return
+    }
+    switch ($status) {
+        "created" { Write-Host "Created $propsPath (RestorePackagesPath=<lane>/.nuget-packages)" -ForegroundColor Green }
+        "ok" { Write-Host "$propsPath already sets the lane-local package cache - left unchanged" -ForegroundColor Green }
+        default { Write-Warning "$propsPath exists but does not set RestorePackagesPath=`$(MSBuildThisFileDirectory).nuget-packages - left unchanged, add it by hand" }
+    }
 }
 
 <#
@@ -206,6 +384,10 @@ function Restore-OctoBuildEnvironment {
 
 Export-ModuleMember -Function @(
     'Get-OctoLaneBuildSettings',
+    'Find-OctoLaneRoot',
+    'Get-OctoRepositoryBuildEnvironment',
+    'Initialize-OctoLaneUserProps',
+    'Write-OctoLaneDryRun',
     'Get-OctoRepoRestoreSourcesOverride',
     'Set-OctoBuildEnvironment',
     'Restore-OctoBuildEnvironment'

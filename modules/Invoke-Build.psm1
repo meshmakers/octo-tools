@@ -2,6 +2,34 @@ function Invoke-Build {
     param(
         [string]$configuration = "Release",
         [string]$repositoryPath = ".\",
+        # Lane isolation, same rules as Invoke-BuildAll (see Get-OctoRepositoryBuildEnvironment).
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto',
+        # Print the lane environment this build would use and exit without running dotnet.
+        [switch]$DryRun,
+        [switch]$Json
+    )
+
+    $buildEnvironment = Get-OctoRepositoryBuildEnvironment -repositoryPath $repositoryPath -configuration $configuration -laneIsolation $laneIsolation
+    if ($DryRun) {
+        Write-OctoLaneDryRun -command 'Invoke-Build' -repositoryPath $repositoryPath -configuration $configuration -buildEnvironment $buildEnvironment -Json:$Json
+        return
+    }
+
+    # Set for this build only and restored afterwards; empty outside a lane and in main (legacy behaviour).
+    $savedEnvironment = Set-OctoBuildEnvironment -environment $buildEnvironment.environment
+    try {
+        Invoke-BuildCore -configuration $configuration -repositoryPath $repositoryPath -Json:$Json
+    }
+    finally {
+        Restore-OctoBuildEnvironment -saved $savedEnvironment
+    }
+}
+
+function Invoke-BuildCore {
+    param(
+        [string]$configuration = "Release",
+        [string]$repositoryPath = ".\",
         [switch]$Json
     )
     $logFile = Join-Path $repositoryPath "Invoke-Build.log"

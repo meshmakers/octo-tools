@@ -87,7 +87,9 @@ function Compile-RepoCore {
     [Boolean]$state = $false;
     if ($builder -eq "Invoke-Publish") {
         # frontends has to be published to build the angular app
-        Invoke-Publish -repositoryPath $path -configuration $configuration
+        # -laneIsolation Off: Invoke-BuildAll/Compile-Repo already set the lane environment for this repo;
+        # the nested cmdlet must neither recompute nor override it (e.g. under -laneIsolation Off).
+        Invoke-Publish -repositoryPath $path -configuration $configuration -laneIsolation Off
         $state = $Global:LASTEXITCODE -eq 0
     }
     elseif ($builder -eq "Invoke-BuildZenonPlug") {
@@ -95,7 +97,7 @@ function Compile-RepoCore {
         $state = $Global:LASTEXITCODE -eq 0
     }
     else {
-        Invoke-Build -repositoryPath $path -configuration $configuration
+        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off
         $state = $Global:LASTEXITCODE -eq 0
     }
 

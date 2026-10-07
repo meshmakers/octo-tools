@@ -7,6 +7,37 @@
         [Parameter(Mandatory=$false)]
         [string[]]
         $publishParameters = @(),
+        # Lane isolation, same rules as Invoke-BuildAll (see Get-OctoRepositoryBuildEnvironment).
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto',
+        # Print the lane environment this publish would use and exit without running dotnet.
+        [switch]$DryRun,
+        [switch]$Json
+    )
+
+    $buildEnvironment = Get-OctoRepositoryBuildEnvironment -repositoryPath $repositoryPath -configuration $configuration -laneIsolation $laneIsolation
+    if ($DryRun) {
+        Write-OctoLaneDryRun -command 'Invoke-Publish' -repositoryPath $repositoryPath -configuration $configuration -buildEnvironment $buildEnvironment -Json:$Json
+        return
+    }
+
+    # Set for this publish only and restored afterwards; empty outside a lane and in main (legacy behaviour).
+    $savedEnvironment = Set-OctoBuildEnvironment -environment $buildEnvironment.environment
+    try {
+        Invoke-PublishCore -configuration $configuration -repositoryPath $repositoryPath -publishParameters $publishParameters -Json:$Json
+    }
+    finally {
+        Restore-OctoBuildEnvironment -saved $savedEnvironment
+    }
+}
+
+function Invoke-PublishCore
+{
+    param(
+        [string]$configuration = "Release",
+        [string]$repositoryPath = ".\",
+        [string[]]
+        $publishParameters = @(),
         [switch]$Json
     )
 
