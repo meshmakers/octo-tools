@@ -4,8 +4,10 @@ Syncs meshmaker DebugL nuget packages in git repos
 Attention: The $cleanBinFolder argument really cleans all bin folders.
 .Description
 Copies nuget packages to meshmaker nuget folder, deletes global nuget packages and syncs nuget packages in each repository
+.Parameter branch
+Lane checkout to work on (e.g. main, dev), resolved like Invoke-BuildAll.
 .Example
-Sync-NugetPackages
+Sync-NugetPackages -branch main
 .Example
  # This is function is called by convention in PowerShell
  function prompt {
@@ -16,6 +18,7 @@ function Sync-NuGetPackages {
     [CmdletBinding()]
     param (
         [boolean]$cleanBinFolder = $false,
+        [string]$branch = "",
         [switch]$Json
     )
 
@@ -30,15 +33,16 @@ function Sync-NuGetPackages {
     # Kill all dotnet processes. This is necessary to avoid file locks.
     Invoke-KillDotnet
 
-    if ($Json) { Copy-AllNuGetPackages -Json | Out-Null } else { Copy-AllNuGetPackages }
+    $branchRoot = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
+    if ($Json) { Copy-AllNuGetPackages -branch $branch -Json | Out-Null } else { Copy-AllNuGetPackages -branch $branch }
     # Lane-local package cache (<lane>/.nuget-packages via RestorePackagesPath in <lane>/Octo.User.props).
     # Same JSON contract as Copy-AllNuGetPackages above: forward the switch, discard the nested emit.
-    $laneNugetCachePath = Join-Path -Path $rootPath -ChildPath ".nuget-packages"
+    $laneNugetCachePath = Join-Path -Path $branchRoot -ChildPath ".nuget-packages"
     if ($Json) { Remove-GlobalNuGetPackages -path $laneNugetCachePath -Json | Out-Null } else { Remove-GlobalNuGetPackages -path $laneNugetCachePath }
 
     # Get all directories starting with "octo-" and "mm-""
-    $allDirectories = Get-ChildItem -Directory -Path $rootPath -Filter "octo-*"
-    $allDirectories += Get-ChildItem -Directory -Path $rootPath -Filter "mm-*"
+    $allDirectories = @(Get-ChildItem -Directory -Path $branchRoot -Filter "octo-*")
+    $allDirectories += @(Get-ChildItem -Directory -Path $branchRoot -Filter "mm-*")
 
     foreach ($directory in $allDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"

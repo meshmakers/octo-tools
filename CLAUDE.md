@@ -49,10 +49,13 @@ first by `profile.ps1`. New cmdlets should reuse them rather than calling `Conve
 helper sets a safe `-Depth` so nested data isn't silently truncated).
 
 ### Building
-- `Invoke-BuildAll` - Build all repositories (use `-configuration Debug` for debug builds)
+- `Invoke-BuildAll` - Build all repositories (use `-configuration Debug` for debug builds). Full reset in DebugL: wipes `<lane>/nuget` and the lane package cache, forces restore, builds tests. `-msbuildProperties` / `-msbuildPropertiesPerRepo` as below.
   - `-DryRun` prints the plan (build order, builder per repo, lane environment, per-repo RestoreSources override) without killing, deleting or building anything; combine with `-Json` for a machine-readable plan
   - Lane isolation (`-laneIsolation Auto|On|Off`, default `Auto`): a lane whose `<lane>/nuget` is NOT the local feed in the user-level `NuGet.Config` (e.g. `dev` while `local-nuget` points at `main/nuget`) builds with `NUGET_PACKAGES=<lane>/.nuget-packages` and `MSBUILDDISABLENODEREUSE=1`; in DebugL, repos whose `Directory.Build.props` declares no `<RestoreSources>` (mm-common) additionally get `RestoreSources=<lane>/nuget;nuget.org`. Repos that declare one already restore DebugL from `<repo>/../nuget`, and a blanket env override would drop their own default feeds (Telerik in octo-report-services). The lane the config points at (main) keeps the legacy behaviour; the environment is restored after the run
-  - Order: mm-* → fixed core order (distributedEventHub … communication-sdk … communication-controller-services) → `octo-plug-dilos` (publishes Dilos.Nodes for octo-adapter-weclapp) → remaining octo-* alphabetically
+  - Order: mm-* → fixed core order (distributedEventHub … communication-sdk … communication-controller-services) → `octo-plug-dilos` (publishes Dilos.Nodes for octo-adapter-weclapp) → remaining octo-* alphabetically. Defined once in `modules/OctoBuildOrder.psm1` (`Get-OctoBuildOrder`), shared with `Invoke-BuildRange`; edit the lists there, not in the cmdlets
+- `Invoke-BuildRange -branch main -from <repo> -to <repo> [-include ..] [-exclude ..] [-includeTests] [-msbuildProperties @{..}] [-msbuildPropertiesPerRepo @{..}] [-purgeStaleCache] [-WhatIf] [-Json]` - Fast partial DebugL rebuild of a slice of the same build order: `src/` projects only (temporary `.slnf`), no forced restore, `Copy-NuGetPackages -modifiedSince` after each repo and a per-package purge of only the rebuilt `999.0.0` packages from the global cache. Fails fast, prints per-repo timings, refuses while Start-Octo services run out of a repo in the range (`-stopServices` / `-ignoreRunningServices`). Reports global-cache `999.0.0` folders whose SHA-512 differs from `<checkout>/nuget` (e.g. from the dev checkout); `-purgeStaleCache` deletes them. See the "Fast local loop" section in `readme.md`.
+- `-msbuildProperties @{..}` (Invoke-Build, Invoke-BuildAll, Invoke-BuildRange) - extra MSBuild global properties (`-p:`) for every repo of the run; they override project values. `-msbuildPropertiesPerRepo @{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }` (BuildAll, BuildRange) targets single repos - use that form for `OctoPublishCkModel`, a run-wide `false` keeps every CK model out of the local catalog (warning when it hits more than one repo)
+- `Get-OctoBuildOrder -branchRootPath <checkout>` - The build order shared by `Invoke-BuildAll` and `Invoke-BuildRange` (single source of truth: `modules/OctoBuildOrder.psm1`; edit the pinned list there, not in the cmdlets)
 - `Invoke-Build -repositoryPath .` - Build a single repository
   - Same lane isolation as `Invoke-BuildAll` (also `Invoke-Publish`): the lane is the nearest folder above the repo holding `Octo.User.props`; an isolated lane (dev) gets `NUGET_PACKAGES`/`MSBUILDDISABLENODEREUSE` and, in DebugL for repos without own `<RestoreSources>`, `RestoreSources`; restored afterwards. Outside a lane and in main nothing changes. `-DryRun` prints the environment without starting dotnet; `-laneIsolation Auto|On|Off`
 - `Initialize-OctoLaneUserProps -branch <lane>` - Source of the per-checkout, uncommitted `<lane>/Octo.User.props` (imported by every repo's `Directory.Build.props`; sets `RestorePackagesPath=<lane>/.nuget-packages`, so Rider and plain `dotnet build` use the lane cache too). Creates the file only when missing; an existing file (main's carries more settings) is never changed, only checked
@@ -88,6 +91,7 @@ An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, t
 - `Remove-BinAndObjFolders` - Remove all bin/obj folders
 - `Invoke-KillDotnet` - Kill all dotnet processes (Windows only)
 - `Remove-GlobalNuGetPackages [-path <cache>]` - Remove the local 999.0.0 Meshmakers packages from a NuGet package cache (default `~/.nuget/packages`). Each lane restores into its own cache, `<lane>/.nuget-packages`, configured via `RestorePackagesPath` in `<lane>/Octo.User.props`; `Invoke-BuildAll`/`Sync-NuGetPackages` clean only that lane cache so dev and main never share 999.0.0 packages
+- `Copy-NuGetPackages -directory <repo> -branch main [-modifiedSince <time>]` / `Copy-AllNuGetPackages -branch main` - Copy DebugL packages into `<lane>/nuget` (Copy-All: newest file per package wins, duplicates are warned about, a newer package already in nuget/ is kept)
 
 ### Infrastructure Backup (MongoDB + CrateDB)
 Backups operate on the Docker volumes; stop the infrastructure first (`Stop-OctoInfrastructure`). Stored under `infrastructure/backups/`.
@@ -113,6 +117,7 @@ This cmdlet pair assumes your clusters do not bind a persistent `cluster-owner` 
 ## Project Structure
 
 - `/modules/` - PowerShell modules for all development commands
+- `/tests/` - Pester tests (`Invoke-Pester ./tests`); they use a fake checkout in `TestDrive` and mock the build step - never run real builds or touch the real NuGet folders from tests
 - `/infrastructure/` - Docker Compose configuration and MongoDB init scripts
 - `/kubernetes/` - Local kind cluster manifests, Helm values, and the dev-env runbooks (`README.md` / `QUICKSTART.md`)
 - `/assets/` - Terminal profile assets and logos

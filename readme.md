@@ -45,6 +45,94 @@ in this repo — they live in a per-developer config file outside of git.
    `modules/profile.ps1` sources this file at the end of its bootstrap, so
    anything set here wins over the config-file defaults.
 
+# Fast local loop (partial DebugL rebuilds)
+
+`Invoke-BuildAll -configuration DebugL` is the full reset: it wipes `<checkout>/nuget`, deletes every
+`~/.nuget/packages/meshmakers.*/999.0.0` folder, forces a restore and builds every solution including
+its tests. For day-to-day work on a library in the chain (e.g. the construction-kit engine) use
+`Invoke-BuildRange`, which rebuilds only a slice of the same build order:
+
+```powershell
+# 1. See what would happen (repositories, src/ projects, global-cache folders to purge, running services)
+Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-common-services `
+    -include octo-asset-repo-services,octo-identity-services -WhatIf
+
+# 2. Stop the local services (their bin/DebugL output is overwritten), build, start again
+Stop-Octo -branch main
+Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-common-services `
+    -include octo-asset-repo-services,octo-identity-services
+Start-Octo -branch main -configuration DebugL -nonInteractive $true
+```
+
+Per repository, in build order:
+
+1. `dotnet build -c DebugL -nodeReuse:false` of the solution's `src/` projects only (a temporary
+   `.slnf` in the temp folder; `-includeTests` builds the whole solution). There is no forced
+   restore: the implicit restore only re-extracts the packages that were purged.
+2. `Copy-NuGetPackages -modifiedSince <build start>` copies the packages this build (re)wrote into
+   `<checkout>/nuget`. Stale nupkgs of removed projects (e.g. `Sdk.Common.Web` in `octo-sdk/bin`
+   after it moved to `octo-communication-sdk`) are neither copied nor purged.
+3. Exactly those packages are purged from `~/.nuget/packages/<id>/999.0.0`, so the next repository
+   restores them fresh from `<checkout>/nuget`. Nothing else in the cache and nothing else in
+   `<checkout>/nuget` is touched.
+
+It stops at the first failing repository (fail fast, prints the repository name and the error lines
+of its `Invoke-Build.log`) and prints per-repository timings at the end (`-Json` for a
+machine-readable result). It refuses to start while processes run out of a repository in the range
+(`Start-Octo` services); pass `-stopServices` to send `Stop-Octo` and wait, or
+`-ignoreRunningServices` to build anyway. It never kills dotnet processes.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `-from` / `-to` | First / last repository of the range (inclusive; `-to` defaults to `-from`). Exact name, name without `octo-`, or a unique substring. |
+| `-include` / `-exclude` | Add repositories outside the range (kept at their build-order position) / skip repositories inside it. |
+| `-includeTests` | Build the whole solution instead of `src/` only. |
+| `-excludeFrontend` | Default `$true`; frontends produce no NuGet packages. |
+| `-configuration` | Default `DebugL`. Copy and purge only run for DebugL. |
+| `-msbuildProperties` | Extra MSBuild global properties (`-p:Name=Value`) for the `dotnet build` of **every** repository in the run. Global properties override values set in project files. `Invoke-BuildAll` and `Invoke-Build` accept the same parameter. Not applied to `build.ps1` / frontend / zenon builds (warning). Do **not** use it for `OctoPublishCkModel`: that stops every CK model of the run from being published into the local catalog, so downstream CK compiles see stale models (a warning is printed when `OctoPublishCkModel=false` applies to more than one repository). |
+| `-msbuildPropertiesPerRepo` | Properties for single repositories (overriding `-msbuildProperties`), e.g. `@{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }` to keep only identity's CK model out of the shared local catalog. Also on `Invoke-BuildAll`. |
+| `-purgeStaleCache` | Purge global-cache `999.0.0` folders whose recorded SHA-512 differs from `<checkout>/nuget` before the first build (see below). Without it they are only reported. |
+| `-WhatIf` / `-Json` | Print the plan only / emit one JSON document (early exits emit `success: false` and set `$LASTEXITCODE` to 1). |
+
+The build order (`mm-*` -> pinned `octo-*` -> remaining `octo-*` alphabetically) lives in
+`modules/OctoBuildOrder.psm1` (`Get-OctoBuildOrder`) and is shared with `Invoke-BuildAll`.
+`Get-OctoBuildOrder -branchRootPath <checkout> | Format-Table Name, Group` shows it.
+
+`Copy-AllNuGetPackages -branch main` (also used by `Sync-NuGetPackages`) copies the newest file per
+package when several repositories contain the same `Meshmakers.*.999.0.0.nupkg` (e.g. a stale
+`Sdk.Common.Web` in `octo-sdk/bin` after the project moved to `octo-communication-sdk`), warns about
+such duplicates and never replaces a newer package already in `<checkout>/nuget`.
+
+**Stale global-cache packages.** `~/.nuget/packages` is shared by all checkouts (e.g. `main` and `dev`).
+Before building, `Invoke-BuildRange` compares every `<checkout>/nuget/<id>.999.0.0.nupkg` with the
+SHA-512 NuGet recorded for `~/.nuget/packages/<id>/999.0.0` (`<id>.999.0.0.nupkg.sha512`). A mismatch
+(e.g. the folder was extracted from the dev checkout's build) or a missing hash file is reported in
+`-WhatIf`, as a warning and in `-Json` (`staleGlobalCache`); `-purgeStaleCache` deletes those folders
+so the restores in this checkout use its own packages.
+
+Notes for the loop:
+
+* Run a full `Invoke-BuildAll -branch main -configuration DebugL -excludeFrontend $true` once after a
+  fresh clone, a pull or a branch switch. Use `Invoke-BuildRange` afterwards. When restores fail with
+  NU1101/NU1102 for a `999.0.0` package, the chain is out of sync: run `Invoke-BuildAll` again.
+* Repositories outside the range are not rebuilt. If they consume a rebuilt package they pick it up
+  on their next build (its global-cache copy was purged).
+* `octo-construction-kit` packages are not consumed by the service chain - skip them for engine changes.
+* The `System*` CK models are embedded in the service DLLs and are imported automatically when a
+  tenant is resolved (with a downgrade guard), so a rebuilt and restarted service brings its newer
+  System model along. The local CK catalog is `<checkout>/.octo/local-catalog` (Start-Octo points
+  `OCTO_LocalFileSystemCatalog__RootPath` at it).
+
+# Tests
+
+Pester tests for the build tooling live in `tests/` (they run against a fake checkout in `TestDrive`
+and never build or touch the real NuGet folders):
+
+```powershell
+Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser   # once
+Invoke-Pester ./tests
+```
+
 # Customizing Windows Terminal Profile
 
 1. Create Environment Variable MESHMAKERS with path to the OctoMesh repository.

@@ -34,7 +34,9 @@ function Compile-Repo {
         [Parameter(Mandatory=$true)]
         [string]$configuration,
         # Lane settings from Get-OctoLaneBuildSettings; $null = legacy behaviour.
-        $laneSettings = $null
+        $laneSettings = $null,
+        # Effective MSBuild properties for this repository (-msbuildProperties merged with -msbuildPropertiesPerRepo).
+        [hashtable]$msbuildProperties = @{}
     )
 
     # Isolated lane only: repos without their own <RestoreSources> would restore from the user-level
@@ -48,7 +50,7 @@ function Compile-Repo {
         }
     }
     try {
-        return Compile-RepoCore -branch $branch -path $path -configuration $configuration
+        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
@@ -61,10 +63,14 @@ function Compile-RepoCore {
         [Parameter(Mandatory=$true)]
         [string]$path,
         [Parameter(Mandatory=$true)]
-        [string]$configuration
+        [string]$configuration,
+        [hashtable]$msbuildProperties = @{}
     )
 
     $builder = Get-RepoBuilder -path $path
+    if ($msbuildProperties.Count -gt 0 -and $builder -in @('build.ps1', 'Invoke-Publish', 'Invoke-BuildZenonPlug')) {
+        Write-Warning "-msbuildProperties is not applied to $path ($builder build)"
+    }
 
     # Check if a custom build script exists in the repository
     if ($builder -eq "build.ps1") {
@@ -97,7 +103,7 @@ function Compile-RepoCore {
         $state = $Global:LASTEXITCODE -eq 0
     }
     else {
-        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off
+        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off -msbuildProperties $msbuildProperties
         $state = $Global:LASTEXITCODE -eq 0
     }
 
@@ -108,88 +114,80 @@ function Compile-RepoCore {
     return $state;
 }
 
-# Repositories built in this fixed order right after the mm-* libraries, because the alphabetical
-# fallback would build them after their consumers.
-$script:OrderedCoreRepositories = @(
-    "octo-distributedEventHub"
-    "octo-construction-kit-engine"
-    "octo-sdk"
-    "octo-construction-kit-engine-mongodb"
-    "octo-common-services"
-    # Phase 3: octo-communication-sdk holds the adapter/pipeline framework (formerly
-    # Sdk.Common/Adapters + EtlDataPipeline + Services in octo-sdk). Depends on
-    # octo-sdk so builds AFTER it; needs to build BEFORE octo-mesh-adapter and the
-    # other 8 adapter consumer repos so they can restore the new packages.
-    "octo-communication-sdk"
-    "octo-mesh-adapter"
-    "octo-bot-services"
-    # octo-communication-controller-services produces Meshmakers.Octo.ConstructionKit.Models.System.Communication,
-    # consumed by octo-ai-services and octo-plug-zenon. Without this explicit slot it falls into the alphabetical
-    # fallback and runs after octo-ai-services (a < c), breaking the AI services restore.
-    "octo-communication-controller-services"
-)
-
-# Additional repositories that other additional repositories consume. They are built first in the
-# additional phase (so they still honour -excludeAdditional), before the alphabetical rest.
-$script:OrderedAdditionalRepositories = @(
-    # octo-plug-dilos publishes Meshmakers.Octo.Communication.Dilos(.Nodes), consumed by
-    # octo-adapter-weclapp (a < p). Built against octo-communication-sdk, which is in the core order.
-    "octo-plug-dilos"
-)
-
 <#
 .SYNOPSIS
     The ordered list of repositories Invoke-BuildAll builds (and -DryRun prints).
+
+.DESCRIPTION
+    Thin adapter over Get-OctoBuildOrder (OctoBuildOrder.psm1), the build order shared with
+    Invoke-BuildRange. Edit the pinned lists there, not here.
 #>
 function Get-BuildAllPlan {
     param(
         [Parameter(Mandatory=$true)]
         [string]$branchRootPath,
-        $octoDirectories,
-        $mmDirectories,
+        [Boolean]$excludeFrontend = $false,
         [Boolean]$excludeAdditional = $false
     )
 
     $plan = [System.Collections.Generic.List[object]]::new()
-    $planned = @{}
-
-    # At commom libraries we do not have a build sequence
-    foreach ($directory in $mmDirectories) {
-        $plan.Add([PSCustomObject][ordered]@{ name = $directory.Name; path = $directory.FullName; phase = "common" })
-        $planned[$directory.Name] = $true
+    foreach ($entry in @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $excludeFrontend -excludeAdditional $excludeAdditional)) {
+        $plan.Add([PSCustomObject][ordered]@{ name = $entry.Name; path = $entry.Path; phase = $entry.Group })
     }
-
-    # Build octo repostories that first that are dependent on other repositories
-    foreach ($name in $script:OrderedCoreRepositories) {
-        $repoDir = Get-ChildItem -Directory -Path $branchRootPath -Filter $name
-        if ($repoDir) {
-            $plan.Add([PSCustomObject][ordered]@{ name = $name; path = $repoDir.FullName; phase = "ordered" })
-            $planned[$name] = $true
-        }
-    }
-
-    # Build the rest of the octo repositories
-    if ($excludeAdditional -eq $false) {
-        foreach ($name in $script:OrderedAdditionalRepositories) {
-            $directory = $octoDirectories | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-            if ($directory -and -not $planned.ContainsKey($directory.Name)) {
-                $plan.Add([PSCustomObject][ordered]@{ name = $directory.Name; path = $directory.FullName; phase = "additional-ordered" })
-                $planned[$directory.Name] = $true
-            }
-        }
-        foreach ($directory in $octoDirectories) {
-            # do not build already build repositories
-            if ($planned.ContainsKey($directory.Name)) {
-                continue
-            }
-            $plan.Add([PSCustomObject][ordered]@{ name = $directory.Name; path = $directory.FullName; phase = "additional" })
-            $planned[$directory.Name] = $true
-        }
-    }
-
     return $plan
 }
 
+<#
+.SYNOPSIS
+    Builds all repositories of a lane checkout in dependency order (full chain).
+
+.DESCRIPTION
+    Order comes from Get-OctoBuildOrder (OctoBuildOrder.psm1). In DebugL it first wipes <lane>/nuget
+    and the lane-local package cache, then builds each repository with a forced restore (Invoke-Build)
+    and copies its packages into <lane>/nuget. Lane isolation: see Get-OctoLaneBuildSettings.
+    For partial rebuilds use Invoke-BuildRange.
+
+.PARAMETER configuration
+    Build configuration (default Release; DebugL for local development).
+
+.PARAMETER branch
+    Lane checkout to build (e.g. main, dev).
+
+.PARAMETER excludeAdditional
+    Build only mm-* and the pinned octo-* repositories.
+
+.PARAMETER excludeFrontend
+    Skip octo-frontend-* repositories.
+
+.PARAMETER laneIsolation
+    Auto (default) / On / Off - see Get-OctoLaneBuildSettings.
+
+.PARAMETER msbuildProperties
+    Extra MSBuild global properties (-p:Name=Value) for the dotnet restore/build of EVERY
+    repository (e.g. @{ ContinuousIntegrationBuild = 'true' }). Global properties override values
+    set in project files. Not applied to build.ps1 / frontend / zenon builds (a warning is printed).
+    Do not use it for OctoPublishCkModel: that would stop every CK model of the run from being
+    published into the local catalog (downstream CK compiles then see stale models) - use
+    -msbuildPropertiesPerRepo for the one repository instead. A warning is printed when
+    OctoPublishCkModel=false applies to more than one repository.
+
+.PARAMETER msbuildPropertiesPerRepo
+    Extra MSBuild properties for single repositories, keyed by repository name; they override
+    -msbuildProperties for that repository, e.g.
+    @{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }.
+
+.PARAMETER DryRun
+    Print the plan (order, builder, lane environment, restore sources, MSBuild properties) and exit.
+
+.PARAMETER Json
+    Emit one JSON document with per-repository results.
+
+.EXAMPLE
+    Invoke-BuildAll -branch dev -configuration DebugL -excludeFrontend $true -DryRun
+
+.EXAMPLE
+    Invoke-BuildAll -branch main -configuration DebugL -excludeFrontend $true -msbuildPropertiesPerRepo @{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }
+#>
 function Invoke-BuildAll {
     param(
         [string]$configuration = "Release",
@@ -200,11 +198,17 @@ function Invoke-BuildAll {
         # not the local feed of the user-level NuGet.Config (dev); that lane (main) keeps the legacy behaviour.
         [ValidateSet('Auto', 'On', 'Off')]
         [string]$laneIsolation = 'Auto',
+        [hashtable]$msbuildProperties = @{},
+        [hashtable]$msbuildPropertiesPerRepo = @{},
         # Print the computed plan (order, builder, lane environment, restore sources) and exit: no dotnet
         # process is killed, no package is deleted, nothing is built.
         [switch]$DryRun,
         [switch]$Json
     )
+
+    # Validate early so a typo fails before anything is wiped or killed.
+    try { [void](ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties) }
+    catch { Write-Error $_.Exception.Message; return }
 
     if (!(Test-Path $rootPath)) {
         Write-Error "Root path $rootPath does not exist"
@@ -236,7 +240,17 @@ function Invoke-BuildAll {
     }
 
     $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $branchRootPath -laneIsolation $laneIsolation
-    $plan = Get-BuildAllPlan -branchRootPath $branchRootPath -octoDirectories $octoDirectories -mmDirectories $mmDirectories -excludeAdditional $excludeAdditional
+    $plan = Get-BuildAllPlan -branchRootPath $branchRootPath -excludeFrontend $excludeFrontend -excludeAdditional $excludeAdditional
+
+    # Per-repository MSBuild properties: validated against the plan before anything is wiped or killed.
+    try { Assert-OctoMsBuildPropertiesPerRepo -msbuildPropertiesPerRepo $msbuildPropertiesPerRepo -knownRepos @($plan | ForEach-Object { $_.name }) }
+    catch { Write-Error $_.Exception.Message; return }
+    $repoProperties = @{}
+    foreach ($entry in $plan) {
+        $repoProperties[$entry.name] = Merge-OctoRepoMsBuildProperties -repoName $entry.name -msbuildProperties $msbuildProperties -msbuildPropertiesPerRepo $msbuildPropertiesPerRepo
+    }
+    $publishWarning = Get-OctoCkPublishDisabledWarning -repoNames @($plan | Where-Object { Test-OctoCkPublishDisabled -properties $repoProperties[$_.name] } | ForEach-Object { $_.name })
+    if ($publishWarning) { Write-Warning $publishWarning }
 
     if ($DryRun) {
         $planEntries = @(foreach ($entry in $plan) {
@@ -248,6 +262,7 @@ function Invoke-BuildAll {
                 builder        = $builder
                 # Override only matters where something is restored (DebugL, and a repo that actually builds).
                 restoreSources = if ($configuration -ieq "DebugL" -and $builder -ne "none") { Get-OctoRepoRestoreSourcesOverride -repositoryPath $entry.path -laneSettings $laneSettings } else { $null }
+                msbuildProperties = @(ConvertTo-OctoMsBuildPropertyArgs -properties $repoProperties[$entry.name])
             }
         })
         $data = [ordered]@{
@@ -271,6 +286,7 @@ function Invoke-BuildAll {
         }
         foreach ($entry in $planEntries) {
             $suffix = if ($entry.restoreSources) { "  RestoreSources=$($entry.restoreSources)" } else { "" }
+            if ($entry.msbuildProperties.Count -gt 0) { $suffix += "  $($entry.msbuildProperties -join ' ')" }
             Write-Host ("{0,3}. {1,-45} {2,-19} {3}{4}" -f $entry.order, $entry.repo, $entry.phase, $entry.builder, $suffix)
         }
         return
@@ -331,7 +347,7 @@ function Invoke-BuildAll {
     try {
         foreach ($entry in $plan) {
             $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings
+            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name]
             $repoStopWatch.Stop()
             $allStatus.Add($entry.name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
         }
