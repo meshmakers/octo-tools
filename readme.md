@@ -80,9 +80,12 @@ Per repository, in build order:
    `.slnf` in the temp folder; `-includeTests` builds the whole solution, `-verifyTests` compiles
    the projects outside `src/` right after with a second `.slnf`). There is no forced restore: the
    implicit restore only re-extracts the packages that were purged.
-2. `Copy-NuGetPackages -modifiedSince <build start>` copies the packages this build (re)wrote into
-   `<checkout>/nuget`. Stale nupkgs of removed projects (e.g. `Sdk.Common.Web` in `octo-sdk/bin`
-   after it moved to `octo-communication-sdk`) are neither copied nor purged.
+2. `Copy-NuGetPackages -onlyChanged` copies every package of the repository that `<checkout>/nuget`
+   lacks or holds in an older, different version (SHA-512 compare). Pack is incremental, so this also
+   catches a package written by an earlier, interrupted run (e.g. a `-verifyTests` failure) or by an IDE
+   build. Orphaned nupkgs of removed projects (a `bin/DebugL` whose project folder has no project file
+   any more, e.g. `Sdk.Common.Web` in `octo-sdk` after it moved to `octo-communication-sdk`) and
+   packages older than the `nuget/` copy are left alone.
 3. Exactly those packages are purged from `<cache>/<id>/999.0.0`, so the next repository restores
    them fresh from `<checkout>/nuget`. Nothing else in the cache and nothing else in
    `<checkout>/nuget` is touched.
@@ -102,7 +105,10 @@ It stops at the first failing repository (fail fast, prints the repository name 
 of its `Invoke-Build.log`) and prints per-repository timings at the end (`-Json` for a
 machine-readable result). It refuses to start while processes run out of a repository in the range
 (`Start-Octo` services); pass `-stopServices` to send `Stop-Octo` and wait, or
-`-ignoreRunningServices` to build anyway. It never kills dotnet processes.
+`-ignoreRunningServices` to build anyway. It never kills dotnet processes. Known gap on Windows: the
+process list there has no working directory and Start-Octo starts services as `dotnet <Name>.dll`
+(relative path), so running services are not detected - stop them with `Stop-Octo` first, otherwise the
+build fails on locked files.
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -114,7 +120,7 @@ machine-readable result). It refuses to start while processes run out of a repos
 | `-excludeFrontend` | Default `$true`; frontends produce no NuGet packages. |
 | `-configuration` | Default `DebugL`. Copy and purge only run for DebugL. |
 | `-msbuildProperties` | Extra MSBuild global properties (`-p:Name=Value`) for the `dotnet build` of **every** repository in the run. Global properties override values set in project files. `Invoke-BuildAll` and `Invoke-Build` accept the same parameter. Not applied to `build.ps1` / frontend / zenon builds (warning). Do **not** use it for `OctoPublishCkModel`: that stops every CK model of the run from being published into the local catalog, so downstream CK compiles see stale models (a warning is printed when `OctoPublishCkModel=false` applies to more than one repository). |
-| `-msbuildPropertiesPerRepo` | Properties for single repositories (overriding `-msbuildProperties`), e.g. `@{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }` to keep only identity's CK model out of the shared local catalog. Also on `Invoke-BuildAll`. |
+| `-msbuildPropertiesPerRepo` | Properties for single repositories (overriding `-msbuildProperties`; a key outside the selected range is warned about, add it with `-include`), e.g. `@{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }` to keep only identity's CK model out of the shared local catalog. Also on `Invoke-BuildAll`. |
 | `-purgeStaleCache` | Purge global-cache `999.0.0` folders whose recorded SHA-512 differs from `<checkout>/nuget` before the first build (see below). Without it they are only reported. |
 | `-WhatIf` / `-Json` | Print the plan only / emit one JSON document (early exits emit `success: false` and set `$LASTEXITCODE` to 1). |
 

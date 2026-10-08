@@ -307,7 +307,8 @@ function Get-OctoRunningRepoProcesses {
 
     $candidates = @(Select-OctoRepoProcessCandidates -candidates $all -repos $repos)
 
-    # Windows exposes no working directory here; services there are matched by command line only.
+    # Windows exposes no working directory here; services there are matched by command line only,
+    # which misses Start-Octo's `dotnet <Name>.dll` (relative path) - documented gap (T-L4).
     if (-not $IsWindows -and $candidates.Count -gt 0 -and (Get-Command lsof -ErrorAction SilentlyContinue)) {
         $pidList = ($candidates.Pid) -join ','
         $currentPid = $null
@@ -439,7 +440,9 @@ function Invoke-OctoBuildRangeRepo {
             return [pscustomobject]@{ Success = ($LASTEXITCODE -eq 0); LogFile = $null }
         }
         'frontend' {
-            Invoke-Publish -repositoryPath $entry.Path -configuration $configuration
+            # -laneIsolation Off: the range run already set the lane environment (and the per-repo
+            # RestoreSources) for this repository, exactly like Invoke-BuildAll's Compile-Repo.
+            Invoke-Publish -repositoryPath $entry.Path -configuration $configuration -laneIsolation Off
             return [pscustomobject]@{ Success = ($Global:LASTEXITCODE -eq 0); LogFile = $null }
         }
         'zenon' {
@@ -582,10 +585,11 @@ function Write-OctoBuildRangePlan {
          - no forced restore (`-f`): the implicit restore only re-extracts what was purged;
          - repositories with build.ps1, frontends and the zenon plug are built the same way
            Invoke-BuildAll builds them;
-      2. (DebugL only) Copy-NuGetPackages -modifiedSince <build start> into <checkout>/nuget,
-         i.e. only the packages this build (re)wrote - stale nupkgs of removed projects are
-         left alone;
-      3. (DebugL only) purges <cache>/<id>/999.0.0 for exactly those packages, so the next
+      2. (DebugL only) Copy-NuGetPackages -onlyChanged into <checkout>/nuget: every package of
+         the repository that nuget/ lacks or holds in an older, different version - also one
+         written by an earlier interrupted run or an IDE build (pack is incremental). Orphaned
+         nupkgs of removed projects and packages older than the nuget/ copy are left alone;
+      3. (DebugL only) purges <cache>/<id>/999.0.0 for exactly the copied packages, so the next
          repository in the range restores the fresh ones from <checkout>/nuget.
 
     Lane isolation (AB#4924) is the same as Invoke-BuildAll's (Get-OctoLaneBuildSettings): an
@@ -610,6 +614,9 @@ function Write-OctoBuildRangePlan {
     Refuses to start while processes run out of a repository in the range (e.g. services started
     by Start-Octo - their bin/DebugL output would be overwritten). Use -stopServices to send
     Stop-Octo first, or -ignoreRunningServices to build anyway.
+    Known gap on Windows: Win32_Process exposes no working directory, and Start-Octo starts the
+    services as `dotnet <Name>.dll` with a relative path, so they are not detected there; the build
+    then fails on locked files instead of refusing. Stop the services (Stop-Octo) first on Windows.
 
     Repositories outside the range are not rebuilt. If they consume a package that was rebuilt,
     they pick it up on their next build (the global-cache copy was purged).
@@ -783,6 +790,11 @@ function Invoke-BuildRange {
         Assert-OctoMsBuildPropertiesPerRepo -msbuildPropertiesPerRepo $perRepo -knownRepos @($order.Name)
     }
     catch { & $fail $_.Exception.Message; return }
+    # T-L3: a key for a repository outside the selected range does nothing - say so (forgotten -include?).
+    $outsideRange = @($perRepo.Keys | Where-Object { $name = $_; -not ($plan | Where-Object { $_.Name -ieq $name }) } | Sort-Object)
+    if ($outsideRange.Count -gt 0) {
+        Write-Warning "-msbuildPropertiesPerRepo: $($outsideRange -join ', ') not in the selected range - their properties are not applied. Add them with -include if they should be built."
+    }
     foreach ($entry in $plan) {
         $properties = Merge-OctoRepoMsBuildProperties -repoName $entry.Name -msbuildProperties $msbuildProperties -msbuildPropertiesPerRepo $perRepo
         $entry | Add-Member -NotePropertyName MsBuildProperties -NotePropertyValue $properties -Force
@@ -874,11 +886,6 @@ function Invoke-BuildRange {
     try {
     foreach ($entry in $plan) {
         if (-not $Json) { Write-Host "==> $($entry.Name)" -ForegroundColor Cyan }
-        # Packages written from here on are "produced by this build"; older ones in bin/DebugL are
-        # stale (e.g. Sdk.Common.Web in octo-sdk after it moved to octo-communication-sdk) and are
-        # neither copied nor purged. Pack is incremental, so an unchanged project keeps its old
-        # nupkg - that is fine, its content did not change.
-        $buildStartedAt = (Get-Date).AddSeconds(-1)
         $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $savedRepoEnvironment = $null
         if ($entry.RestoreSources) {
@@ -930,14 +937,17 @@ function Invoke-BuildRange {
 
         if ($purgeEnabled -and $entry.Mode -ne 'none') {
             $packageWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $copy = Copy-NuGetPackages -directory $entry.Path -branch $branch -modifiedSince $buildStartedAt -Json | ConvertFrom-Json
+            # T-M1: not "written since this build started" - pack is incremental, so a package from an
+            # earlier, interrupted run (e.g. a -verifyTests failure) or an IDE build would be missed.
+            # -onlyChanged copies what nuget/ lacks or holds in another (older) version.
+            $copy = Copy-NuGetPackages -directory $entry.Path -branch $branch -onlyChanged -Json | ConvertFrom-Json
             $copiedFiles = @($copy.data.files | Where-Object { $_ })
             $result.copiedCount = $copiedFiles.Count
             # Purge list = what this build actually produced (and was just copied), not the prediction.
             $packageIds = @($copiedFiles | ForEach-Object { Get-OctoPackageIdFromFile -fileName $_ })
             $purgeDirectories = @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath)
             $result.purged = @(Remove-OctoGlobalPackageVersions -directories $purgeDirectories)
-            $result.staleSkipped = @(Get-OctoRepoPackageFiles -path $entry.Path | Where-Object { $_.LastWriteTime -lt $buildStartedAt } | ForEach-Object { $_.Name } | Sort-Object -Unique)
+            $result.staleSkipped = @($copy.data.skipped | Where-Object { $_ } | ForEach-Object { "$($_.file) ($($_.reason))" } | Sort-Object -Unique)
             $packageWatch.Stop()
             $result.packageDuration = $packageWatch.Elapsed
             if (-not $Json) {

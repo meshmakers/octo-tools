@@ -19,6 +19,7 @@ BeforeAll {
     Import-Module (Join-Path $modules 'Remove-GlobalNuGetPackages.psm1') -Force
     Import-Module (Join-Path $modules 'Invoke-BuildAll.psm1') -Force
     Import-Module (Join-Path $modules 'Stop-Octo.psm1') -Force
+    Import-Module (Join-Path $modules 'Invoke-Publish.psm1') -Force
     Import-Module (Join-Path $modules 'Invoke-BuildRange.psm1') -Force
 
     function New-FakeSln([string]$repoPath, [string]$name, [string[]]$projects) {
@@ -92,6 +93,11 @@ BeforeAll {
         # stale: project moved to octo-communication-sdk, nupkg is still lying around in octo-sdk
         New-FakePackage (Join-Path $checkout 'octo-sdk/src/Sdk.Common.Web/bin/DebugL') 'Meshmakers.Octo.Sdk.Common.Web' $script:Old | Out-Null
         New-FakePackage (Join-Path $checkout 'octo-communication-sdk/src/Sdk.Common.Web/bin/DebugL') 'Meshmakers.Octo.Sdk.Common.Web' $script:Old | Out-Null
+        # Project files of the packing projects (octo-sdk/src/Sdk.Common.Web deliberately has none: orphaned).
+        foreach ($project in @('octo-construction-kit-engine/src/SystemCkModel/SystemCkModel.csproj', 'octo-sdk/src/Sdk.Common/Sdk.Common.csproj',
+                'octo-communication-sdk/src/Sdk.Common.Web/Sdk.Common.Web.csproj')) {
+            Set-Content -Path (Join-Path $checkout $project) -Value '<Project />'
+        }
 
         # <checkout>/nuget with an unrelated package that must survive
         New-FakePackage (Join-Path $checkout 'nuget') 'Meshmakers.Common.Shared' $script:Old | Out-Null
@@ -357,7 +363,7 @@ Describe 'Invoke-BuildRange' {
         Test-Path (Join-Path $fake.Cache 'meshmakers.octo.runtime.engine/1.0.0') | Should -BeTrue     # other versions kept
 
         $sdk = $json.data.repositories | Where-Object repo -eq 'octo-sdk'
-        $sdk.unchangedOrStale | Should -Contain 'Meshmakers.Octo.Sdk.Common.Web.999.0.0.nupkg'
+        $sdk.unchangedOrStale | Should -Contain 'Meshmakers.Octo.Sdk.Common.Web.999.0.0.nupkg (orphaned)'
         $json.data.repositories[0].PSObject.Properties.Name | Should -Contain 'buildSeconds'
     }
 
@@ -895,5 +901,107 @@ Describe 'Test-project verification (R2-5)' {
             $filter = ($script:dotnetArgs -split ' ')[1]
             @((Get-Content $filter -Raw | ConvertFrom-Json).solution.projects) | Should -Be @('tests\octo-sdk.Tests\octo-sdk.Tests.csproj')
         }
+    }
+}
+
+Describe 'Package copy decides by content, not by build start (T-M1)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        $script:engineNupkg = Join-Path $fake.Checkout 'octo-construction-kit-engine/bin/DebugL/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg'
+        $script:nugetCopy = Join-Path $fake.Checkout 'nuget/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg'
+    }
+
+    It 'copies and purges a package written by an earlier run when the src build is a no-op' {
+        # Run 1: src packs a new engine package, then -verifyTests fails -> nothing copied.
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            if ($entry.Name -eq 'octo-construction-kit-engine') { Set-Content $script:engineNupkg 'from-run-1' }
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests { [pscustomobject]@{ Success = $false; Skipped = $false; LogFile = $null } }
+        Invoke-BuildRange -branch main -from octo-construction-kit-engine -verifyTests -Json -ErrorAction SilentlyContinue | Out-Null
+        Test-Path $script:nugetCopy | Should -BeFalse
+        # Time passes while the test is fixed: the package now predates the next run's build start.
+        (Get-Item $script:engineNupkg).LastWriteTime = (Get-Date).AddMinutes(-10)
+
+        # Run 2 (only the test was fixed): incremental pack writes nothing new.
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { [pscustomobject]@{ Success = $true; LogFile = $null } }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests { [pscustomobject]@{ Success = $true; Skipped = $false; LogFile = $null } }
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -verifyTests -Json | ConvertFrom-Json
+
+        Get-Content $script:nugetCopy | Should -Be 'from-run-1'
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeFalse
+        $json.data.repositories[0].copiedCount | Should -BeGreaterThan 0
+    }
+
+    It 'copies an older-dated package (e.g. an IDE build) when nuget/ lacks it or holds different content' {
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { [pscustomobject]@{ Success = $true; LogFile = $null } }
+        Set-Content $script:nugetCopy 'older-content'
+        (Get-Item $script:nugetCopy).LastWriteTime = $script:Old.AddDays(-1)
+
+        Invoke-BuildRange -branch main -from octo-construction-kit-engine -Json | Out-Null
+
+        Get-Content $script:nugetCopy | Should -Be 'Meshmakers.Octo.Runtime.Engine'
+    }
+
+    It 'skips identical, older-than-nuget and orphaned packages' {
+        InModuleScope Copy-NuGetPackages -Parameters @{ fake = $fake } {
+            $nuget = Join-Path $fake.Checkout 'nuget'
+            # identical content and same/newer date in nuget/ -> unchanged
+            Copy-Item (Join-Path $fake.Checkout 'octo-sdk/src/Sdk.Common/bin/DebugL/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') $nuget
+            $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -onlyChanged -Json | ConvertFrom-Json
+            @($json.data.files) | Should -BeNullOrEmpty
+            ($json.data.skipped | Where-Object file -eq 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg').reason | Should -Be 'unchanged'
+            ($json.data.skipped | Where-Object file -eq 'Meshmakers.Octo.Sdk.Common.Web.999.0.0.nupkg').reason | Should -Be 'orphaned'
+
+            # nuget/ holds a NEWER, different copy (another repo produced it) -> olderThanNuget
+            $newer = Join-Path $nuget 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg'
+            Set-Content $newer 'newer-elsewhere'
+            (Get-Item $newer).LastWriteTime = [DateTime]'2030-01-01'
+            $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -onlyChanged -Json | ConvertFrom-Json
+            ($json.data.skipped | Where-Object file -eq 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg').reason | Should -Be 'olderThanNuget'
+            Get-Content $newer | Should -Be 'newer-elsewhere'
+        }
+    }
+
+    It 'Copy-NuGetPackages resolves -branch like Invoke-BuildAll (T-L1)' {
+        # $rootPath pointing at the checkout itself: -branch main must not produce main/main/nuget.
+        $saved = $global:rootPath
+        try {
+            $global:rootPath = $fake.Checkout
+            Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -Json | Out-Null
+            Test-Path (Join-Path $fake.Checkout 'nuget/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+            Test-Path (Join-Path $fake.Checkout 'main') | Should -BeFalse
+        }
+        finally { $global:rootPath = $saved }
+    }
+}
+
+Describe 'Frontend builds in range runs (T-L2)' {
+    BeforeEach { $script:fake = New-FakeCheckout }
+
+    It 'frontend builds in a range run do not recompute the lane environment' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            Mock Invoke-Publish { $global:LASTEXITCODE = 0 }
+            $entry = [pscustomobject]@{ Name = 'octo-frontend-libraries'; Path = (Join-Path $fake.Checkout 'octo-frontend-libraries'); Mode = 'frontend' }
+            (Invoke-OctoBuildRangeRepo -entry $entry -configuration DebugL -Json).Success | Should -BeTrue
+            Should -Invoke Invoke-Publish -Times 1 -Exactly -ParameterFilter { $laneIsolation -eq 'Off' }
+        }
+    }
+}
+
+Describe 'Range-run lows (T-L3)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { [pscustomobject]@{ Success = $true; LogFile = $null } }
+    }
+
+    It 'warns when a -msbuildPropertiesPerRepo key is outside the selected range' {
+        Invoke-BuildRange -branch main -from octo-sdk -msbuildPropertiesPerRepo @{ 'octo-identity-services' = @{ A = '1' } } -WhatIf -Json -WarningVariable warnings -WarningAction SilentlyContinue | Out-Null
+        "$warnings" | Should -Match 'octo-identity-services not in the selected range'
+
+        Invoke-BuildRange -branch main -from octo-sdk -include octo-identity-services -msbuildPropertiesPerRepo @{ 'octo-identity-services' = @{ A = '1' } } -WhatIf -Json -WarningVariable warnings2 -WarningAction SilentlyContinue | Out-Null
+        "$warnings2" | Should -Not -Match 'not in the selected range'
     }
 }
