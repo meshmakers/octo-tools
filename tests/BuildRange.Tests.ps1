@@ -48,6 +48,10 @@ BeforeAll {
 
     $script:Old = [DateTime]'2020-01-01'
 
+    function Set-FakeLaneFeed([string]$feed) {
+        Set-Content -Path $script:FakeNuGetConfig -Value "<configuration><packageSources><add key=""local-nuget"" value=""$feed"" /></packageSources></configuration>"
+    }
+
     function Set-FakeCacheHash([string]$cache, [string]$id, [string]$nupkg) {
         $lower = $id.ToLowerInvariant()
         $stream = [IO.File]::OpenRead($nupkg)
@@ -105,10 +109,9 @@ BeforeAll {
         Set-FakeCacheHash $cache 'Meshmakers.Common.Shared' (Join-Path $checkout 'nuget/Meshmakers.Common.Shared.999.0.0.nupkg')
 
         # User-level NuGet.Config used by the lane isolation (Get-OctoLaneBuildSettings): its local feed is
-        # another lane's nuget/ folder, so the fake 'main' checkout counts as an isolated lane unless a
-        # test rewrites this file.
-        $script:FakeNuGetConfig = Join-Path $TestDrive 'NuGet.Config'
-        Set-Content -Path $script:FakeNuGetConfig -Value "<configuration><packageSources><add key=""local-nuget"" value=""$(Join-Path $root 'other-lane/nuget')"" /></packageSources></configuration>"
+        # the fake main lane's nuget/ folder, so 'main' is the legacy (non-isolated) lane like on a
+        # developer machine. Set-FakeLaneFeed points it elsewhere to make 'main' an isolated lane.
+        Set-FakeLaneFeed (Join-Path $checkout 'nuget')
 
         $global:rootPath = $root
         $global:GLOBALNUGETPACKAGESPATH = $cache
@@ -751,5 +754,146 @@ Describe 'Per-repository MSBuild properties (N11)' {
         $warnings = Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -msbuildProperties @{ OctoPublishCkModel = 'false' } -Json 3>&1 |
             Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
         "$warnings" | Should -Match 'OctoPublishCkModel=false applies to 10 repositories'
+    }
+}
+
+Describe 'Lane isolation in Invoke-BuildRange (AB#4924)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        $script:seen = @{}
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            $script:seen[$entry.Name] = [pscustomobject]@{
+                NuGetPackages  = $env:NUGET_PACKAGES
+                NodeReuse      = $env:MSBUILDDISABLENODEREUSE
+                RestoreSources = $env:RestoreSources
+            }
+            if ($entry.Name -eq 'octo-construction-kit-engine') {
+                Set-Content (Join-Path $entry.Path 'bin/DebugL/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') 'fresh'
+            }
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+        # octo-sdk declares its own RestoreSources -> no lane override for it
+        Set-Content -Path (Join-Path $fake.Checkout 'octo-sdk/Directory.Build.props') -Value '<Project><PropertyGroup><RestoreSources>x</RestoreSources></PropertyGroup></Project>'
+    }
+
+    It 'resolves the package caches from the lane settings' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $laneCache = Join-Path $fake.Checkout '.nuget-packages'
+            $isolated = [pscustomobject]@{ isolated = $true; laneRoot = $fake.Checkout; laneCache = $laneCache }
+            Get-OctoRangePackageCaches -laneSettings $isolated | Should -Be @($laneCache)
+
+            $legacy = [pscustomobject]@{ isolated = $false; laneRoot = $fake.Checkout; laneCache = $laneCache }
+            Get-OctoRangePackageCaches -laneSettings $legacy | Should -Be @([IO.Path]::TrimEndingDirectorySeparator($fake.Cache))
+
+            Set-Content -Path (Join-Path $fake.Checkout 'Octo.User.props') -Value '<Project><PropertyGroup><RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath></PropertyGroup></Project>'
+            Get-OctoRangePackageCaches -laneSettings $legacy | Should -Be @($laneCache, [IO.Path]::TrimEndingDirectorySeparator($fake.Cache))
+        }
+    }
+
+    It 'legacy lane (main): no environment, purges the global cache' {
+        $before = $env:NUGET_PACKAGES
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -Json | ConvertFrom-Json
+
+        $json.data.lane.isolated | Should -BeFalse
+        $script:seen['octo-construction-kit-engine'].NuGetPackages | Should -Be $before
+        $script:seen['octo-construction-kit-engine'].RestoreSources | Should -BeNullOrEmpty
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeFalse
+    }
+
+    It 'isolated lane (dev): NUGET_PACKAGES + node reuse off + RestoreSources per repo, lane cache purged, environment restored' {
+        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')
+        $laneCache = Join-Path $fake.Checkout '.nuget-packages'
+        New-Item -ItemType Directory -Force -Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Out-Null
+        $beforePackages = $env:NUGET_PACKAGES
+        $beforeRestore = $env:RestoreSources
+
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -Json | ConvertFrom-Json
+
+        $json.data.lane.isolated | Should -BeTrue
+        $json.data.packageCaches | Should -Be @($laneCache)
+        $script:seen['octo-construction-kit-engine'].NuGetPackages | Should -Be $laneCache
+        $script:seen['octo-construction-kit-engine'].NodeReuse | Should -Be '1'
+        $script:seen['octo-construction-kit-engine'].RestoreSources | Should -Be "$(Join-Path $fake.Checkout 'nuget');https://api.nuget.org/v3/index.json"
+        $script:seen['octo-sdk'].RestoreSources | Should -BeNullOrEmpty          # declares its own <RestoreSources>
+        Test-Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeFalse   # lane cache purged
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeTrue    # global cache untouched
+        $env:NUGET_PACKAGES | Should -Be $beforePackages
+        $env:RestoreSources | Should -Be $beforeRestore
+    }
+
+    It '-WhatIf shows the lane, the caches and the per-repo RestoreSources' {
+        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -WhatIf -Json | ConvertFrom-Json
+
+        $json.data.lane.isolated | Should -BeTrue
+        $json.data.lane.environment.NUGET_PACKAGES | Should -Be (Join-Path $fake.Checkout '.nuget-packages')
+        ($json.data.repositories | Where-Object repo -eq 'octo-construction-kit-engine').restoreSources | Should -Match 'nuget;https://api.nuget.org'
+        ($json.data.repositories | Where-Object repo -eq 'octo-sdk').restoreSources | Should -BeNullOrEmpty
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+    }
+}
+
+Describe 'Test-project verification (R2-5)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { [pscustomobject]@{ Success = $true; LogFile = $null } }
+    }
+
+    It 'plans the projects outside src/ as test projects' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $repo = [pscustomobject]@{ Name = 'octo-sdk'; Path = (Join-Path $fake.Checkout 'octo-sdk'); Group = 'ordered' }
+            $entry = (Get-OctoBuildRangePlan -repos @($repo) -globalPackagesPath $fake.Cache)[0]
+            $entry.TestProjects | Should -Be @('tests\octo-sdk.Tests\octo-sdk.Tests.csproj')
+        }
+    }
+
+    It 'a plain run reports that tests were not compiled' {
+        $json = Invoke-BuildRange -branch main -from octo-sdk -Json | ConvertFrom-Json
+        $json.data.testsCompiled | Should -BeFalse
+        $json.data.hint | Should -Match '-verifyTests'
+    }
+
+    It '-verifyTests compiles the test projects after the src build, -includeTests needs no second step' {
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests { [pscustomobject]@{ Success = $true; Skipped = $false; LogFile = $null } }
+
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -verifyTests -Json | ConvertFrom-Json
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests -Times 2 -Exactly
+        $json.data.testsCompiled | Should -BeTrue
+        $json.data.hint | Should -BeNullOrEmpty
+        $json.data.repositories[0].testsCompiled | Should -BeTrue
+
+        $json = Invoke-BuildRange -branch main -from octo-sdk -includeTests -verifyTests -Json | ConvertFrom-Json
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests -Times 2 -Exactly   # unchanged
+        $json.data.hint | Should -BeNullOrEmpty
+    }
+
+    It 'fails fast when the test projects do not compile' {
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests { [pscustomobject]@{ Success = $false; Skipped = $false; LogFile = $null } }
+
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -verifyTests -Json -ErrorAction SilentlyContinue -ErrorVariable buildErrors | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.failedRepo | Should -Be 'octo-construction-kit-engine'
+        $json.data.failedStep | Should -Be 'tests'
+        $json.data.notBuilt | Should -Be @('octo-sdk')
+        "$buildErrors" | Should -Match 'test projects of octo-construction-kit-engine do not compile'
+    }
+
+    It 'the verification step builds a second solution filter with the test projects only' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $script:dotnetArgs = $null
+            Mock dotnet { $script:dotnetArgs = $args -join ' '; $global:LASTEXITCODE = 0 }
+            $repo = [pscustomobject]@{ Name = 'pester-octo-sdk'; Path = (Join-Path $fake.Checkout 'octo-sdk'); Group = 'ordered' }
+            $entry = (Get-OctoBuildRangePlan -repos @($repo) -globalPackagesPath $fake.Cache)[0]
+
+            $result = Invoke-OctoBuildRangeTests -entry $entry -configuration DebugL -Json
+
+            $result.Success | Should -BeTrue
+            $script:dotnetArgs | Should -Match 'pester-octo-sdk\.tests\.slnf -c DebugL'
+            $filter = ($script:dotnetArgs -split ' ')[1]
+            @((Get-Content $filter -Raw | ConvertFrom-Json).solution.projects) | Should -Be @('tests\octo-sdk.Tests\octo-sdk.Tests.csproj')
+        }
     }
 }

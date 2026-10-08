@@ -47,9 +47,9 @@ in this repo — they live in a per-developer config file outside of git.
 
 # Fast local loop (partial DebugL rebuilds)
 
-`Invoke-BuildAll -configuration DebugL` is the full reset: it wipes `<checkout>/nuget`, deletes every
-`~/.nuget/packages/meshmakers.*/999.0.0` folder, forces a restore and builds every solution including
-its tests. For day-to-day work on a library in the chain (e.g. the construction-kit engine) use
+`Invoke-BuildAll -configuration DebugL` is the full reset: it wipes `<lane>/nuget`, deletes the
+`meshmakers.*/999.0.0` folders of the lane package cache, forces a restore and builds every solution
+including its tests. For day-to-day work on a library in the chain (e.g. the construction-kit engine) use
 `Invoke-BuildRange`, which rebuilds only a slice of the same build order:
 
 ```powershell
@@ -62,19 +62,41 @@ Stop-Octo -branch main
 Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-common-services `
     -include octo-asset-repo-services,octo-identity-services
 Start-Octo -branch main -configuration DebugL -nonInteractive $true
+
+# 3. Before handing the change to others: also compile the test projects (they are not run)
+Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-common-services `
+    -include octo-asset-repo-services,octo-identity-services -verifyTests
 ```
+
+> **Test projects are not compiled by a plain range run.** Only `src/` projects are built, so a test
+> project that no longer compiles against the rebuilt packages stays invisible until CI. Use
+> `-verifyTests` (src first, then every project outside `src/` is compiled, nothing is run) or
+> `-includeTests` (whole solutions in one build) before every hand-off; a plain run prints this
+> reminder at the end and reports `testsCompiled: false` / `hint` in `-Json`.
 
 Per repository, in build order:
 
 1. `dotnet build -c DebugL -nodeReuse:false` of the solution's `src/` projects only (a temporary
-   `.slnf` in the temp folder; `-includeTests` builds the whole solution). There is no forced
-   restore: the implicit restore only re-extracts the packages that were purged.
+   `.slnf` in the temp folder; `-includeTests` builds the whole solution, `-verifyTests` compiles
+   the projects outside `src/` right after with a second `.slnf`). There is no forced restore: the
+   implicit restore only re-extracts the packages that were purged.
 2. `Copy-NuGetPackages -modifiedSince <build start>` copies the packages this build (re)wrote into
    `<checkout>/nuget`. Stale nupkgs of removed projects (e.g. `Sdk.Common.Web` in `octo-sdk/bin`
    after it moved to `octo-communication-sdk`) are neither copied nor purged.
-3. Exactly those packages are purged from `~/.nuget/packages/<id>/999.0.0`, so the next repository
-   restores them fresh from `<checkout>/nuget`. Nothing else in the cache and nothing else in
+3. Exactly those packages are purged from `<cache>/<id>/999.0.0`, so the next repository restores
+   them fresh from `<checkout>/nuget`. Nothing else in the cache and nothing else in
    `<checkout>/nuget` is touched.
+
+**Lanes (main / dev).** `Invoke-BuildRange` uses the same lane isolation as `Invoke-BuildAll`
+(`Get-OctoLaneBuildSettings`, `-laneIsolation Auto|On|Off`). A lane whose `<lane>/nuget` is not the
+local feed of the user-level `NuGet.Config` (e.g. `dev` while `local-nuget` points at `main/nuget`)
+builds with `NUGET_PACKAGES=<lane>/.nuget-packages` and `MSBUILDDISABLENODEREUSE=1`; in DebugL, repos
+whose `Directory.Build.props` declares no `<RestoreSources>` also get `RestoreSources=<lane>/nuget;nuget.org`
+for their build. The environment is restored afterwards. The package cache that is purged and checked
+for stale packages follows the lane: `<lane>/.nuget-packages` for an isolated lane; for the legacy
+lane (main) the global cache (`NUGET_PACKAGES` or `~/.nuget/packages`), plus `<lane>/.nuget-packages`
+when `<lane>/Octo.User.props` sets `RestorePackagesPath`. `-WhatIf` prints the lane, its environment,
+the caches and the per-repo `RestoreSources`.
 
 It stops at the first failing repository (fail fast, prints the repository name and the error lines
 of its `Invoke-Build.log`) and prints per-repository timings at the end (`-Json` for a
@@ -87,6 +109,8 @@ machine-readable result). It refuses to start while processes run out of a repos
 | `-from` / `-to` | First / last repository of the range (inclusive; `-to` defaults to `-from`). Exact name, name without `octo-`, or a unique substring. |
 | `-include` / `-exclude` | Add repositories outside the range (kept at their build-order position) / skip repositories inside it. |
 | `-includeTests` | Build the whole solution instead of `src/` only. |
+| `-verifyTests` | After each repo's `src/` build, compile its projects outside `src/` (tests, samples) without running them; fails fast with `failedStep: tests`. Extra `tests` timing column. Ignored with `-includeTests`. |
+| `-laneIsolation` | `Auto` (default) / `On` / `Off`, as for `Invoke-BuildAll`. |
 | `-excludeFrontend` | Default `$true`; frontends produce no NuGet packages. |
 | `-configuration` | Default `DebugL`. Copy and purge only run for DebugL. |
 | `-msbuildProperties` | Extra MSBuild global properties (`-p:Name=Value`) for the `dotnet build` of **every** repository in the run. Global properties override values set in project files. `Invoke-BuildAll` and `Invoke-Build` accept the same parameter. Not applied to `build.ps1` / frontend / zenon builds (warning). Do **not** use it for `OctoPublishCkModel`: that stops every CK model of the run from being published into the local catalog, so downstream CK compiles see stale models (a warning is printed when `OctoPublishCkModel=false` applies to more than one repository). |
@@ -103,9 +127,10 @@ package when several repositories contain the same `Meshmakers.*.999.0.0.nupkg` 
 `Sdk.Common.Web` in `octo-sdk/bin` after the project moved to `octo-communication-sdk`), warns about
 such duplicates and never replaces a newer package already in `<checkout>/nuget`.
 
-**Stale global-cache packages.** `~/.nuget/packages` is shared by all checkouts (e.g. `main` and `dev`).
-Before building, `Invoke-BuildRange` compares every `<checkout>/nuget/<id>.999.0.0.nupkg` with the
-SHA-512 NuGet recorded for `~/.nuget/packages/<id>/999.0.0` (`<id>.999.0.0.nupkg.sha512`). A mismatch
+**Stale cache packages.** A package cache can hold another build of a `999.0.0` package (e.g. the
+global cache that the legacy lane shares with repos and tools outside the lanes). Before building,
+`Invoke-BuildRange` compares every `<checkout>/nuget/<id>.999.0.0.nupkg` with the SHA-512 NuGet
+recorded for `<cache>/<id>/999.0.0` (`<id>.999.0.0.nupkg.sha512`) in each cache of the lane. A mismatch
 (e.g. the folder was extracted from the dev checkout's build) or a missing hash file is reported in
 `-WhatIf`, as a warning and in `-Json` (`staleGlobalCache`); `-purgeStaleCache` deletes those folders
 so the restores in this checkout use its own packages.

@@ -134,14 +134,38 @@ function Get-OctoGlobalPackagesPath {
 }
 
 function Get-OctoGlobalPackageDirectories {
-    # Maps package ids to their ~/.nuget/packages/<id lower>/999.0.0 folders.
+    # Maps package ids to their <cache>/<id lower>/999.0.0 folders, for every package cache given.
     param(
         [string[]]$packageIds = @(),
-        [Parameter(Mandatory = $true)] [string]$globalPackagesPath
+        [Parameter(Mandatory = $true)] [string[]]$globalPackagesPath
     )
-    return @($packageIds | Sort-Object -Unique | ForEach-Object {
-            Join-Path -Path (Join-Path -Path $globalPackagesPath -ChildPath $_.ToLowerInvariant()) -ChildPath $script:OctoLocalPackageVersion
+    $ids = @($packageIds | Sort-Object -Unique)
+    return @(foreach ($cache in $globalPackagesPath) {
+            foreach ($id in $ids) {
+                Join-Path -Path (Join-Path -Path $cache -ChildPath $id.ToLowerInvariant()) -ChildPath $script:OctoLocalPackageVersion
+            }
         })
+}
+
+function Get-OctoRangePackageCaches {
+    # The package cache(s) the restores of a lane extract 999.0.0 packages into - the folders the
+    # per-package purge and the stale-cache check must look at. Follows the lane isolation of
+    # Get-OctoLaneBuildSettings (AB#4924) instead of assuming ~/.nuget/packages:
+    #   - isolated lane (e.g. dev): NUGET_PACKAGES=<lane>/.nuget-packages for every repo -> only that one;
+    #   - legacy lane (main): repos importing an <lane>/Octo.User.props that sets RestorePackagesPath use
+    #     <lane>/.nuget-packages, all others the session/global cache (NUGET_PACKAGES or ~/.nuget/packages).
+    param([Parameter(Mandatory = $true)] $laneSettings)
+
+    if ($laneSettings.isolated) {
+        return @($laneSettings.laneCache)
+    }
+    $caches = @()
+    $userProps = Join-Path -Path $laneSettings.laneRoot -ChildPath 'Octo.User.props'
+    if ((Test-Path -Path $userProps -PathType Leaf) -and (Select-String -Path $userProps -Pattern '<RestorePackagesPath' -SimpleMatch -Quiet)) {
+        $caches += $laneSettings.laneCache
+    }
+    $caches += Get-OctoGlobalPackagesPath
+    return @($caches | ForEach-Object { [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([string]$_)) } | Select-Object -Unique)
 }
 
 function Remove-OctoGlobalPackageVersions {
@@ -159,42 +183,47 @@ function Remove-OctoGlobalPackageVersions {
 
 function Get-OctoStaleGlobalPackages {
     # Compares every <checkout>/nuget/<id>.999.0.0.nupkg with the 999.0.0 folder of the same id in
-    # the global packages cache (shared by all checkouts, e.g. main and dev). NuGet records the
+    # each package cache the lane restores into (Get-OctoRangePackageCaches). NuGet records the
     # SHA-512 of the extracted nupkg in <id>.999.0.0.nupkg.sha512; when it differs from the local
-    # package, restores in this checkout silently use the other build ("hashMismatch").
-    # A cache folder without the hash file cannot be verified ("noHashFile").
+    # package, restores in this checkout silently use another build, e.g. another lane's
+    # ("hashMismatch"). A cache folder without a (non-empty) hash file cannot be verified ("noHashFile").
     param(
         [Parameter(Mandatory = $true)] [string]$nugetPath,
-        [Parameter(Mandatory = $true)] [string]$globalPackagesPath
+        [Parameter(Mandatory = $true)] [string[]]$globalPackagesPath
     )
     $stale = @()
     if (!(Test-Path $nugetPath)) { return $stale }
     foreach ($file in @(Get-ChildItem -Path $nugetPath -File -Filter $script:OctoPackageFilter)) {
         $id = (Get-OctoPackageIdFromFile -fileName $file.Name).ToLowerInvariant()
-        $cacheDirectory = Join-Path -Path (Join-Path -Path $globalPackagesPath -ChildPath $id) -ChildPath $script:OctoLocalPackageVersion
-        if (!(Test-Path $cacheDirectory)) { continue }   # not extracted yet - the next restore takes the local one
-        $hashFile = Join-Path -Path $cacheDirectory -ChildPath "$id.$($script:OctoLocalPackageVersion).nupkg.sha512"
-        $reason = $null
-        if (!(Test-Path $hashFile)) {
-            $reason = 'noHashFile'
-        }
-        else {
-            # Per package, never reuse a value from the previous iteration: an empty hash file
-            # (interrupted extraction) reads as $null and counts as missing.
-            $rawHash = Get-Content -Path $hashFile -Raw -ErrorAction SilentlyContinue
-            $cacheHash = if ($null -eq $rawHash) { '' } else { ([string]$rawHash).Trim() }
-            if ([string]::IsNullOrEmpty($cacheHash)) {
+        $localHash = $null   # computed once per package, only when a cache has a hash to compare
+        foreach ($cache in $globalPackagesPath) {
+            $cacheDirectory = Join-Path -Path (Join-Path -Path $cache -ChildPath $id) -ChildPath $script:OctoLocalPackageVersion
+            if (!(Test-Path $cacheDirectory)) { continue }   # not extracted yet - the next restore takes the local one
+            $hashFile = Join-Path -Path $cacheDirectory -ChildPath "$id.$($script:OctoLocalPackageVersion).nupkg.sha512"
+            $reason = $null
+            if (!(Test-Path $hashFile)) {
                 $reason = 'noHashFile'
             }
             else {
-                $stream = [IO.File]::OpenRead($file.FullName)
-                try { $localHash = [Convert]::ToBase64String([Security.Cryptography.SHA512]::HashData($stream)) }
-                finally { $stream.Dispose() }
-                if ($cacheHash -ne $localHash) { $reason = 'hashMismatch' }
+                # Read per package and cache, never reuse a previous value: an empty hash file
+                # (interrupted extraction) reads as $null and counts as missing.
+                $rawHash = Get-Content -Path $hashFile -Raw -ErrorAction SilentlyContinue
+                $cacheHash = if ($null -eq $rawHash) { '' } else { ([string]$rawHash).Trim() }
+                if ([string]::IsNullOrEmpty($cacheHash)) {
+                    $reason = 'noHashFile'
+                }
+                else {
+                    if ($null -eq $localHash) {
+                        $stream = [IO.File]::OpenRead($file.FullName)
+                        try { $localHash = [Convert]::ToBase64String([Security.Cryptography.SHA512]::HashData($stream)) }
+                        finally { $stream.Dispose() }
+                    }
+                    if ($cacheHash -ne $localHash) { $reason = 'hashMismatch' }
+                }
             }
-        }
-        if ($reason) {
-            $stale += [pscustomobject]@{ PackageId = $id; CachePath = $cacheDirectory; Reason = $reason }
+            if ($reason) {
+                $stale += [pscustomobject]@{ PackageId = $id; CachePath = $cacheDirectory; Reason = $reason }
+            }
         }
     }
     return $stale
@@ -299,7 +328,7 @@ function Get-OctoBuildRangePlan {
     param(
         [Parameter(Mandatory = $true)] [object[]]$repos,
         [switch]$includeTests,
-        [Parameter(Mandatory = $true)] [string]$globalPackagesPath
+        [Parameter(Mandatory = $true)] [string[]]$globalPackagesPath
     )
 
     $plan = @()
@@ -307,6 +336,7 @@ function Get-OctoBuildRangePlan {
         $mode = Get-OctoRepoBuildMode -repo $repo
         $solution = Get-OctoRepoSolution -path $repo.Path
         $projects = @()
+        $testProjects = @()
         $target = $null
         $notes = @()
         switch ($mode) {
@@ -325,6 +355,8 @@ function Get-OctoBuildRangePlan {
                 else {
                     $target = 'slnf'
                     $projects = $srcProjects
+                    # Everything outside src/ (tests, samples): compiled by -verifyTests, never run.
+                    $testProjects = @($allProjects | Where-Object { $srcProjects -notcontains $_ })
                 }
             }
             'script' { $target = 'build.ps1'; $notes += 'custom build.ps1 - src-only filtering does not apply' }
@@ -354,6 +386,7 @@ function Get-OctoBuildRangePlan {
             Target        = $target
             Solution      = if ($solution) { $solution.FullName } else { $null }
             Projects      = $projects
+            TestProjects  = $testProjects
             PackageIds    = $packageIds
             PurgePaths    = @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath)
             OlderPaths    = @(Get-OctoGlobalPackageDirectories -packageIds $olderIds -globalPackagesPath $globalPackagesPath)
@@ -428,6 +461,32 @@ function Invoke-OctoBuildRangeRepo {
     return [pscustomobject]@{ Success = ($exitCode -eq 0); LogFile = $logFile; ExitCode = $exitCode }
 }
 
+function Invoke-OctoBuildRangeTests {
+    # -verifyTests (R2-5): compiles the solution's projects outside src/ (tests, samples) of a
+    # repository whose src/ projects were just built - without running any test. A plain range build
+    # skips them, so a test project that no longer compiles against the rebuilt packages stays
+    # invisible until CI (R2-1). Appends to the repository's Invoke-Build.log.
+    param(
+        [Parameter(Mandatory = $true)] [object]$entry,
+        [Parameter(Mandatory = $true)] [string]$configuration,
+        [hashtable]$msbuildProperties = @{},
+        [switch]$Json
+    )
+    if ($entry.Mode -ne 'dotnet' -or @($entry.TestProjects).Count -eq 0) {
+        return [pscustomobject]@{ Success = $true; Skipped = $true; LogFile = $null }
+    }
+    $propertyArgs = @(ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties)
+    $logFile = Join-Path -Path $entry.Path -ChildPath 'Invoke-Build.log'
+    $filter = New-OctoSolutionFilter -solutionPath $entry.Solution -projects $entry.TestProjects -name "$($entry.Name).tests"
+    if (-not $Json) {
+        Write-Host "[$configuration] verify tests compile: dotnet build $filter" -ForegroundColor Green
+    }
+    "Invoke-BuildRange -verifyTests: dotnet build $filter -c $configuration -nodeReuse:false $($propertyArgs -join ' ')" | Add-Content -Path $logFile
+    & dotnet build $filter -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
+    $exitCode = $LASTEXITCODE
+    return [pscustomobject]@{ Success = ($exitCode -eq 0); Skipped = $false; LogFile = $logFile; ExitCode = $exitCode }
+}
+
 function Format-OctoDuration {
     param([TimeSpan]$duration)
     if ($duration.TotalMinutes -ge 1) {
@@ -444,11 +503,21 @@ function Write-OctoBuildRangePlan {
         [object[]]$runningProcesses = @(),
         [object[]]$staleCache = @(),
         [switch]$purgeStaleCache,
-        [string[]]$propertyArgs = @()
+        [string[]]$propertyArgs = @(),
+        $laneSettings = $null,
+        [string[]]$packageCaches = @(),
+        [switch]$verifyTests
     )
     $purgeEnabled = $configuration -ieq 'DebugL'
     Write-Host "Invoke-BuildRange plan ($configuration) in $branchRootPath" -ForegroundColor Cyan
     Write-Host "  NuGet folder: $(Join-Path $branchRootPath 'nuget') (not wiped; Copy-NuGetPackages after each repository)" -ForegroundColor DarkGray
+    if ($null -ne $laneSettings) {
+        Write-Host "  Lane isolated: $($laneSettings.isolated) ($($laneSettings.reason))" -ForegroundColor DarkGray
+        foreach ($name in $laneSettings.environment.Keys) { Write-Host "    env $name=$($laneSettings.environment[$name])" -ForegroundColor DarkGray }
+    }
+    if ($packageCaches.Count -gt 0) {
+        Write-Host "  Package cache(s) purged per package / checked for stale 999.0.0 folders: $($packageCaches -join ', ')" -ForegroundColor DarkGray
+    }
     if ($propertyArgs.Count -gt 0) {
         Write-Host "  MSBuild properties (all repositories): $($propertyArgs -join ' ')" -ForegroundColor DarkGray
     }
@@ -467,6 +536,10 @@ function Write-OctoBuildRangePlan {
             foreach ($project in $entry.Projects) { Write-Host "      - $project" }
         }
         if (@($entry.PropertyArgs).Count -gt 0) { Write-Host "    msbuild: $($entry.PropertyArgs -join ' ')" }
+        if ($entry.RestoreSources) { Write-Host "    env RestoreSources=$($entry.RestoreSources)" }
+        if ($verifyTests -and @($entry.TestProjects).Count -gt 0) {
+            Write-Host "    then: verify $(@($entry.TestProjects).Count) test/sample project(s) compile (-verifyTests, not run)"
+        }
         foreach ($note in $entry.Notes) { Write-Host "    note: $note" -ForegroundColor Yellow }
         if ($entry.Mode -ne 'none') {
             if ($purgeEnabled) {
@@ -504,17 +577,32 @@ function Write-OctoBuildRangePlan {
 
       1. builds it with `dotnet build -c <configuration> -nodeReuse:false`
          - only the solution's src/ projects (via a temporary .slnf), unless -includeTests;
+           with -verifyTests the projects outside src/ (tests, samples) are compiled right after,
+           without running them;
          - no forced restore (`-f`): the implicit restore only re-extracts what was purged;
          - repositories with build.ps1, frontends and the zenon plug are built the same way
            Invoke-BuildAll builds them;
       2. (DebugL only) Copy-NuGetPackages -modifiedSince <build start> into <checkout>/nuget,
          i.e. only the packages this build (re)wrote - stale nupkgs of removed projects are
          left alone;
-      3. (DebugL only) purges ~/.nuget/packages/<id>/999.0.0 for exactly those packages, so the
-         next repository in the range restores the fresh ones from <checkout>/nuget.
+      3. (DebugL only) purges <cache>/<id>/999.0.0 for exactly those packages, so the next
+         repository in the range restores the fresh ones from <checkout>/nuget.
+
+    Lane isolation (AB#4924) is the same as Invoke-BuildAll's (Get-OctoLaneBuildSettings): an
+    isolated lane (e.g. dev, whose nuget/ is not the local feed of the user-level NuGet.Config)
+    builds with NUGET_PACKAGES=<lane>/.nuget-packages and MSBUILDDISABLENODEREUSE=1, and in DebugL
+    repositories without their own <RestoreSources> get RestoreSources=<lane>/nuget;nuget.org.
+    The environment is restored afterwards. The package cache that is purged and checked follows
+    the lane (Get-OctoRangePackageCaches): <lane>/.nuget-packages for an isolated lane; for the
+    legacy lane (main) the global cache (NUGET_PACKAGES or ~/.nuget/packages), plus
+    <lane>/.nuget-packages if <lane>/Octo.User.props sets RestorePackagesPath.
 
     Unlike Invoke-BuildAll it does NOT wipe <checkout>/nuget, does NOT delete every
-    meshmakers.* package from the global cache and does NOT kill dotnet processes.
+    meshmakers.* package from the package cache and does NOT kill dotnet processes.
+
+    Test projects are NOT compiled by default. Before handing a change to others, run with
+    -includeTests (whole solutions) or -verifyTests (src/ first, then the test projects compile,
+    nothing is run); a plain run prints a reminder at the end (R2-5).
 
     Stops at the first failing repository (fail fast) and prints the repository name and the
     tail of its log. Per-repository timings are printed at the end (or emitted with -Json).
@@ -549,6 +637,14 @@ function Write-OctoBuildRangePlan {
 .PARAMETER includeTests
     Build the whole solution (src + tests + samples) instead of src/ projects only.
 
+.PARAMETER verifyTests
+    After each repository's src/ build, compile its projects outside src/ (tests, samples) with a
+    second temporary .slnf - without running any test. Fails fast like a build failure. Ignored
+    with -includeTests (the whole solution is built anyway). Timing column "tests".
+
+.PARAMETER laneIsolation
+    Auto (default) / On / Off - see Get-OctoLaneBuildSettings.
+
 .PARAMETER excludeFrontend
     Drop octo-frontend-* repositories from the build order. Defaults to $true (frontends do not
     produce NuGet packages and take minutes); pass $false to include them.
@@ -576,9 +672,9 @@ function Write-OctoBuildRangePlan {
     is kept out of the shared local catalog.
 
 .PARAMETER purgeStaleCache
-    Before the first build, purge the ~/.nuget/packages/<id>/999.0.0 folders whose recorded
-    SHA-512 differs from <checkout>/nuget/<id>.999.0.0.nupkg (e.g. extracted from the dev
-    checkout's build). Without the switch they are only reported (warning, -WhatIf, -Json).
+    Before the first build, purge the <cache>/<id>/999.0.0 folders whose recorded SHA-512
+    differs from <checkout>/nuget/<id>.999.0.0.nupkg (e.g. extracted from another lane's build).
+    Without the switch they are only reported (warning, -WhatIf, -Json).
 
 .PARAMETER WhatIf
     Print the plan (repositories, projects, global-cache folders to purge, running processes)
@@ -595,6 +691,9 @@ function Write-OctoBuildRangePlan {
 
 .EXAMPLE
     Invoke-BuildRange -branch main -from octo-asset-repo-services -includeTests
+
+.EXAMPLE
+    Invoke-BuildRange -branch dev -from octo-construction-kit-engine -to octo-common-services -include octo-asset-repo-services -verifyTests
 
 .EXAMPLE
     Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-common-services -include octo-identity-services -msbuildPropertiesPerRepo @{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } } -purgeStaleCache
@@ -616,6 +715,9 @@ function Invoke-BuildRange {
         [hashtable]$msbuildProperties = @{},
         [hashtable]$msbuildPropertiesPerRepo = @{},
         [switch]$purgeStaleCache,
+        [switch]$verifyTests,
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto',
         [switch]$Json
     )
 
@@ -659,8 +761,18 @@ function Invoke-BuildRange {
         return
     }
 
-    $globalPackagesPath = Get-OctoGlobalPackagesPath
+    $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $branchRootPath -laneIsolation $laneIsolation
+    $globalPackagesPath = @(Get-OctoRangePackageCaches -laneSettings $laneSettings)
     $plan = @(Get-OctoBuildRangePlan -repos $repos -includeTests:$includeTests -globalPackagesPath $globalPackagesPath)
+    $verify = [bool]$verifyTests -and -not $includeTests
+    foreach ($entry in $plan) {
+        # Per-repo RestoreSources of an isolated lane (DebugL, repos without their own <RestoreSources>).
+        $restoreSources = $null
+        if ($configuration -ieq 'DebugL' -and $entry.Mode -ne 'none') {
+            $restoreSources = Get-OctoRepoRestoreSourcesOverride -repositoryPath $entry.Path -laneSettings $laneSettings
+        }
+        $entry | Add-Member -NotePropertyName RestoreSources -NotePropertyValue $restoreSources -Force
+    }
 
     # Per-repository MSBuild properties: keys accept the same name forms as -from/-to.
     $perRepo = @{}
@@ -690,10 +802,13 @@ function Invoke-BuildRange {
             Write-OctoJson -Command 'Invoke-BuildRange' -Data ([ordered]@{
                     whatIf           = $true
                     branchRootPath   = $branchRootPath
+                    lane             = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $laneSettings.environment }
+                    packageCaches    = @($globalPackagesPath)
+                    verifyTests      = $verify
                     configuration    = $configuration
                     nugetPath        = (Join-Path $branchRootPath 'nuget')
                     repositories     = @($plan | ForEach-Object {
-                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; solution = $_.Solution; projects = @($_.Projects); purge = if ($purgeEnabled) { @($_.PurgePaths) } else { @() }; olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); notes = @($_.Notes) }
+                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; solution = $_.Solution; projects = @($_.Projects); purge = if ($purgeEnabled) { @($_.PurgePaths) } else { @() }; olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes) }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
                     msbuildProperties = @($propertyArgs)
@@ -702,7 +817,7 @@ function Invoke-BuildRange {
                 })
         }
         else {
-            Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -runningProcesses $runningProcesses -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs
+            Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -runningProcesses $runningProcesses -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs -laneSettings $laneSettings -packageCaches $globalPackagesPath -verifyTests:$verify
             Write-Host ""
             Write-Host "WhatIf: nothing was built, copied or purged." -ForegroundColor Cyan
         }
@@ -734,7 +849,7 @@ function Invoke-BuildRange {
     }
 
     if (-not $Json) {
-        Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs
+        Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs -laneSettings $laneSettings -packageCaches $globalPackagesPath -verifyTests:$verify
         Write-Host ""
     }
 
@@ -750,8 +865,13 @@ function Invoke-BuildRange {
 
     $results = [System.Collections.Generic.List[object]]::new()
     $failed = $null
+    $failedStep = $null
     $totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run, empty for the
+    # legacy lane; restored afterwards so the session is left as it was found.
+    $savedLaneEnvironment = Set-OctoBuildEnvironment -environment $laneSettings.environment
+    try {
     foreach ($entry in $plan) {
         if (-not $Json) { Write-Host "==> $($entry.Name)" -ForegroundColor Cyan }
         # Packages written from here on are "produced by this build"; older ones in bin/DebugL are
@@ -760,14 +880,32 @@ function Invoke-BuildRange {
         # nupkg - that is fine, its content did not change.
         $buildStartedAt = (Get-Date).AddSeconds(-1)
         $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
-        $buildWatch.Stop()
+        $savedRepoEnvironment = $null
+        if ($entry.RestoreSources) {
+            $savedRepoEnvironment = Set-OctoBuildEnvironment -environment @{ RestoreSources = $entry.RestoreSources }
+        }
+        try {
+            $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
+            $buildWatch.Stop()
+            $tests = $null
+            $testWatch = [System.Diagnostics.Stopwatch]::new()
+            if ($build.Success -and $verify) {
+                $testWatch.Start()
+                $tests = Invoke-OctoBuildRangeTests -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
+                $testWatch.Stop()
+            }
+        }
+        finally {
+            Restore-OctoBuildEnvironment -saved $savedRepoEnvironment
+        }
 
         $result = [ordered]@{
             repo            = $entry.Name
             success         = [bool]$build.Success
             buildDuration   = $buildWatch.Elapsed
             packageDuration = [TimeSpan]::Zero
+            testDuration    = $testWatch.Elapsed
+            testsCompiled   = if ($null -ne $tests -and -not $tests.Skipped) { [bool]$tests.Success } else { $null }
             copiedCount     = 0
             purged          = @()
             staleSkipped    = @()
@@ -778,6 +916,15 @@ function Invoke-BuildRange {
         if (-not $build.Success) {
             $results.Add($result)
             $failed = $entry
+            $failedStep = 'build'
+            break
+        }
+        if ($null -ne $tests -and -not $tests.Success) {
+            $result.success = $false
+            $result.logFile = $tests.LogFile
+            $results.Add($result)
+            $failed = $entry
+            $failedStep = 'tests'
             break
         }
 
@@ -799,7 +946,17 @@ function Invoke-BuildRange {
         }
         $results.Add($result)
     }
+    }
+    finally {
+        Restore-OctoBuildEnvironment -saved $savedLaneEnvironment
+    }
     $totalWatch.Stop()
+
+    # R2-5: a src-only run never compiled the test projects - say so instead of implying "all green".
+    $testsHint = $null
+    if (-not $includeTests -and -not $verify -and @($plan | Where-Object { $_.Mode -eq 'dotnet' -and $_.Target -eq 'slnf' }).Count -gt 0) {
+        $testsHint = "Only src/ projects were built - test projects were not compiled. Before handing off, rerun with -verifyTests (compile tests, do not run them) or -includeTests."
+    }
 
     if ($Json) {
         Write-OctoJson -Command 'Invoke-BuildRange' -Data ([ordered]@{
@@ -807,11 +964,18 @@ function Invoke-BuildRange {
                 configuration  = $configuration
                 success        = ($null -eq $failed)
                 failedRepo     = if ($failed) { $failed.Name } else { $null }
+                failedStep     = $failedStep
+                lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $laneSettings.environment }
+                packageCaches  = @($globalPackagesPath)
+                testsCompiled  = [bool]($includeTests -or $verify)
+                hint           = $testsHint
                 repositories   = @($results | ForEach-Object {
                         [ordered]@{
                             repo                   = $_.repo
                             success                = $_.success
                             buildSeconds           = $_.buildDuration.TotalSeconds
+                            testCompileSeconds     = $_.testDuration.TotalSeconds
+                            testsCompiled          = $_.testsCompiled
                             packageSeconds         = $_.packageDuration.TotalSeconds
                             copiedCount            = $_.copiedCount
                             purged                 = @($_.purged)
@@ -833,6 +997,7 @@ function Invoke-BuildRange {
         Write-Host "---------------------------------"
         foreach ($result in $results) {
             $line = "{0,-45} build {1,8}   copy+purge {2,8}" -f $result.repo, (Format-OctoDuration $result.buildDuration), (Format-OctoDuration $result.packageDuration)
+            if ($verify) { $line += "   tests {0,8}" -f (Format-OctoDuration $result.testDuration) }
             Write-Host $line -ForegroundColor $(if ($result.success) { 'Green' } else { 'Red' })
         }
         foreach ($skipped in @($plan | Select-Object -Skip $results.Count)) {
@@ -840,11 +1005,12 @@ function Invoke-BuildRange {
         }
         Write-Host "---------------------------------"
         Write-Host "Total: $(Format-OctoDuration $totalWatch.Elapsed)"
+        if ($testsHint -and -not $failed) { Write-Host $testsHint -ForegroundColor Yellow }
     }
 
     if ($failed) {
         $global:LASTEXITCODE = 1
-        $message = "Invoke-BuildRange: build of $($failed.Name) failed."
+        $message = if ($failedStep -eq 'tests') { "Invoke-BuildRange: test projects of $($failed.Name) do not compile (-verifyTests)." } else { "Invoke-BuildRange: build of $($failed.Name) failed." }
         $logFile = $results[$results.Count - 1].logFile
         if ($logFile -and (Test-Path $logFile)) {
             $message += " Log: $logFile"
