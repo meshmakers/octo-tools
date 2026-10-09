@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "octo agent-docs ruleset",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "rules"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "logOnly",
+        "enforce"
+      ]
+    },
+    "nonRelaxable": {
+      "description": "Rules a repository's own .agent-docs.json may raise but not lower. Honoured only in the org ruleset shipped with the module.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "scan": {
+      "description": "Scan surface for the integrity rules.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ignore": {
+          "description": "Path SEGMENTS (not globs) excluded from the recursive Markdown scan.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ruleDocs": {
+      "description": "Per-rule explanation rendered by Test-OctoAgentDocs -Explain and the migration brief. Every rule id must have an entry.",
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "entry-point-lines",
+          "entry-point-characters",
+          "line-length",
+          "doc-size",
+          "frontmatter-present",
+          "doc-reachable",
+          "reference-resolves",
+          "reference-to-shim",
+          "routing-current",
+          "docs-count",
+          "shim-valid",
+          "required-sections",
+          "no-invisible-characters",
+          "link-hosts",
+          "migration-pending"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "tier",
+          "why",
+          "fix"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "tier": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fix": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "tiers": {
+      "description": "Report order. Findings are grouped by the tier their rule names, lowest first.",
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "1",
+          "2",
+          "3",
+          "4"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "title",
+          "why"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "entry-point-lines",
+          "entry-point-characters",
+          "line-length",
+          "doc-size",
+          "frontmatter-present",
+          "doc-reachable",
+          "reference-resolves",
+          "reference-to-shim",
+          "routing-current",
+          "docs-count",
+          "shim-valid",
+          "required-sections",
+          "no-invisible-characters",
+          "link-hosts",
+          "migration-pending"
+        ]
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "off",
+              "warn",
+              "error"
+            ]
+          },
+          {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "prefixItems": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "warn",
+                  "error"
+                ]
+              },
+              {
+                "type": "object"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

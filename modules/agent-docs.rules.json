@@ -1,0 +1,218 @@
+{
+  "$schema": "./agent-docs.rules.schema.json",
+  "schemaVersion": 1,
+  "mode": "logOnly",
+  "nonRelaxable": [
+    "no-invisible-characters"
+  ],
+  "scan": {
+    "ignore": [
+      ".git",
+      "node_modules",
+      "bin",
+      "obj",
+      "packages",
+      "dist",
+      ".vs",
+      ".idea"
+    ]
+  },
+  "rules": {
+    "entry-point-lines": [
+      "warn",
+      {
+        "max": 200
+      }
+    ],
+    "entry-point-characters": [
+      "error",
+      {
+        "max": 20000,
+        "warnAt": 12000
+      }
+    ],
+    "line-length": [
+      "warn",
+      {
+        "max": 120,
+        "tables": 200,
+        "maxReported": 5
+      }
+    ],
+    "doc-size": [
+      "warn",
+      {
+        "maxCharacters": 25000
+      }
+    ],
+    "frontmatter-present": [
+      "error",
+      {
+        "maxDescription": 160
+      }
+    ],
+    "doc-reachable": [
+      "error",
+      {}
+    ],
+    "reference-resolves": [
+      "error",
+      {
+        "siblingRepoPattern": "^(octo|mm)-[^/]+/"
+      }
+    ],
+    "reference-to-shim": [
+      "warn",
+      {}
+    ],
+    "routing-current": [
+      "error",
+      {
+        "includeDescriptions": false
+      }
+    ],
+    "docs-count": [
+      "warn",
+      {
+        "max": 12
+      }
+    ],
+    "shim-valid": [
+      "error",
+      {
+        "content": [
+          "<!-- Claude Code loads this file. AGENTS.md is the source of truth - edit that, not this. -->",
+          "@AGENTS.md"
+        ]
+      }
+    ],
+    "required-sections": [
+      "error",
+      {
+        "sections": [
+          "Read before you change",
+          "Build & test",
+          "Before you commit",
+          "Rules"
+        ]
+      }
+    ],
+    "no-invisible-characters": [
+      "error",
+      {}
+    ],
+    "link-hosts": [
+      "off",
+      {
+        "ignoreLocal": true,
+        "allow": [
+          "docs.claude.com",
+          "github.com",
+          "learn.microsoft.com",
+          "docs.meshmakers.cloud",
+          "kubernetes.io",
+          "sigs.k8s.io"
+        ]
+      }
+    ],
+    "migration-pending": [
+      "warn",
+      {}
+    ]
+  },
+  "tiers": {
+    "1": {
+      "title": "Integrity",
+      "why": "text a model reads that a reviewer cannot see - fix before anything else"
+    },
+    "2": {
+      "title": "Entry point",
+      "why": "the shape every repository shares; the migration fixes most of these at once"
+    },
+    "3": {
+      "title": "Docs",
+      "why": "one edit per file: frontmatter and routing"
+    },
+    "4": {
+      "title": "Budgets",
+      "why": "sizes and counts; they shrink as content moves into routed docs"
+    }
+  },
+  "ruleDocs": {
+    "entry-point-lines": {
+      "tier": 4,
+      "why": "The entry point is loaded into every agent session, so each line costs context before any work starts.",
+      "fix": "Move detail into a routed doc under docs/ and keep the entry point to pointers and rules."
+    },
+    "entry-point-characters": {
+      "tier": 4,
+      "why": "A line budget can be beaten by a few very long lines; characters measure what the agent actually loads.",
+      "fix": "Move long passages and tables into docs/ and route them with applies_to."
+    },
+    "line-length": {
+      "tier": 4,
+      "why": "Lines wider than a screen are hard to review in a diff, and review is the only defence for instruction files.",
+      "fix": "Wrap prose at the limit; tables and lines without whitespace have their own allowance."
+    },
+    "doc-size": {
+      "tier": 4,
+      "why": "A routed doc is loaded whole whenever its globs match, so its size is paid on every matching change.",
+      "fix": "Split by topic into sibling docs with their own applies_to, or trim; raise the limit in .agent-docs.json only with a reason."
+    },
+    "frontmatter-present": {
+      "tier": 3,
+      "why": "The description is what the routing table and an agent use to decide whether to open the doc at all.",
+      "fix": "Add a frontmatter block with a one-line description under the length limit."
+    },
+    "doc-reachable": {
+      "tier": 3,
+      "why": "A doc nobody routes to is never read, and a doc marked both routed and background has no clear role.",
+      "fix": "Give it applies_to globs, or mark it background: true if it is reference material only."
+    },
+    "reference-resolves": {
+      "tier": 2,
+      "why": "A broken link sends an agent to a file or heading that does not exist, and it will guess instead of asking.",
+      "fix": "Fix the path or anchor; headings produce anchors the way GitHub does."
+    },
+    "reference-to-shim": {
+      "tier": 3,
+      "why": "A reference to a CLAUDE.md that has become the shim still resolves, but an agent that opens it gets only '@AGENTS.md' - the pointer degrades without breaking.",
+      "fix": "Point the reference at AGENTS.md instead; a sibling repository that has not migrated yet is left alone."
+    },
+    "routing-current": {
+      "tier": 2,
+      "why": "The routing table is derived from the docs' frontmatter; a stale table routes an agent to the wrong place or nowhere.",
+      "fix": "Run Test-OctoAgentDocs -Fix to regenerate the block between the routing markers."
+    },
+    "docs-count": {
+      "tier": 4,
+      "why": "A routing table longer than a screen stops being scannable, which defeats routing.",
+      "fix": "Merge docs that cover one topic, or mark reference material background."
+    },
+    "shim-valid": {
+      "tier": 2,
+      "why": "Claude Code loads CLAUDE.md; once AGENTS.md is canonical the shim must import it and carry nothing else, or two files compete.",
+      "fix": "Run Test-OctoAgentDocs -Fix; add -Force only after moving any real content out of CLAUDE.md."
+    },
+    "required-sections": {
+      "tier": 2,
+      "why": "Every repository's entry point carries the same level-2 headings, so an agent finds build, commit and rules in the same place everywhere.",
+      "fix": "Add the missing '## ' heading and write its content; the checker never fills text in."
+    },
+    "no-invisible-characters": {
+      "tier": 1,
+      "why": "Unicode tag, zero-width and bidirectional override characters carry text a reviewer cannot see but a model reads.",
+      "fix": "Delete the characters; if the file is generated, fix the generator."
+    },
+    "link-hosts": {
+      "tier": 1,
+      "why": "An agent follows links, so an external host outside the allowlist is a way to feed it text nobody reviewed.",
+      "fix": "Use an allowed host, or add the host to link-hosts.allow in .agent-docs.json with a reason."
+    },
+    "migration-pending": {
+      "tier": 2,
+      "why": "AGENTS-MIGRATION.md is a working brief for the migration, not documentation; left behind, it misleads the next reader.",
+      "fix": "Finish the steps it lists, then delete the file in the same commit."
+    }
+  }
+}

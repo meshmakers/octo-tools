@@ -32,8 +32,8 @@ in this repo — they live in a per-developer config file outside of git.
    config (in particular: your Telerik Kendo UI license, your Rancher API
    token):
 
-   * macOS / Linux: `~/.config/powershell/Microsoft.PowerShell_profile_private.ps1`
-   * Windows: `~/.pwsh/profile.ps1`
+   * macOS: `~/.config/powershell/Microsoft.PowerShell_profile_private.ps1`
+   * Linux and Windows: `~/.pwsh/profile.ps1`
 
    Typical content:
 
@@ -264,6 +264,71 @@ onboarding.
 The cmdlet doesn't persist anything to disk; the only artefact of a
 successful run is the lease the adapter records server-side and a one-line
 status echo on stdout.
+
+# Agent instruction files
+
+`Test-OctoAgentDocs` checks the files coding agents load in a repository - `AGENTS.md`,
+its `CLAUDE.md` shim and `docs/` - and regenerates the parts of them that are derived.
+
+```powershell
+Test-OctoAgentDocs                                   # current repo, report only
+Test-OctoAgentDocs -Path octo-communication-operator # or a repo name under $ROOTPATH
+Test-OctoAgentDocs -Fix                              # rewrite the generated regions
+Test-OctoAgentDocs -Fix -WhatIf                      # name what -Fix would write, write nothing
+Test-OctoAgentDocs -Explain                          # the check, plus why and fix for each rule that fired
+Test-OctoAgentDocs -Explain -All                     # every rule: severity, limits, why, fix; no scan
+Test-OctoAgentDocs -Explain doc-size                 # one rule (the name in each finding's second column); no scan
+Test-OctoAgentDocs -Mode enforce -Json               # for a pipeline step
+```
+
+The report opens with the counts and a "start here" sentence naming the cause behind most of the
+findings, then groups them in the order to fix them: integrity, entry point, docs, budgets. Every
+finding names its rule. `-Explain` adds, for each rule that fired, why it exists and what to do
+about it; `-Explain -All` is the full reference in the same order. That text and the order live in
+the ruleset (`ruleDocs`, `tiers`), so the report and the migration brief below cannot drift from
+what is enforced.
+
+It checks two things that are easy to get wrong by hand and one that is impossible to
+see: that the always-loaded entry point stays inside its budget, that every doc is
+reachable and every link resolves, and that no file carries Unicode Tag characters,
+zero-width characters or bidirectional overrides - text a reviewer cannot see but a
+model still reads.
+
+`-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->`
+markers from each doc's `applies_to` frontmatter, and writes the `CLAUDE.md` shim. It
+never writes prose: a missing section is reported, never filled in. A `CLAUDE.md` that
+still has real content is left alone unless you pass `-Force`.
+
+Rules are configured like ESLint's - `[severity, options]` with `off | warn | error` -
+and cascade: the org defaults in `modules/agent-docs.rules.json`, then a repository's
+own `.agent-docs.json`, then `-ConfigPath`, then `-Mode`. A repository may raise a rule
+but not lower one listed in `nonRelaxable`, because that file lives in the branch under
+review. The checker reads what these repositories write: single-line `key: value`
+frontmatter, inline Markdown links and backticked paths, LF or CRLF line endings. Other
+shapes are reported, not parsed. `Get-Help Test-OctoAgentDocs -Full` has the rest.
+
+## Starting a repository
+
+```powershell
+Initialize-OctoAgentDocs -Path octo-new-repo          # minimal shape, or a migration brief
+Initialize-OctoAgentDocs -Path octo-new-repo -WhatIf  # show what it would write
+```
+
+`Initialize-OctoAgentDocs` never overwrites a file. Every run ends with the same five-row
+checklist - `AGENTS.md`, `CLAUDE.md`, `docs/`, the migration brief, the check - marked done, open
+or not applicable yet, with the next steps derived from the open rows, so the answer to "is the
+migration finished" is the list itself. A repository with no agent files gets
+`AGENTS.md` with the required sections and the routing markers, the `CLAUDE.md` shim, and a first
+`-Fix` run; nothing else, because the first routed doc creates `docs/` and an override file is
+something a repository adds when it has a reason. A repository that still has a hand-written
+`CLAUDE.md` gets only `AGENTS-MIGRATION.md`: a brief for the coding agent and the developer doing
+the migration, rendered from the ruleset so it carries the budgets, the section names and the
+shim as enforced. The checker warns while that file exists (`migration-pending`); it is deleted in
+the migration commit. All of these files are English, like everything else that ships with a
+repository.
+
+Tests, from the `octo-tools` folder (Pester 5 or later: `Install-Module Pester -Scope CurrentUser`):
+`Invoke-Pester ./tests`.
 
 # Support and Feedback
 
