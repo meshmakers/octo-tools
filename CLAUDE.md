@@ -87,6 +87,9 @@ An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, t
 - `Invoke-CleanAllGitRepos` - Clean all repositories (use `-force` to ignore pending changes)
 - `Compare-CkVersions <otherBranch>` - Compare Construction Kit model versions (`ckModel.yaml`) between the current checkout and another branch, grouped System-first and color coded (green=equal, yellow=minor/patch, red=major, cyan=only in one). Resolves the path relative to `$Global:ROOTPATH`, e.g. `Compare-CkVersions ../main` or `Compare-CkVersions branches/test`
 
+### CI cost
+- `Get-CiWasteReport [-Hours 24] [-AsOf <time>] [-Json]` - Read-only report of how much CI work in Azure DevOps is duplicate: per CI definition runs, resource-trigger runs, same-commit duplicates, wasted and estimated redundant agent-minutes, queue wait p50/p90, plus pool concurrency (CI pool 45, CD pool 46). GET requests only, token from `az account get-access-token` (never printed), no build is queued or canceled. Pure calculation in `Measure-CiWaste`; baseline 2026-10-10 and method in `docs/ci-waste-report.md` (AB#6369).
+
 ### Cleanup
 - `Remove-BinAndObjFolders` - Remove all bin/obj folders
 - `Invoke-KillDotnet` - Kill all dotnet processes (Windows only)

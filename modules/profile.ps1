@@ -112,6 +112,7 @@ Import-Module "$modulePath/Invoke-StarOrgRepos.psm1"
 Import-Module "$modulePath/Manage-OctoInfrastructureBackup.psm1"
 Import-Module "$modulePath/Compare-Pipelines.psm1"
 Import-Module "$modulePath/Compare-CkVersions.psm1"
+Import-Module "$modulePath/Get-CiWasteReport.psm1"
 
 if (!(Test-SubPath $rootPath $startPath)) {
     Set-Location $rootPath
