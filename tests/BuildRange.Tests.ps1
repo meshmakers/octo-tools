@@ -784,7 +784,7 @@ Describe 'Lane isolation in Invoke-BuildRange (AB#4924)' {
     }
 
     It 'resolves the package caches from the lane settings' {
-        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+        InModuleScope Get-OctoLaneBuildSettings -Parameters @{ fake = $fake } {
             $laneCache = Join-Path $fake.Checkout '.nuget-packages'
             $isolated = [pscustomobject]@{ isolated = $true; laneRoot = $fake.Checkout; laneCache = $laneCache }
             Get-OctoRangePackageCaches -laneSettings $isolated | Should -Be @($laneCache)
@@ -1003,5 +1003,68 @@ Describe 'Range-run lows (T-L3)' {
 
         Invoke-BuildRange -branch main -from octo-sdk -include octo-identity-services -msbuildPropertiesPerRepo @{ 'octo-identity-services' = @{ A = '1' } } -WhatIf -Json -WarningVariable warnings2 -WarningAction SilentlyContinue | Out-Null
         "$warnings2" | Should -Not -Match 'not in the selected range'
+    }
+}
+
+
+Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Mock -ModuleName Invoke-BuildAll Compile-Repo { $true }
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
+        $script:laneCache = Join-Path $fake.Checkout '.nuget-packages'
+        foreach ($c in @($fake.Cache, $script:laneCache)) {
+            foreach ($path in @("meshmakers.octo.sdk.common/999.0.0", "meshmakers.octo.sdk.common/1.0.0", "newtonsoft.json/999.0.0")) {
+                New-Item -ItemType Directory -Force -Path (Join-Path $c $path) | Out-Null
+            }
+        }
+    }
+
+    It 'main lane without RestorePackagesPath: purges meshmakers 999.0.0 in the global cache only' {
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/1.0.0') | Should -BeTrue
+        Test-Path (Join-Path $fake.Cache 'newtonsoft.json/999.0.0') | Should -BeTrue
+        # the lane folder is not a restore target of this lane without Octo.User.props
+        Test-Path (Join-Path $script:laneCache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
+    }
+
+    It 'main lane with RestorePackagesPath: purges lane cache and global cache' {
+        Set-Content -Path (Join-Path $fake.Checkout 'Octo.User.props') -Value '<Project><PropertyGroup><RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath></PropertyGroup></Project>'
+
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse
+        Test-Path (Join-Path $script:laneCache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse
+        Test-Path (Join-Path $script:laneCache 'meshmakers.octo.sdk.common/1.0.0') | Should -BeTrue
+        Test-Path (Join-Path $script:laneCache 'newtonsoft.json/999.0.0') | Should -BeTrue
+    }
+
+    It 'isolated lane: purges only the lane cache, never the global cache' {
+        Set-FakeLaneFeed (Join-Path $TestDrive 'somewhere-else/nuget')
+
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+
+        Test-Path (Join-Path $script:laneCache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
+    }
+
+    It 'a Release run purges no package cache' {
+        Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
+
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
+    }
+
+    It '-Json yields exactly one JSON document' {
+        $out = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json
+        { ($out -join "`n") | ConvertFrom-Json } | Should -Not -Throw
+    }
+
+    It '-DryRun reports the caches and deletes nothing' {
+        $out = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -Json
+        $doc = ($out -join "`n") | ConvertFrom-Json
+        @($doc.data.packageCachesToPurge) | Should -Contain ([IO.Path]::TrimEndingDirectorySeparator($fake.Cache))
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
     }
 }

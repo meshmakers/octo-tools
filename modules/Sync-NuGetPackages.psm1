@@ -35,10 +35,10 @@ function Sync-NuGetPackages {
 
     $branchRoot = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
     if ($Json) { Copy-AllNuGetPackages -branch $branch -Json | Out-Null } else { Copy-AllNuGetPackages -branch $branch }
-    # Lane-local package cache (<lane>/.nuget-packages via RestorePackagesPath in <lane>/Octo.User.props).
-    # Same JSON contract as Copy-AllNuGetPackages above: forward the switch, discard the nested emit.
-    $laneNugetCachePath = Join-Path -Path $branchRoot -ChildPath ".nuget-packages"
-    if ($Json) { Remove-GlobalNuGetPackages -path $laneNugetCachePath -Json | Out-Null } else { Remove-GlobalNuGetPackages -path $laneNugetCachePath }
+    # Every package cache the lane restores into (lane cache and, on main, the global cache); same
+    # JSON contract as Copy-AllNuGetPackages above: forward the switch, discard the nested emit.
+    $syncLaneSettings = Get-OctoLaneBuildSettings -laneRootPath $branchRoot
+    Remove-OctoLaneNuGetPackages -laneSettings $syncLaneSettings -Json:$Json | Out-Null
 
     # Get all directories starting with "octo-" and "mm-""
     $allDirectories = @(Get-ChildItem -Directory -Path $branchRoot -Filter "octo-*")
