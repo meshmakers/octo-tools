@@ -143,7 +143,7 @@ function Get-BuildAllPlan {
 
 .DESCRIPTION
     Order comes from Get-OctoBuildOrder (OctoBuildOrder.psm1). In DebugL it first wipes <lane>/nuget
-    and the lane-local package cache, then builds each repository with a forced restore (Invoke-Build)
+    and the 999.0.0 packages of the lane's package caches (Remove-OctoLaneNuGetPackages), then builds each repository with a forced restore (Invoke-Build)
     and copies its packages into <lane>/nuget. Lane isolation: see Get-OctoLaneBuildSettings.
     For partial rebuilds use Invoke-BuildRange.
 
@@ -271,6 +271,7 @@ function Invoke-BuildAll {
             branchRoot    = $branchRootPath
             configuration = $configuration
             lane          = $laneSettings
+            packageCachesToPurge = @(if ($configuration -ieq 'DebugL') { Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -WhatIf })
             repositories  = $planEntries
         }
         if ($Json) {
@@ -283,6 +284,11 @@ function Invoke-BuildAll {
         Write-Host "Lane isolated:   $($laneSettings.isolated) ($($laneSettings.reason))"
         foreach ($name in $laneSettings.environment.Keys) {
             Write-Host "  env $name=$($laneSettings.environment[$name])"
+        }
+        if ($configuration -ieq 'DebugL') {
+            foreach ($cache in @(Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -WhatIf)) {
+                Write-Host "Purges meshmakers.*/999.0.0 in: $cache"
+            }
         }
         foreach ($entry in $planEntries) {
             $suffix = if ($entry.restoreSources) { "  RestoreSources=$($entry.restoreSources)" } else { "" }
@@ -332,12 +338,12 @@ function Invoke-BuildAll {
         }
         Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force
 
-        # Each lane restores into its own package cache (<lane>/.nuget-packages via RestorePackagesPath in
-        # <lane>/Octo.User.props); clean only that one so the other lane's 999.0.0 packages stay intact.
-        $laneNugetCachePath = Join-Path -Path $branchRootPath -ChildPath ".nuget-packages"
-        # Forward -Json and swallow the nested emit: in JSON mode this command owes the caller ONE
-        # machine-readable document, and the helper's Write-Host would break it (review).
-        if ($Json) { Remove-GlobalNuGetPackages -path $laneNugetCachePath -Json | Out-Null } else { Remove-GlobalNuGetPackages -path $laneNugetCachePath }
+        # Purge the meshmakers.*/999.0.0 folders of every package cache this lane restores into
+        # (Get-OctoRangePackageCaches): an isolated lane (dev) only <lane>/.nuget-packages; the main lane
+        # also the global cache (NUGET_PACKAGES or ~/.nuget/packages) - it has no <lane>/.nuget-packages
+        # unless Octo.User.props sets RestorePackagesPath. Never the whole cache, never another lane's.
+        # -Json is forwarded and the nested emits swallowed (one machine-readable document).
+        Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json | Out-Null
     }
 
     # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run; empty for the legacy

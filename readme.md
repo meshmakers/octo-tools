@@ -48,7 +48,7 @@ in this repo — they live in a per-developer config file outside of git.
 # Fast local loop (partial DebugL rebuilds)
 
 `Invoke-BuildAll -configuration DebugL` is the full reset: it wipes `<lane>/nuget`, deletes the
-`meshmakers.*/999.0.0` folders of the lane package cache, forces a restore and builds every solution
+`meshmakers.*/999.0.0` folders of every package cache the lane restores into (isolated lane: `<lane>/.nuget-packages` only; main: the global cache `NUGET_PACKAGES` / `~/.nuget/packages`, plus `<lane>/.nuget-packages` when `Octo.User.props` sets `RestorePackagesPath`; never the whole cache), forces a restore and builds every solution
 including its tests. For day-to-day work on a library in the chain (e.g. the construction-kit engine) use
 `Invoke-BuildRange`, which rebuilds only a slice of the same build order:
 

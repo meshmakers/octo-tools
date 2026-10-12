@@ -51,4 +51,35 @@ function Remove-GlobalNuGetPackages {
     }
 }
 
-Export-ModuleMember -Function @('Remove-GlobalNuGetPackages')
+function Remove-OctoLaneNuGetPackages {
+    <#
+    .SYNOPSIS
+        Removes the local 999.0.0 Meshmakers packages from every package cache a lane restores into.
+    .DESCRIPTION
+        The caches come from Get-OctoRangePackageCaches (shared with Invoke-BuildRange):
+          - isolated lane (dev): only <lane>/.nuget-packages, the global cache is never touched;
+          - legacy lane (main): <lane>/.nuget-packages when Octo.User.props sets RestorePackagesPath, plus the
+            global cache (NUGET_PACKAGES or ~/.nuget/packages).
+        Each cache is cleaned with Remove-GlobalNuGetPackages, i.e. only meshmakers.*/999.0.0 folders.
+        With -Json the nested emits are swallowed: the caller owes ONE machine-readable document.
+    .PARAMETER laneSettings
+        Result of Get-OctoLaneBuildSettings.
+    .PARAMETER WhatIf
+        Returns the caches that would be cleaned without deleting anything.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $laneSettings,
+        [switch]$Json,
+        [switch]$WhatIf
+    )
+
+    $caches = @(Get-OctoRangePackageCaches -laneSettings $laneSettings)
+    if (-not $WhatIf) {
+        foreach ($cache in $caches) {
+            if ($Json) { Remove-GlobalNuGetPackages -path $cache -Json | Out-Null } else { Remove-GlobalNuGetPackages -path $cache }
+        }
+    }
+    return $caches
+}
+
+Export-ModuleMember -Function @('Remove-GlobalNuGetPackages', 'Remove-OctoLaneNuGetPackages')

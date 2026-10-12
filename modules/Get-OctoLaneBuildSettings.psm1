@@ -382,6 +382,33 @@ function Restore-OctoBuildEnvironment {
     }
 }
 
+function Get-OctoGlobalPackagesPath {
+    if ($env:NUGET_PACKAGES) { return $env:NUGET_PACKAGES }
+    if ($Global:GLOBALNUGETPACKAGESPATH) { return [string]$Global:GLOBALNUGETPACKAGESPATH }
+    return Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.nuget/packages'
+}
+
+function Get-OctoRangePackageCaches {
+    # The package cache(s) the restores of a lane extract 999.0.0 packages into - the folders the
+    # per-package purge and the stale-cache check must look at. Follows the lane isolation of
+    # Get-OctoLaneBuildSettings (AB#4924) instead of assuming ~/.nuget/packages:
+    #   - isolated lane (e.g. dev): NUGET_PACKAGES=<lane>/.nuget-packages for every repo -> only that one;
+    #   - legacy lane (main): repos importing an <lane>/Octo.User.props that sets RestorePackagesPath use
+    #     <lane>/.nuget-packages, all others the session/global cache (NUGET_PACKAGES or ~/.nuget/packages).
+    param([Parameter(Mandatory = $true)] $laneSettings)
+
+    if ($laneSettings.isolated) {
+        return @($laneSettings.laneCache)
+    }
+    $caches = @()
+    $userProps = Join-Path -Path $laneSettings.laneRoot -ChildPath 'Octo.User.props'
+    if ((Test-Path -Path $userProps -PathType Leaf) -and (Select-String -Path $userProps -Pattern '<RestorePackagesPath' -SimpleMatch -Quiet)) {
+        $caches += $laneSettings.laneCache
+    }
+    $caches += Get-OctoGlobalPackagesPath
+    return @($caches | ForEach-Object { [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([string]$_)) } | Select-Object -Unique)
+}
+
 Export-ModuleMember -Function @(
     'Get-OctoLaneBuildSettings',
     'Find-OctoLaneRoot',
@@ -390,5 +417,7 @@ Export-ModuleMember -Function @(
     'Write-OctoLaneDryRun',
     'Get-OctoRepoRestoreSourcesOverride',
     'Set-OctoBuildEnvironment',
-    'Restore-OctoBuildEnvironment'
+    'Restore-OctoBuildEnvironment',
+    'Get-OctoGlobalPackagesPath',
+    'Get-OctoRangePackageCaches'
 )
