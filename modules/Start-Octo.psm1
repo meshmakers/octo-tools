@@ -248,8 +248,20 @@ Use this function to selectively start OctoMesh services based on your requireme
     # services delegate the actual crypto to Meshmakers.Octo.Sdk.Common.Encryption.
     # InstanceSecretCrypto. Production sets the same byte value via the Helm
     # global.instanceSecretKey materialised into both env vars.
-    $env:OCTO_AIENCRYPTION__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
-    $env:OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY = "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
+    $devInstanceSecretKey = Get-OctoDevInstanceSecretKey
+    $env:OCTO_AIENCRYPTION__INSTANCESECRETKEY = $devInstanceSecretKey
+    $env:OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY = $devInstanceSecretKey
+
+    # SECRET attribute key ring (AB#5536, concept AB#5528 §3.5 / decision 3): the instance
+    # key above IS key k1, the active key and the legacy enc:v1 key. Root "SecretEncryption"
+    # section (no service prefix), bound by every engine host via AddRuntimeEngine(). The key
+    # id keeps its case in the variable name — it is the id written into enc:v2:<kid>:.
+    # Clear any other key id left over from an earlier session first, so the ring is exactly k1.
+    Get-ChildItem env: | Where-Object { $_.Name -like 'OCTO_SECRETENCRYPTION__KEYS__*' } |
+        ForEach-Object { Remove-Item -Path "env:$($_.Name)" -ErrorAction SilentlyContinue }
+    $env:OCTO_SECRETENCRYPTION__KEYS__k1 = $devInstanceSecretKey
+    $env:OCTO_SECRETENCRYPTION__ACTIVEKEYID = "k1"
+    $env:OCTO_SECRETENCRYPTION__LEGACYV1KEY = $devInstanceSecretKey
 
     # HTTP activator (AB#4923). Set explicitly in both directions: the service processes are
     # started as child processes and inherit this session's environment, so a value left over
@@ -321,7 +333,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://0.0.0.0:5000;https://0.0.0.0:5001") -jobName "AssetRepositoryServices"
     }
     if ($meshAdapter) {
-        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021", "--Adapter:DedicatedTenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
+        Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
     }
     if ($botService) {
         Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://0.0.0.0:5009;http://0.0.0.0:5008") -jobName "BotServices"
@@ -348,7 +360,7 @@ Use this function to selectively start OctoMesh services based on your requireme
             param($workDir, $logPath, $tenantId, $adapterId)
             Set-Location $workDir
             $env:ASPNETCORE_ENVIRONMENT = "Development"
-            & dotnet "Sdk.Plug.Simulation.dll" "--Adapter:DedicatedTenantId=$tenantId" "--Adapter:AdapterRtId=$adapterId" 2>&1 >> $logPath
+            & dotnet "Sdk.Plug.Simulation.dll" "--Adapter:TenantId=$tenantId" "--Adapter:AdapterRtId=$adapterId" 2>&1 >> $logPath
         } -ArgumentList $simWorkingDirectory, $simLogFile, $simulationAdapterTenantId, $simulationAdapterId -Name "SimulationAdapter"
         $jobs.Add($job) | Out-Null
     }

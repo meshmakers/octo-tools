@@ -116,4 +116,22 @@ function Get-OctoInstallation {
     return $installation
 }
 
-Export-ModuleMember -Function @('Get-OctoToolsConfigPath', 'Get-OctoToolsConfig', 'Get-OctoInstallation')
+<#
+.SYNOPSIS
+    Returns the shared LOCAL DEV instance secret key (base64, 32 bytes).
+
+.DESCRIPTION
+    One value for every local consumer, so host-run services (Start-Octo) and
+    kind-deployed workloads (Deploy-OctoOperator) encrypt and decrypt with the
+    same key:
+      - OCTO_AIENCRYPTION__INSTANCESECRETKEY / OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY
+      - SECRET attribute key ring (AB#5536): SecretEncryption:Keys:k1 (active) and
+        SecretEncryption:LegacyV1Key — decision 3 of concept AB#5528 reuses the
+        instance secret as key k1.
+    Development only. Clusters get theirs from Vault (`instance_secret_key`).
+#>
+function Get-OctoDevInstanceSecretKey {
+    return "RGV2SW5zdGFuY2VLZXktT2N0b0FpU2VydmljZXMtMzI="
+}
+
+Export-ModuleMember -Function @('Get-OctoToolsConfigPath', 'Get-OctoToolsConfig', 'Get-OctoInstallation', 'Get-OctoDevInstanceSecretKey')
