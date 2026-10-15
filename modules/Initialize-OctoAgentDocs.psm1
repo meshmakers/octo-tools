@@ -8,9 +8,8 @@ function Initialize-OctoAgentDocs {
     a hand-written CLAUDE.md, and reports how far the migration has come.
 
     .DESCRIPTION
-    Every run ends with the same five-row checklist - AGENTS.md, CLAUDE.md, docs/, the
-    migration brief, the check - and the next steps follow from the open rows. The state is
-    decided from what is in the repository, and no existing file is ever overwritten:
+    Every run ends with a five-row checklist and the next steps for the open rows. No
+    existing file is ever overwritten. The state follows from the repository:
 
       created     neither file, or a CLAUDE.md with nothing but comments and an @import.
                   AGENTS.md is written with the required sections and the routing markers;
@@ -22,7 +21,7 @@ function Initialize-OctoAgentDocs {
       migrated    AGENTS.md exists, CLAUDE.md is the shim, no brief is left.
 
     Section names, the shim text and the budgets come from the built-in ruleset. The check
-    this cmdlet runs for the checklist always runs in logOnly mode.
+    behind the checklist always runs in logOnly mode.
 
     .PARAMETER Path
     Repository to initialise: a path, or a repository name under $Global:ROOTPATH. Default: '.'.
@@ -163,8 +162,7 @@ function Get-InitChecklist {
 }
 
 function Get-InitNextStep {
-    # What to do next, from the open rows. A command is printed once; a later step that would
-    # repeat it keeps only its text.
+    # A command is printed once; a later step that would repeat it keeps only its text.
     param([hashtable]$Facts, [string]$CheckCommand)
     $steps = [System.Collections.Generic.List[object]]::new()
     $add = {
@@ -216,7 +214,6 @@ function Write-InitReport {
 }
 
 function Format-MigrationBrief {
-    # Renders agent-docs-migration.template.md with the values the ruleset enforces.
     param([string]$Repo, [string]$PathArgument, [hashtable]$Config)
     $templatePath = Join-Path $PSScriptRoot 'agent-docs-migration.template.md'
     if (-not (Test-Path -LiteralPath $templatePath)) { throw "Migration brief template missing at $templatePath" }

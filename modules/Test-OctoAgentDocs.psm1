@@ -1,14 +1,12 @@
-# Plain imports, not -Force: a forced import from inside a module re-homes the shared module
-# and removes it from the session for the other callers.
+# No -Force: forcing the import from inside a module removes the shared module from other callers.
 Import-Module (Join-Path $PSScriptRoot 'OctoJsonOutput.psm1')
 Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 
 $script:RuleIds = Get-OctoAgentDocsRuleIdList
 $script:Modes = @('logOnly', 'enforce')
 
-# ---------------------------------------------------------------------- model
 class AgentDocsRuleSet {
-    # The effective ruleset: the built-in file with the override layers merged on top.
+    # The built-in ruleset with the override layers merged on top.
     [hashtable]$Config
     [string[]]$Floor
     hidden [hashtable]$BuiltIn = @{}
@@ -21,8 +19,8 @@ class AgentDocsRuleSet {
     }
 
     [void] Merge([hashtable]$Layer, [string]$Source, [bool]$Trusted) {
-        # An untrusted layer (the repository's own file, part of the branch under review) may
-        # raise the mode and the non-relaxable rules, never lower them.
+        # The repository's own file is part of the branch under review: it may raise the mode
+        # and the non-relaxable rules, never lower them.
         if ($Layer.ContainsKey('mode')) {
             if ($script:Modes -notcontains $Layer.mode) { Write-Warning "Invalid mode '$($Layer.mode)' in $Source - must be logOnly or enforce. Keeping '$($this.Config.mode)'." }
             elseif (-not $Trusted -and $Layer.mode -eq 'logOnly' -and $this.Config.mode -eq 'enforce') { Write-Warning "$Source asks for mode 'logOnly', which is weaker than 'enforce' - a repository may raise the mode but not lower it. Keeping 'enforce'." }
@@ -58,7 +56,7 @@ class AgentDocsRuleSet {
 }
 
 class AgentDocsFindings {
-    # Every finding of one run; a finding for a rule that is off is dropped here.
+    # Findings for a rule that is off are dropped here.
     [System.Collections.Generic.List[object]]$Items = [System.Collections.Generic.List[object]]::new()
     hidden [AgentDocsRuleSet]$Rules
 
@@ -74,7 +72,7 @@ class AgentDocsFindings {
 }
 
 class AgentDocsRepository {
-    # The layout of the repository under check, read once, and its files' text.
+    # Read once per run; file text is cached.
     [string]$Root
     [string]$Name
     [string[]]$RootNames
@@ -140,7 +138,6 @@ class AgentDocsRepository {
     }
 }
 
-# ------------------------------------------------------------------- command
 function Test-OctoAgentDocs {
     <#
     .SYNOPSIS
@@ -148,21 +145,15 @@ function Test-OctoAgentDocs {
 
     .DESCRIPTION
     Checks the entry point (AGENTS.md, or CLAUDE.md before a migration), the README and
-    docs/*.md: required sections, line and character budgets, frontmatter, links and
-    anchors, the CLAUDE.md shim, invisible characters, and the generated routing table.
-    Nothing hand-written is ever changed. -Fix regenerates exactly two things: the routing
-    table between the markers in the entry point, and the CLAUDE.md shim when AGENTS.md is
-    canonical. Run 'Test-OctoAgentDocs -Explain -All' for every rule with its reason.
+    docs/*.md: sections, budgets, frontmatter, links, the CLAUDE.md shim, invisible
+    characters and the generated routing table. -Fix regenerates only the routing table and
+    the shim; hand-written text is never changed. 'Test-OctoAgentDocs -Explain -All' lists
+    every rule with its reason.
 
-    Configuration cascades, later wins: agent-docs.rules.json next to this module, then
-    .agent-docs.json in the repository, then -ConfigPath, then -Mode. Each rule is
-    [severity, options] with severity off | warn | error. The repository file lives in the
-    branch under review, so rules listed in 'nonRelaxable' and the mode can be raised there
-    but never lowered; -ConfigPath and -Mode come from whoever runs the command and are exempt.
-
-    Severity says how sure the rule is that something is wrong; mode says whether being
-    wrong stops the caller. The default mode is logOnly. CI passes -Mode enforce, which
-    throws and sets a non-zero exit code when an error-severity finding remains.
+    Rules are [severity, options] with severity off | warn | error, and cascade, later wins:
+    agent-docs.rules.json beside this module, the repository's .agent-docs.json, -ConfigPath,
+    -Mode. The repository file may raise the mode and the 'nonRelaxable' rules, never lower
+    them. Mode enforce (CI) throws and sets a non-zero exit code on an error-severity finding.
 
     .PARAMETER Path
     Repository to check: a path, or a repository name under $Global:ROOTPATH. Default: '.'.
@@ -284,9 +275,7 @@ function Test-OctoAgentDocs {
     }
 }
 
-# --------------------------------------------------------------- configuration
 function Resolve-RuleSet {
-    # The built-in ruleset, then the repository's .agent-docs.json, then -ConfigPath, then -Mode.
     param([string]$Root, [string]$ConfigPath, [string]$Mode)
     if ($ConfigPath -and -not (Test-Path -LiteralPath $ConfigPath)) { throw "-ConfigPath '$ConfigPath' does not exist" }
     $rules = [AgentDocsRuleSet]::new()
@@ -300,10 +289,9 @@ function Resolve-RuleSet {
     return $rules
 }
 
-# ---------------------------------------------------------------- entry + shim
 function Test-ClaudeShim {
-    # Returns the shim verdict (n/a, absent, ok, differs). It is computed whatever the rule's
-    # severity, because Initialize-OctoAgentDocs reads it.
+    # The verdict (n/a, absent, ok, differs) is computed whatever the rule's severity:
+    # Initialize-OctoAgentDocs reads it.
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [switch]$Fix, [switch]$Force)
     if (-not $Repo.HasAgents) { return 'n/a' }
     $shim = @($Rules.Option('shim-valid', 'content')) -join "`n"
@@ -311,8 +299,7 @@ function Test-ClaudeShim {
     $verdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -ceq $shim) { 'ok' } else { 'differs' }
     if (-not $Rules.IsOn('shim-valid')) { return $verdict }
 
-    # A 'claude.md' is not the shim, and on a case-insensitive file system writing CLAUDE.md
-    # would overwrite it - so nothing is written while the two names would collide.
+    # On a case-insensitive file system writing CLAUDE.md would overwrite a 'claude.md'.
     $alias = $Repo.RootNames | Where-Object { $_ -ieq 'CLAUDE.md' -and $_ -cne 'CLAUDE.md' } | Select-Object -First 1
     if ($alias) { $Findings.Add('shim-valid', $alias, "Named '$alias', not CLAUDE.md - rename it before -Fix can write the shim"); return $verdict }
     if ($verdict -eq 'ok') { return $verdict }
@@ -325,7 +312,7 @@ function Test-ClaudeShim {
 }
 
 function Update-ClaudeShim {
-    # True when the shim was written; false when -WhatIf or the user declined.
+    # False under -WhatIf or when declined.
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     [OutputType([bool])]
     param([AgentDocsRepository]$Repo, [string]$Content)
@@ -334,9 +321,8 @@ function Update-ClaudeShim {
     return $true
 }
 
-# ------------------------------------------------------------------------ docs
 function Test-DocsFolder {
-    # Frontmatter and size of every docs/*.md. Returns the routes the table is generated from.
+    # Returns the routes the table is generated from.
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     $routes = [System.Collections.Generic.List[object]]::new()
     $maxDescription = $Rules.Option('frontmatter-present', 'maxDescription')
@@ -379,10 +365,8 @@ function Split-GlobList {
     return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
-# ------------------------------------------------------------------- integrity
 function Test-InvisibleCharacter {
-    # Every Markdown file an agent might read, dotfolders included, minus scan.ignore from the
-    # built-in ruleset - not only the routed set the structural rules look at.
+    # Every Markdown file an agent might read, dotfolders included, minus scan.ignore.
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     if (-not $Rules.IsOn('no-invisible-characters')) { return }
     # Unicode Tag characters, zero-width and format characters, and bidirectional overrides:
@@ -407,9 +391,7 @@ function Test-InvisibleCharacter {
     }
 }
 
-# ------------------------------------------------------------------ references
 function Test-ReferenceSet {
-    # Links and backtick paths in the entry point, the README and docs/*.md.
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the octo-tools profile contract')]
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     if (-not $Rules.IsOn('reference-resolves') -and -not $Rules.IsOn('reference-to-shim')) { return }
@@ -474,9 +456,8 @@ function Get-ShimAdvice {
 }
 
 function Get-HeadingAnchor {
-    # GitHub-style slugs of the ATX headings: lower case, punctuation dropped, spaces to
-    # hyphens, repeated headings suffixed -1, -2. Compared without regard to case, which
-    # is how github.com and VS Code resolve a fragment.
+    # GitHub-style heading slugs, repeats suffixed -1, -2. Case-insensitive, like github.com
+    # and VS Code resolve a fragment.
     param([string]$Prose)
     $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $seen = @{}
@@ -487,10 +468,8 @@ function Get-HeadingAnchor {
     return , $set
 }
 
-# ----------------------------------------------------------------- entry point
 function Test-RequiredSection {
-    # Level-2 headings outside fenced code, matched without regard to case. Nothing is ever
-    # filled in: a missing section is reported, not written.
+    # A missing section is reported, never written.
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     $headings = @([regex]::Matches((ConvertTo-OctoAgentDocsProse $Repo.ReadText($Repo.EntryPath)), '(?m)^##[ \t]+(.*?)[ \t]*$') | ForEach-Object { $_.Groups[1].Value })
     $missing = @(foreach ($want in @($Rules.Option('required-sections', 'sections'))) { if ($headings -notcontains $want) { "'## $want'" } })
@@ -524,8 +503,7 @@ function Format-RoutingTable {
 }
 
 function Update-RoutingTable {
-    # Splices the table into the raw text, keeping the file's own line endings. True when
-    # written; false when -WhatIf or the user declined.
+    # Keeps the file's own line endings. False under -WhatIf or when declined.
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     [OutputType([bool])]
     param([AgentDocsRepository]$Repo, [string]$Table)
@@ -580,9 +558,8 @@ function Get-TextLine {
     return , @(($Content.TrimEnd("`n")) -split "`n")
 }
 
-# ---------------------------------------------------------------------- output
 function Get-StartHere {
-    # Where to start: the cause behind most of the findings, at most two sentences.
+    # The cause behind most of the findings, at most two sentences.
     param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [string]$PathArgument)
     $fired = @($Findings.Items.rule | Sort-Object -Unique)
     $causes = @()
@@ -631,9 +608,8 @@ function Write-FindingReport {
     elseif (-not $Explain) { Write-Host '  add -Explain for why and how to fix, or -Explain <rule> for one rule' -ForegroundColor Gray }
 }
 
-# --------------------------------------------------------------------- explain
 function Write-RuleReference {
-    # -Explain -All / -Rule: the rules with this repository's effective severity, nothing scanned.
+    # -Explain -All / -Rule: nothing is scanned.
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
     param([AgentDocsRuleSet]$Rules, [string[]]$Id, [string]$RepositoryName, [switch]$Json)
     $unknown = @($Id | Where-Object { $script:RuleIds -notcontains $_ })
