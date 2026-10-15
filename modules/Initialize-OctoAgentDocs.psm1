@@ -49,12 +49,11 @@ function Initialize-OctoAgentDocs {
     $repoName = Split-Path -Leaf $repo
     $config = Read-OctoAgentDocsBuiltInRuleset
     $sections = @($config.rules['required-sections'][1]['sections'])
-    $shimLines = @($config.rules['shim-valid'][1]['content'])
+    $shim = @($config.rules['shim-valid'][1]['content']) -join "`n"
     $briefName = Get-OctoAgentDocsConstant BriefName
     $agentsPath = Join-Path $repo 'AGENTS.md'
     $claudePath = Join-Path $repo 'CLAUDE.md'
     $briefPath = Join-Path $repo $briefName
-    $whatIf = [bool]$WhatIfPreference
     $written = [System.Collections.Generic.List[string]]::new()
 
     # Commands printed for copying use the path as typed. The brief is committed and read
@@ -62,32 +61,11 @@ function Initialize-OctoAgentDocs {
     $checkCmd = "Test-OctoAgentDocs -Path $(Format-OctoAgentDocsArgument -Value $Path)"
     $briefPathArg = if ($Global:ROOTPATH -and (Join-Path $Global:ROOTPATH $repoName) -eq $repo) { $repoName } else { '.' }
 
-    # CLAUDE.md is one of: absent, shim, thin (comments and at most one @import, not the
-    # shim), real. Whether it IS the shim is the checker's verdict when a check ran.
-    function Get-ClaudeState {
-        param($Check)
-        if (-not (Test-Path -LiteralPath $claudePath)) { return 'absent' }
-        $text = Read-OctoAgentDocsText $claudePath
-        $isShim = if ($Check) { $Check.data.shim -eq 'ok' } else { $text.Trim() -ceq ($shimLines -join "`n") }
-        if ($isShim) { return 'shim' }
-        if (Test-OctoAgentDocsShimLike $text) { return 'thin' }
-        return 'real'
-    }
-    $hasChecker = [bool](Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)
-    function Invoke-Check {
-        # The checklist wants the check's data, never its gate.
-        param([switch]$Fix)
-        if (-not $hasChecker) { return $null }
-        try { return ((Test-OctoAgentDocs -Path $repo -Mode logOnly -Json -Fix:$Fix 3>$null 6>$null) | ConvertFrom-Json) } catch { return $null }
-    }
-
-    # ----------------------------------------------------------------- actions
     $check = $null
-    $hasAgents = Test-Path -LiteralPath $agentsPath
-    $claudeBefore = Get-ClaudeState
-    if ($hasAgents) {
-        $check = Invoke-Check
-        $state = if ((Test-Path -LiteralPath $briefPath) -or (Get-ClaudeState -Check $check) -ne 'shim') { 'migrating' } else { 'migrated' }
+    $claudeBefore = Get-ClaudeState -ClaudePath $claudePath -Shim $shim
+    if (Test-Path -LiteralPath $agentsPath) {
+        $check = Invoke-AgentDocsCheck -Root $repo
+        $state = if ((Test-Path -LiteralPath $briefPath) -or (Get-ClaudeState -ClaudePath $claudePath -Shim $shim -Check $check) -ne 'shim') { 'migrating' } else { 'migrated' }
     }
     elseif ($claudeBefore -eq 'real') {
         $state = 'migration'
@@ -102,73 +80,26 @@ function Initialize-OctoAgentDocs {
         if ($PSCmdlet.ShouldProcess('AGENTS.md', 'Write the entry point with the required sections and routing markers')) { Write-OctoAgentDocsText $agentsPath $skeleton; $written.Add('AGENTS.md') }
         # A thin existing CLAUDE.md is still somebody's pointer; replacing it is what
         # Test-OctoAgentDocs -Fix is for, with its guard and its -WhatIf.
-        if ($claudeBefore -eq 'absent' -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) { Write-OctoAgentDocsText $claudePath (($shimLines -join "`n") + "`n"); $written.Add('CLAUDE.md') }
+        if ($claudeBefore -eq 'absent' -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) { Write-OctoAgentDocsText $claudePath "$shim`n"; $written.Add('CLAUDE.md') }
         # One -Fix pass fills the empty routing table, safe because -Fix never touches a
         # CLAUDE.md that already is the shim; with a thin CLAUDE.md the check only reads.
-        if ($written.Contains('AGENTS.md')) { $check = Invoke-Check -Fix:((Get-ClaudeState) -eq 'shim') }
+        if ($written.Contains('AGENTS.md')) { $check = Invoke-AgentDocsCheck -Root $repo -Fix:((Get-ClaudeState -ClaudePath $claudePath -Shim $shim) -eq 'shim') }
     }
 
-    # --------------------------------------------------------------- checklist
-    # Read off the repository after any writes. done: $true (check mark), $false (cross,
-    # work left) or $null (dot, not applicable yet).
-    $hasAgentsNow = Test-Path -LiteralPath $agentsPath
-    $hasBriefNow = Test-Path -LiteralPath $briefPath
-    $claudeNow = Get-ClaudeState -Check $check
-    $rows = [System.Collections.Generic.List[object]]::new()
-    function Add-Row { param([string]$Item, $Done, [string]$Fact) $rows.Add([ordered]@{ item = $Item; done = $Done; fact = $Fact }) }
-    $wouldWrite = $whatIf -and $state -eq 'created'
-
-    if ($hasAgentsNow) { Add-Row 'AGENTS.md' $true 'present' } elseif ($wouldWrite) { Add-Row 'AGENTS.md' $null 'would be written' } else { Add-Row 'AGENTS.md' $false 'absent' }
-    switch ($claudeNow) {
-        'shim' { Add-Row 'CLAUDE.md' $true 'shim' }
-        'thin' { Add-Row 'CLAUDE.md' $false 'no real content, but not the shim' }
-        'real' { Add-Row 'CLAUDE.md' $false 'real content' }
-        default { if ($wouldWrite) { Add-Row 'CLAUDE.md' $null 'would be written' } else { Add-Row 'CLAUDE.md' $false 'absent' } }
+    # Read off the repository after any writes.
+    $facts = @{
+        State      = $state
+        HasAgents  = Test-Path -LiteralPath $agentsPath
+        HasBrief   = Test-Path -LiteralPath $briefPath
+        Claude     = Get-ClaudeState -ClaudePath $claudePath -Shim $shim -Check $check
+        Check      = $check
+        HasChecker = [bool](Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)
+        WhatIf     = [bool]$WhatIfPreference
+        Written    = $written
+        BriefName  = $briefName
     }
-    if ($check) { $n = @($check.data.routes).Count; if ($n -gt 0) { Add-Row 'docs/' $true "$n routed" } else { Add-Row 'docs/' $null 'none yet' } }
-    elseif (-not $hasAgentsNow) { Add-Row 'docs/' $null 'not read until AGENTS.md exists' }
-    else { Add-Row 'docs/' $null "not read - $(if ($hasChecker) { 'the check failed' } else { 'checker not loaded' })" }
-    if ($hasBriefNow -and $written.Contains($briefName)) { Add-Row $briefName $null 'written - delete it when the migration is done' }
-    elseif ($hasBriefNow) { Add-Row $briefName $false 'present' }
-    elseif ($whatIf -and $state -eq 'migration') { Add-Row $briefName $null 'would be written' }
-    else { Add-Row $briefName $true 'absent' }
-    $stale = @(); $other = @()
-    if ($check) {
-        $stale = @($check.data.findings | Where-Object { $_.rule -in 'routing-current', 'shim-valid' })
-        $other = @($check.data.findings | Where-Object { $_.rule -notin 'routing-current', 'shim-valid', 'migration-pending' })
-        $e = $check.data.summary.errors; $w = $check.data.summary.warnings
-        if ($e -eq 0 -and $w -eq 0) { Add-Row 'check' $true 'clean' } else { Add-Row 'check' $false "$e error(s), $w warning(s)" }
-    }
-    elseif (-not $hasAgentsNow) { Add-Row 'check' $null 'not run until AGENTS.md exists' }
-    else { Add-Row 'check' $null "$(if ($hasChecker) { 'failed - run it directly to see why' } else { 'not run - checker not loaded' })" }
-
-    # -------------------------------------------------------------- next steps
-    $next = [System.Collections.Generic.List[object]]::new()
-    function Add-Next {
-        # A command is printed once; a later step that would repeat it keeps only its text.
-        param([string]$What, [string]$Command)
-        if ($Command -and ($next | Where-Object { $_.command -eq $Command })) { $Command = $null }
-        $next.Add([ordered]@{ what = $What; command = $Command })
-    }
-    if ($state -eq 'migration') {
-        Add-Next "Open $briefName with your coding agent and follow its steps"
-        Add-Next 'Check after every step' $checkCmd
-        Add-Next "Delete $briefName in the migration commit"
-    }
-    else {
-        if ($claudeNow -eq 'real') { Add-Next 'Move the remaining content out of CLAUDE.md into AGENTS.md or docs/, then let -Fix write the shim' "$checkCmd -Fix" }
-        elseif ($claudeNow -eq 'thin' -and $hasAgentsNow) { Add-Next 'Replace the existing CLAUDE.md with the shim and fill the routing table' "$checkCmd -Fix" }
-        if ($hasBriefNow) { Add-Next "Finish the steps in $briefName and delete it" }
-        if ($stale.Count -gt 0 -and $claudeNow -ne 'real') { Add-Next 'Regenerate the routing table and the shim' "$checkCmd -Fix" }
-        if ($other.Count -gt 0) { Add-Next "Resolve $($other.Count) open finding(s)" "$checkCmd -Explain" }
-        if (-not $hasChecker) { Add-Next 'Import Test-OctoAgentDocs.psm1 and check the repository' $checkCmd }
-        if ($state -eq 'created') {
-            Add-Next 'Write the AGENTS.md sections; the checker reports a missing one but never writes it'
-            Add-Next "Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then regenerate the table" "$checkCmd -Fix"
-        }
-    }
-
-    # ------------------------------------------------------------------ output
+    $rows = Get-InitChecklist -Facts $facts
+    $next = Get-InitNextStep -Facts $facts -CheckCommand $checkCmd
     $open = @($rows | Where-Object { $_.done -eq $false }).Count
     if ($Json) {
         Write-OctoJson -Command 'Initialize-OctoAgentDocs' -Data (New-OctoActionResult -Success ($open -eq 0) -ExitCode 0 -Extra ([ordered]@{
@@ -176,17 +107,109 @@ function Initialize-OctoAgentDocs {
         }))
         return
     }
-    Write-Host "Agent docs init: $repoName - " -ForegroundColor Yellow -NoNewline
-    Write-Host $state -ForegroundColor $(if ($open -eq 0) { 'Green' } else { 'DarkYellow' })
-    if ($written.Count -gt 0) { Write-Host "  wrote $($written -join ', ')" -ForegroundColor Cyan }
-    foreach ($row in $rows) {
-        # Check mark, cross and middle dot as code points so the file stays ASCII.
-        $mark, $colour = switch ($row.done) { $true { [string][char]0x2713, 'Green' } $false { [string][char]0x2717, 'DarkYellow' } default { [string][char]0x00B7, 'DarkGray' } }
-        Write-Host "  $mark " -ForegroundColor $colour -NoNewline
-        Write-Host $row.item.PadRight(21) -ForegroundColor Gray -NoNewline
-        Write-Host $row.fact -ForegroundColor $(if ($row.done -eq $false) { 'DarkYellow' } else { 'Gray' })
+    Write-InitReport -RepositoryName $repoName -State $state -Written $written -Row $rows -NextStep $next
+}
+
+function Get-ClaudeState {
+    # CLAUDE.md is one of: absent, shim, thin (comments and at most one @import, not the
+    # shim), real. Whether it IS the shim is the checker's verdict when a check ran.
+    param([string]$ClaudePath, [string]$Shim, $Check)
+    if (-not (Test-Path -LiteralPath $ClaudePath)) { return 'absent' }
+    $text = Read-OctoAgentDocsText $ClaudePath
+    $isShim = if ($Check) { $Check.data.shim -eq 'ok' } else { $text.Trim() -ceq $Shim }
+    if ($isShim) { return 'shim' }
+    if (Test-OctoAgentDocsShimLike $text) { return 'thin' }
+    return 'real'
+}
+
+function Invoke-AgentDocsCheck {
+    # The check's data, never its gate; $null when the checker is not loaded or fails.
+    param([string]$Root, [switch]$Fix)
+    if (-not (Get-Command Test-OctoAgentDocs -ErrorAction SilentlyContinue)) { return $null }
+    try { return ((Test-OctoAgentDocs -Path $Root -Mode logOnly -Json -Fix:$Fix 3>$null 6>$null) | ConvertFrom-Json) } catch { return $null }
+}
+
+function Get-InitChecklist {
+    # Five rows. done: $true (check mark), $false (cross, work left) or $null (dot, not
+    # applicable yet).
+    param([hashtable]$Facts)
+    $wouldWrite = $Facts.WhatIf -and $Facts.State -eq 'created'
+    $check = $Facts.Check
+    $notRead = if ($Facts.HasChecker) { 'the check failed' } else { 'checker not loaded' }
+    $row = { param($Item, $Done, $Fact) [ordered]@{ item = $Item; done = $Done; fact = $Fact } }
+
+    if ($Facts.HasAgents) { & $row 'AGENTS.md' $true 'present' } elseif ($wouldWrite) { & $row 'AGENTS.md' $null 'would be written' } else { & $row 'AGENTS.md' $false 'absent' }
+    switch ($Facts.Claude) {
+        'shim' { & $row 'CLAUDE.md' $true 'shim' }
+        'thin' { & $row 'CLAUDE.md' $false 'no real content, but not the shim' }
+        'real' { & $row 'CLAUDE.md' $false 'real content' }
+        default { if ($wouldWrite) { & $row 'CLAUDE.md' $null 'would be written' } else { & $row 'CLAUDE.md' $false 'absent' } }
     }
-    foreach ($step in $next) {
+    $routed = if ($check) { @($check.data.routes).Count } else { 0 }
+    if ($check -and $routed -gt 0) { & $row 'docs/' $true "$routed routed" }
+    elseif ($check) { & $row 'docs/' $null 'none yet' }
+    elseif (-not $Facts.HasAgents) { & $row 'docs/' $null 'not read until AGENTS.md exists' }
+    else { & $row 'docs/' $null "not read - $notRead" }
+    if ($Facts.HasBrief -and $Facts.Written.Contains($Facts.BriefName)) { & $row $Facts.BriefName $null 'written - delete it when the migration is done' }
+    elseif ($Facts.HasBrief) { & $row $Facts.BriefName $false 'present' }
+    elseif ($Facts.WhatIf -and $Facts.State -eq 'migration') { & $row $Facts.BriefName $null 'would be written' }
+    else { & $row $Facts.BriefName $true 'absent' }
+    $summary = if ($check) { $check.data.summary }
+    if ($summary -and $summary.errors -eq 0 -and $summary.warnings -eq 0) { & $row 'check' $true 'clean' }
+    elseif ($summary) { & $row 'check' $false "$($summary.errors) error(s), $($summary.warnings) warning(s)" }
+    elseif (-not $Facts.HasAgents) { & $row 'check' $null 'not run until AGENTS.md exists' }
+    elseif ($Facts.HasChecker) { & $row 'check' $null 'failed - run it directly to see why' }
+    else { & $row 'check' $null 'not run - checker not loaded' }
+}
+
+function Get-InitNextStep {
+    # What to do next, from the open rows. A command is printed once; a later step that would
+    # repeat it keeps only its text.
+    param([hashtable]$Facts, [string]$CheckCommand)
+    $steps = [System.Collections.Generic.List[object]]::new()
+    $add = {
+        param([string]$What, [string]$Command)
+        if ($Command -and ($steps | Where-Object { $_.command -eq $Command })) { $Command = $null }
+        $steps.Add([ordered]@{ what = $What; command = $Command })
+    }
+    $brief = $Facts.BriefName
+    if ($Facts.State -eq 'migration') {
+        & $add "Open $brief with your coding agent and follow its steps"
+        & $add 'Check after every step' $CheckCommand
+        & $add "Delete $brief in the migration commit"
+        return , $steps
+    }
+    $findings = if ($Facts.Check) { @($Facts.Check.data.findings) } else { @() }
+    $stale = @($findings | Where-Object { $_.rule -in 'routing-current', 'shim-valid' })
+    $other = @($findings | Where-Object { $_.rule -notin 'routing-current', 'shim-valid', 'migration-pending' })
+    if ($Facts.Claude -eq 'real') { & $add 'Move the remaining content out of CLAUDE.md into AGENTS.md or docs/, then let -Fix write the shim' "$CheckCommand -Fix" }
+    elseif ($Facts.Claude -eq 'thin' -and $Facts.HasAgents) { & $add 'Replace the existing CLAUDE.md with the shim and fill the routing table' "$CheckCommand -Fix" }
+    if ($Facts.HasBrief) { & $add "Finish the steps in $brief and delete it" }
+    if ($stale.Count -gt 0 -and $Facts.Claude -ne 'real') { & $add 'Regenerate the routing table and the shim' "$CheckCommand -Fix" }
+    if ($other.Count -gt 0) { & $add "Resolve $($other.Count) open finding(s)" "$CheckCommand -Explain" }
+    if (-not $Facts.HasChecker) { & $add 'Import Test-OctoAgentDocs.psm1 and check the repository' $CheckCommand }
+    if ($Facts.State -eq 'created') {
+        & $add 'Write the AGENTS.md sections; the checker reports a missing one but never writes it'
+        & $add "Add docs/<topic>.md with 'description' and 'applies_to' frontmatter, then regenerate the table" "$CheckCommand -Fix"
+    }
+    return , $steps
+}
+
+function Write-InitReport {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
+    param([string]$RepositoryName, [string]$State, [string[]]$Written, [object[]]$Row, [object[]]$NextStep)
+    $open = @($Row | Where-Object { $_.done -eq $false }).Count
+    Write-Host "Agent docs init: $RepositoryName - " -ForegroundColor Yellow -NoNewline
+    Write-Host $State -ForegroundColor $(if ($open -eq 0) { 'Green' } else { 'DarkYellow' })
+    if ($Written.Count -gt 0) { Write-Host "  wrote $($Written -join ', ')" -ForegroundColor Cyan }
+    foreach ($r in $Row) {
+        # Check mark, cross and middle dot as code points so the file stays ASCII.
+        $mark, $colour = switch ($r.done) { $true { [string][char]0x2713, 'Green' } $false { [string][char]0x2717, 'DarkYellow' } default { [string][char]0x00B7, 'DarkGray' } }
+        Write-Host "  $mark " -ForegroundColor $colour -NoNewline
+        Write-Host $r.item.PadRight(21) -ForegroundColor Gray -NoNewline
+        Write-Host $r.fact -ForegroundColor $(if ($r.done -eq $false) { 'DarkYellow' } else { 'Gray' })
+    }
+    foreach ($step in $NextStep) {
         Write-Host "  next: $($step.what)" -ForegroundColor Gray
         if ($step.command) { Write-Host "        $($step.command)" -ForegroundColor White }
     }

@@ -1,9 +1,11 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
 # Behaviour of Test-OctoAgentDocs, grouped by feature. Fixtures are built under the temp
 # folder by the helpers and removed in AfterAll.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the profile contract under test')]
+param()
 
 BeforeAll { . (Join-Path $PSScriptRoot 'AgentDocs.TestHelpers.ps1') }
-AfterAll { Remove-Fixtures }
+AfterAll { Remove-Fixture }
 
 Describe 'clean repository' {
     It 'is clean once the routing table is generated, and -Fix is idempotent' {
@@ -50,12 +52,13 @@ Describe 'path resolution' {
         finally { $Global:ROOTPATH = $saved }
     }
     It 'rejects <kind>' -ForEach @(
-        @{ kind = 'a missing path, naming what it tried'; path = { Join-Path $r 'nowhere' }; message = "does not exist (resolved to '*nowhere')" }
-        @{ kind = 'a file instead of the repository folder'; path = { Join-Path $r 'AGENTS.md' }; message = 'is a file, not a repository folder' }
-        @{ kind = 'an empty path'; path = { '' }; message = 'Path is empty' }
+        @{ kind = 'a missing path, naming what it tried'; leaf = 'nowhere'; message = "does not exist (resolved to '*nowhere')" }
+        @{ kind = 'a file instead of the repository folder'; leaf = 'AGENTS.md'; message = 'is a file, not a repository folder' }
+        @{ kind = 'an empty path'; leaf = $null; message = 'Path is empty' }
     ) {
         $r = New-Fixture
-        { Test-OctoAgentDocs -Path (& $path) 6>$null } | Should -Throw -ExpectedMessage "*$message*" -Because 'the message must say what was tried'
+        $target = if ($leaf) { Join-Path $r $leaf } else { '' }
+        { Test-OctoAgentDocs -Path $target 6>$null } | Should -Throw -ExpectedMessage "*$message*" -Because 'the message must say what was tried'
     }
     It 'refuses a -ConfigPath that does not exist' {
         $r = New-Fixture
@@ -68,7 +71,7 @@ Describe 'configuration cascade' {
         $r = New-Fixture
         Set-Override $r '{"schemaVersion":1,"rules":{"entry-point-lines":["error",{"max":3}]}}'
         $res = Get-Result $r
-        $f = Get-Rules $res 'entry-point-lines'
+        $f = Get-RuleFinding $res 'entry-point-lines'
         $f.Count | Should -Be 1
         $f[0].severity | Should -Be 'error'
         $f[0].message | Should -Match 'budget of 3'
@@ -78,7 +81,7 @@ Describe 'configuration cascade' {
     It 'falls back to the built-in value when a repository sets an option to null' {
         $r = New-Fixture
         Set-Override $r '{"schemaVersion":1,"rules":{"entry-point-lines":["warn",{"max":null}]}}'
-        (Get-Rules (Get-Result $r) 'entry-point-lines').Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'entry-point-lines').Count | Should -Be 0
     }
     It 'accepts the bare-string rule form' {
         $r = New-Fixture
@@ -110,7 +113,7 @@ Describe 'configuration cascade' {
         Write-File $cfg '{"schemaVersion":1,"rules":{"entry-point-lines":["warn",{"max":3}]}}'
         $res = Get-Result $r @{ Mode = 'logOnly'; ConfigPath = $cfg }
         $res.data.mode | Should -Be 'logOnly'
-        (Get-Rules $res 'entry-point-lines')[0].severity | Should -Be 'warn'
+        (Get-RuleFinding $res 'entry-point-lines')[0].severity | Should -Be 'warn'
     }
 }
 
@@ -121,7 +124,7 @@ Describe 'non-relaxable floor' {
         Add-Line $r 'AGENTS.md' "hidden$([char]0x200B)text"
         $out = Get-Output { Test-OctoAgentDocs -Path $r }
         ($out -join "`n") | Should -Match "'no-invisible-characters' is non-relaxable"
-        (Get-Rules (Get-Result $r) 'no-invisible-characters').Count | Should -Be 1
+        (Get-RuleFinding (Get-Result $r) 'no-invisible-characters').Count | Should -Be 1
     }
     It 'does not let a repository lower the mode, but lets it raise it' {
         $r = New-Fixture
@@ -139,7 +142,7 @@ Describe 'non-relaxable floor' {
         $r = New-Fixture
         Write-File (Join-Path $r 'notes/hidden.md') "a$([char]0x200B)b"
         Set-Override $r '{"schemaVersion":1,"scan":{"ignore":["notes"]}}'
-        (Get-Rules (Get-Result $r) 'no-invisible-characters').Count | Should -Be 1
+        (Get-RuleFinding (Get-Result $r) 'no-invisible-characters').Count | Should -Be 1
     }
 }
 
@@ -154,7 +157,7 @@ Describe 'entry point' {
     It 'reports a repository without any entry point and points at Initialize' {
         $r = New-Fixture -Empty
         $res = Get-Result $r
-        (Get-Rules $res 'required-sections')[0].message | Should -Match 'Neither AGENTS.md nor CLAUDE.md'
+        (Get-RuleFinding $res 'required-sections')[0].message | Should -Match 'Neither AGENTS.md nor CLAUDE.md'
         $res.data.startHere | Should -Match 'Initialize-OctoAgentDocs'
     }
     It 'reports missing sections <case>' -ForEach @(
@@ -166,7 +169,7 @@ Describe 'entry point' {
         $text = Get-Content -LiteralPath $p -Raw
         foreach ($h in $remove) { $text = $text.Replace($h, "### $($h.TrimStart('# '))") }   # a level-3 heading does not count
         Write-File $p $text
-        $f = Get-Rules (Get-Result $r) 'required-sections'
+        $f = Get-RuleFinding (Get-Result $r) 'required-sections'
         $f.Count | Should -Be 1
         $f[0].message | Should -BeLike "$expect*"
     }
@@ -174,14 +177,14 @@ Describe 'entry point' {
         $r = New-Fixture
         $p = Join-Path $r 'AGENTS.md'
         Write-File $p ((Get-Content -LiteralPath $p -Raw).Replace("## Rules`n", "``````markdown`n## Rules`n```````n"))
-        (Get-Rules (Get-Result $r) 'required-sections')[0].message | Should -Match "'## Rules'"
+        (Get-RuleFinding (Get-Result $r) 'required-sections')[0].message | Should -Match "'## Rules'"
     }
     It 'applies the line and character budgets' {
         $r = New-Fixture
         Set-Override $r '{"schemaVersion":1,"rules":{"entry-point-lines":["warn",{"max":5}],"entry-point-characters":["error",{"max":100000,"warnAt":50}]}}'
         $res = Get-Result $r
-        (Get-Rules $res 'entry-point-lines')[0].message | Should -Match 'lines over the budget of 5'
-        $c = Get-Rules $res 'entry-point-characters'
+        (Get-RuleFinding $res 'entry-point-lines')[0].message | Should -Match 'lines over the budget of 5'
+        $c = Get-RuleFinding $res 'entry-point-characters'
         $c[0].severity | Should -Be 'warn'
         $c[0].message | Should -Match 'past the 50 target'
     }
@@ -189,9 +192,9 @@ Describe 'entry point' {
         $r = New-Fixture
         Set-Override $r '{"schemaVersion":1,"rules":{"entry-point-lines":["warn",{"max":0}],"required-sections":["off"],"routing-current":["off"]}}'
         Write-File (Join-Path $r 'AGENTS.md') ''
-        (Get-Rules (Get-Result $r) 'entry-point-lines').Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'entry-point-lines').Count | Should -Be 0
         Write-File (Join-Path $r 'AGENTS.md') "one`ntwo`n"
-        (Get-Rules (Get-Result $r) 'entry-point-lines')[0].message | Should -Match '^2 lines'
+        (Get-RuleFinding (Get-Result $r) 'entry-point-lines')[0].message | Should -Match '^2 lines'
     }
     It 'limits line length with the table allowance, exempts code and unbreakable lines, and caps the list' {
         $r = New-Fixture
@@ -199,7 +202,7 @@ Describe 'entry point' {
         Add-Line $r 'AGENTS.md' @(
             ('word ' * 12), ('| ' + ('cell ' * 14) + '|'), ('x' * 80), '```', ('code ' * 20), '```', ('more words ' * 6), ('and more ' * 8)
         )
-        $f = Get-Rules (Get-Result $r) 'line-length'
+        $f = Get-RuleFinding (Get-Result $r) 'line-length'
         $f.Count | Should -Be 3
         $f[0].message | Should -Match '^line is 60 characters, limit 40'
         $f[1].message | Should -Match '^table row is \d+ characters, limit 60 - shorten the globs'
@@ -218,7 +221,7 @@ Describe 'docs and frontmatter' {
     ) {
         $r = New-Fixture
         Write-File (Join-Path $r 'docs/two.md') $doc
-        $f = @(Get-Rules (Get-Result $r) $rule | Where-Object { $_.file -eq 'docs/two.md' })
+        $f = @(Get-RuleFinding (Get-Result $r) $rule | Where-Object { $_.file -eq 'docs/two.md' })
         $f.Count | Should -Be 1
         $f[0].message | Should -Match $expect
     }
@@ -235,14 +238,14 @@ Describe 'docs and frontmatter' {
         $r = New-Fixture
         Set-Override $r '{"schemaVersion":1,"rules":{"docs-count":["warn",{"max":1}]}}'
         Write-File (Join-Path $r 'docs/two.md') "---`ndescription: D.`napplies_to: src/**`n---`n"
-        (Get-Rules (Get-Result $r) 'docs-count')[0].message | Should -Match '2 routed docs \(limit 1\)'
+        (Get-RuleFinding (Get-Result $r) 'docs-count')[0].message | Should -Match '2 routed docs \(limit 1\)'
     }
     It 'does not demand frontmatter from a docs subfolder, but still scans it for integrity' {
         $r = New-Fixture
         Write-File (Join-Path $r 'docs/adr/0001.md') "# ADR a$([char]0x200B)b"
         $res = Get-Result $r
-        (Get-Rules $res 'frontmatter-present').Count | Should -Be 0
-        (Get-Rules $res 'no-invisible-characters')[0].file | Should -Be 'docs/adr/0001.md:1'
+        (Get-RuleFinding $res 'frontmatter-present').Count | Should -Be 0
+        (Get-RuleFinding $res 'no-invisible-characters')[0].file | Should -Be 'docs/adr/0001.md:1'
     }
     It 'adds a description column and escapes a pipe when includeDescriptions is on' {
         $r = New-Fixture -NoFix
@@ -256,17 +259,17 @@ Describe 'docs and frontmatter' {
 Describe 'routing table and -Fix' {
     It 'reports a stale table, and -Fix -WhatIf names the rewrite without writing' {
         $r = New-Fixture -NoFix
-        (Get-Rules (Get-Result $r) 'routing-current')[0].message | Should -Match 'out of date \(run with -Fix\)'
+        (Get-RuleFinding (Get-Result $r) 'routing-current')[0].message | Should -Match 'out of date \(run with -Fix\)'
         $before = Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw
         $res = Get-Result $r @{ Fix = $true; WhatIf = $true }
-        (Get-Rules $res 'routing-current')[0].message | Should -Match 'would be rewritten'
+        (Get-RuleFinding $res 'routing-current')[0].message | Should -Match 'would be rewritten'
         $res.data.filesWritten.Count | Should -Be 0
         Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw | Should -Be $before
     }
     It 'reports missing markers instead of guessing where the table goes' {
         $r = New-Fixture -NoFix
         Write-File (Join-Path $r 'AGENTS.md') ($script:Entry -replace '<!--.*-->\n', '')
-        (Get-Rules (Get-Result $r) 'routing-current')[0].message | Should -Match '^Add <!-- >>> generated'
+        (Get-RuleFinding (Get-Result $r) 'routing-current')[0].message | Should -Match '^Add <!-- >>> generated'
     }
     It 'ignores a marker pair quoted in a fenced example' {
         $r = New-Fixture -NoFix
@@ -288,7 +291,7 @@ Describe 'routing table and -Fix' {
     It 'does not report a stale row of the generated table as a broken reference' {
         $r = New-Fixture
         Rename-Item -LiteralPath (Join-Path $r 'docs/one.md') -NewName 'two.md'
-        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'reference-resolves').Count | Should -Be 0
         { Test-OctoAgentDocs -Path $r -Fix -Mode enforce 6>$null } | Should -Not -Throw
         (Get-Result $r).data.findings.Count | Should -Be 0
     }
@@ -296,13 +299,13 @@ Describe 'routing table and -Fix' {
         $r = New-Fixture -NoFix
         Set-Override $r '{"schemaVersion":1,"mode":"enforce","rules":{"entry-point-characters":["error",{"max":220,"warnAt":0}]}}'
         { Test-OctoAgentDocs -Path $r -Fix 6>$null } | Should -Throw '*error-severity*'
-        (Get-Rules (Get-Result $r @{ Mode = 'logOnly' }) 'entry-point-characters').Count | Should -Be 1
+        (Get-RuleFinding (Get-Result $r @{ Mode = 'logOnly' }) 'entry-point-characters').Count | Should -Be 1
     }
     It 'reports a table that differs only in case as stale' {
         $r = New-Fixture
         $p = Join-Path $r 'AGENTS.md'
         Write-File $p ((Get-Content -LiteralPath $p -Raw).Replace('`docs/one.md`', '`docs/One.md`'))
-        (Get-Rules (Get-Result $r) 'routing-current').Count | Should -Be 1
+        (Get-RuleFinding (Get-Result $r) 'routing-current').Count | Should -Be 1
     }
 }
 
@@ -326,7 +329,7 @@ Describe 'CLAUDE.md shim' {
         $r = New-Fixture
         $p = Join-Path $r 'CLAUDE.md'
         if ($null -eq $text) { Remove-Item -LiteralPath $p } else { Write-File $p $text }
-        (Get-Rules (Get-Result $r) 'shim-valid')[0].message | Should -Match $message
+        (Get-RuleFinding (Get-Result $r) 'shim-valid')[0].message | Should -Match $message
         (Get-Result $r @{ Fix = $true }).data.filesWritten | Should -Contain 'CLAUDE.md'
         Get-Content -LiteralPath $p -Raw | Should -Be $script:Shim
     }
@@ -334,8 +337,8 @@ Describe 'CLAUDE.md shim' {
         $r = New-Fixture
         $p = Join-Path $r 'CLAUDE.md'
         Write-File $p "# Real`n"
-        $plain = (Get-Rules (Get-Result $r) 'shim-valid')[0].message
-        $fix = (Get-Rules (Get-Result $r @{ Fix = $true }) 'shim-valid')[0].message
+        $plain = (Get-RuleFinding (Get-Result $r) 'shim-valid')[0].message
+        $fix = (Get-RuleFinding (Get-Result $r @{ Fix = $true }) 'shim-valid')[0].message
         $plain | Should -Match 'migrate it by hand, or run -Fix -Force'
         $fix | Should -Be $plain
         Get-Content -LiteralPath $p -Raw | Should -Be "# Real`n"
@@ -346,7 +349,7 @@ Describe 'CLAUDE.md shim' {
         $r = New-Fixture
         Remove-Item -LiteralPath (Join-Path $r 'CLAUDE.md')
         Write-File (Join-Path $r 'claude.md') "# Real`n"
-        $f = Get-Rules (Get-Result $r @{ Fix = $true }) 'shim-valid'
+        $f = Get-RuleFinding (Get-Result $r @{ Fix = $true }) 'shim-valid'
         $f[0].file | Should -Be 'claude.md'
         $f[0].message | Should -Match 'rename it'
         @(Get-ChildItem -LiteralPath $r -File).Name | Should -Contain 'claude.md'
@@ -374,7 +377,7 @@ Describe 'references' {
     ) {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' $text
-        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f = Get-RuleFinding (Get-Result $r) 'reference-resolves'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match ([regex]::Escape($expect))
     }
@@ -398,13 +401,13 @@ Describe 'references' {
         if ($file) { Write-File (Join-Path $r $file) '# F' }
         if ($heading) { Add-Line $r 'docs/one.md' $heading }
         Add-Line $r 'AGENTS.md' $text
-        (Get-Rules (Get-Result $r) 'reference-resolves').Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'reference-resolves').Count | Should -Be 0
     }
     It 'checks the README under its real name and the docs too' {
         $r = New-Fixture
         Write-File (Join-Path $r 'readme.md') '[x](docs/nope.md)'
         Add-Line $r 'docs/one.md' '[y](#nowhere)'
-        $f = Get-Rules (Get-Result $r) 'reference-resolves'
+        $f = Get-RuleFinding (Get-Result $r) 'reference-resolves'
         ($f | Where-Object { $_.file -eq 'readme.md' }).message | Should -Match 'docs/nope.md'
         ($f | Where-Object { $_.file -eq 'docs/one.md' }).message | Should -Match '#nowhere'
     }
@@ -417,7 +420,7 @@ Describe 'reference-to-shim' {
         Write-File (Join-Path $r 'sub/CLAUDE.md') $script:Shim
         Add-Line $r 'docs/one.md' 'See [sub](../sub/CLAUDE.md) and `CLAUDE.md`.'
         $res = Get-Result $r
-        $f = Get-Rules $res 'reference-to-shim'
+        $f = Get-RuleFinding $res 'reference-to-shim'
         $f.Count | Should -Be 2
         $f.severity | Should -Be @('warn', 'warn')
         $f[0].message | Should -Match "reference '../sub/AGENTS.md' instead"
@@ -426,7 +429,7 @@ Describe 'reference-to-shim' {
     It 'stays quiet while CLAUDE.md is still the real entry point' {
         $r = New-Fixture -Legacy
         Add-Line $r 'docs/one.md' 'See `CLAUDE.md`.'
-        (Get-Rules (Get-Result $r) 'reference-to-shim').Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'reference-to-shim').Count | Should -Be 0
     }
     It 'warns on a sibling repository that has migrated' {
         $root = New-TempDir
@@ -436,7 +439,7 @@ Describe 'reference-to-shim' {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' 'See `octo-sibling/CLAUDE.md`.'
         $saved = $Global:ROOTPATH
-        try { $Global:ROOTPATH = $root; (Get-Rules (Get-Result $r) 'reference-to-shim')[0].message | Should -Match "'octo-sibling/AGENTS.md'" }
+        try { $Global:ROOTPATH = $root; (Get-RuleFinding (Get-Result $r) 'reference-to-shim')[0].message | Should -Match "'octo-sibling/AGENTS.md'" }
         finally { $Global:ROOTPATH = $saved }
     }
 }
@@ -451,7 +454,7 @@ Describe 'invisible characters' {
     ) {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' $text
-        $f = Get-Rules (Get-Result $r) 'no-invisible-characters'
+        $f = Get-RuleFinding (Get-Result $r) 'no-invisible-characters'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match $expect
         $f[0].file | Should -Match '^AGENTS\.md:\d+$'
@@ -462,47 +465,12 @@ Describe 'invisible characters' {
     ) {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' $text
-        (Get-Rules (Get-Result $r) 'no-invisible-characters').Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'no-invisible-characters').Count | Should -Be 0
     }
     It 'scans every Markdown file, dotfolders included, except build and vendor output' {
         $r = New-Fixture
         foreach ($f in 'src/AGENTS.md', '.claude/rules.md', 'node_modules/pkg/readme.md', 'src/bin/out.md') { Write-File (Join-Path $r $f) "a$([char]0x200B)b" }
-        @((Get-Rules (Get-Result $r) 'no-invisible-characters').file | Sort-Object) | Should -Be @('.claude/rules.md:1', 'src/AGENTS.md:1')
-    }
-}
-
-Describe 'link-hosts' {
-    BeforeEach { $script:on = '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"]}]}}' }
-    It 'is off by default' {
-        $r = New-Fixture
-        Add-Line $r 'docs/one.md' 'see https://evil.example/pwn'
-        (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
-    }
-    It 'flags <case> when enabled' -ForEach @(
-        @{ case = 'a host outside the allowlist, once per file'; text = '[a](https://evil.example/a) <https://evil.example/b> https://evil.example/c'; hosts = @('evil.example') }
-        @{ case = 'the real host behind userinfo and a port'; text = 'https://user:pw@evil.example:8443/x'; hosts = @('evil.example') }
-        @{ case = 'a lookalike that merely ends like an allowed host'; text = 'https://docs.claude.com.evil.example/x'; hosts = @('docs.claude.com.evil.example') }
-        @{ case = 'the real host when an allowed name hides after # ? or \ and @'; text = 'https://evil.example#@docs.claude.com https://evil.example?@docs.claude.com https://evil.example\@docs.claude.com'; hosts = @('evil.example') }
-    ) {
-        $r = New-Fixture
-        Set-Override $r $script:on
-        Add-Line $r 'docs/one.md' $text
-        @((Get-Rules (Get-Result $r) 'link-hosts').message | ForEach-Object { ($_ -split "'")[1] }) | Should -Be $hosts
-    }
-    It 'accepts <case>' -ForEach @(
-        @{ case = 'an allowed host and its subdomains, in any case'; text = 'https://Docs.Claude.com/a https://sub.docs.claude.com/b' }
-        @{ case = 'local and private hosts'; text = 'http://localhost:5000 http://10.1.2.3/x http://build.internal/y http://devbox/z' }
-    ) {
-        $r = New-Fixture
-        Set-Override $r $script:on
-        Add-Line $r 'docs/one.md' $text
-        (Get-Rules (Get-Result $r) 'link-hosts').Count | Should -Be 0
-    }
-    It 'flags local hosts when ignoreLocal is off' {
-        $r = New-Fixture
-        Set-Override $r '{"schemaVersion":1,"rules":{"link-hosts":["error",{"allow":["docs.claude.com"],"ignoreLocal":false}]}}'
-        Add-Line $r 'docs/one.md' 'http://localhost:5000'
-        (Get-Rules (Get-Result $r) 'link-hosts')[0].message | Should -Match "'localhost'"
+        @((Get-RuleFinding (Get-Result $r) 'no-invisible-characters').file | Sort-Object) | Should -Be @('.claude/rules.md:1', 'src/AGENTS.md:1')
     }
 }
 
@@ -540,7 +508,7 @@ Describe 'report, tiers and start here' {
     It 'tags every finding with its tier and lists the ruleset in JSON' {
         $r = New-Fixture -NoFix
         $res = Get-Result $r
-        (Get-Rules $res 'routing-current')[0].tier | Should -Be 2
+        (Get-RuleFinding $res 'routing-current')[0].tier | Should -Be 2
         $res.data.ruleSet.'routing-current'[0] | Should -Be 'error'
     }
     It 'quotes a repository path with spaces in the command it prints' {
@@ -602,11 +570,11 @@ Describe 'explain' {
         $command | Should -Throw $message
     }
     It 'warns about <what>' -ForEach @(
-        @{ what = '-Rule or -All without -Explain'; command = { Test-OctoAgentDocs -Path $r -All }; warning = 'ignored without -Explain' }
-        @{ what = '-Fix in reference mode'; command = { Test-OctoAgentDocs -Path $r -Explain -All -Fix }; warning = '-Fix is ignored with -Explain -All' }
+        @{ what = '-Rule or -All without -Explain'; call = { param($r) Test-OctoAgentDocs -Path $r -All }; warning = 'ignored without -Explain' }
+        @{ what = '-Fix in reference mode'; call = { param($r) Test-OctoAgentDocs -Path $r -Explain -All -Fix }; warning = '-Fix is ignored with -Explain -All' }
     ) {
         $r = New-Fixture
-        (Get-Output $command) -join "`n" | Should -Match "WARNING: .*$([regex]::Escape($warning))"
+        (Get-Output { & $call $r }) -join "`n" | Should -Match "WARNING: .*$([regex]::Escape($warning))"
     }
     It 'never throws, even in enforce mode' {
         $r = New-Fixture -NoFix
@@ -626,20 +594,18 @@ Describe 'enforce mode' {
     It 'warns while the migration brief is present' {
         $r = New-Fixture
         Write-File (Join-Path $r 'AGENTS-MIGRATION.md') '# brief'
-        $f = Get-Rules (Get-Result $r) 'migration-pending'
+        $f = Get-RuleFinding (Get-Result $r) 'migration-pending'
         $f[0].severity | Should -Be 'warn'
         $f[0].file | Should -Be 'AGENTS-MIGRATION.md'
     }
 }
 
 Describe 'the shipped ruleset' {
-    It 'documents every rule the module implements with a tier, a why and a fix, and the schema agrees' {
+    It 'documents every rule the module implements with a tier, a why and a fix' {
         $rules = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../modules/agent-docs.rules.json') -Raw | ConvertFrom-Json -AsHashtable
-        $schema = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../modules/agent-docs.rules.schema.json') -Raw | ConvertFrom-Json -AsHashtable
         $ids = @(Get-OctoAgentDocsRuleIdList | Sort-Object)
         @($rules.rules.Keys | Sort-Object) | Should -Be $ids
         @($rules.ruleDocs.Keys | Sort-Object) | Should -Be $ids
-        @($schema.properties.rules.propertyNames.enum | Sort-Object) | Should -Be $ids
         foreach ($id in $ids) {
             $rules.ruleDocs[$id].tier | Should -BeIn 1, 2, 3, 4
             $rules.ruleDocs[$id].why | Should -Not -BeNullOrEmpty

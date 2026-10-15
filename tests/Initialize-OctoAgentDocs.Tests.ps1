@@ -1,5 +1,7 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
 # Behaviour of Initialize-OctoAgentDocs: the four states, the checklist and the brief.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the profile contract under test')]
+param()
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'AgentDocs.TestHelpers.ps1')
@@ -9,7 +11,7 @@ BeforeAll {
     }
     function Get-Row { param($Init, [string]$Item) $Init.data.checklist | Where-Object { $_.item -eq $Item } }
 }
-AfterAll { Remove-Fixtures }
+AfterAll { Remove-Fixture }
 
 Describe 'created: a repository without agent files' {
     It 'writes AGENTS.md with the sections and markers and the shim, fills the table, and nothing else' {
@@ -76,7 +78,6 @@ Describe 'migration: a repository with a hand-written CLAUDE.md' {
         $brief | Should -Match '@AGENTS.md'
         $brief | Should -Match '\*\*1\. Integrity\*\*'
         $brief | Should -Match 'Never pass `-Force`'
-        $brief | Should -Not -Match 'link-hosts'   # off, so not in the list of what the checker will say
     }
     It 'prints the repository name in the brief under ROOTPATH, and a dot otherwise, so the command works from inside the repository' {
         $root = New-TempDir
@@ -104,7 +105,7 @@ Describe 'migration: a repository with a hand-written CLAUDE.md' {
         (Get-Row $init 'AGENTS-MIGRATION.md').fact | Should -Be 'present'
         @($init.data.nextSteps).Count | Should -Be 3
         @($init.data.nextSteps.command | Where-Object { $_ }) | Should -Be @("Test-OctoAgentDocs -Path $r")
-        (Get-Rules (Get-Result $r) 'migration-pending').Count | Should -Be 1
+        (Get-RuleFinding (Get-Result $r) 'migration-pending').Count | Should -Be 1
     }
 }
 

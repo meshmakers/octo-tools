@@ -10,17 +10,27 @@ $script:Severities = @('off', 'warn', 'error')
 # Fenced code (``` or ~~~, three or more) is illustration, not structure. The closing run
 # may be longer than the opening one. '\r?' because the pattern also runs over raw CRLF text.
 $script:FencePattern = '(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[`~]*[ \t]*\r?$'
-# Every rule the built-in ruleset defines. The schema's enum mirrors this list.
+# Every rule the built-in ruleset defines.
 $script:RuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
     'frontmatter-present', 'doc-reachable', 'reference-resolves', 'reference-to-shim',
     'routing-current', 'docs-count', 'shim-valid', 'required-sections',
-    'no-invisible-characters', 'link-hosts', 'migration-pending'
+    'no-invisible-characters', 'migration-pending'
 )
 
-function Get-OctoAgentDocsRuleIdList { return @($script:RuleIds) }
+function Get-OctoAgentDocsRuleIdList {
+    <#
+    .SYNOPSIS
+    Every rule id the built-in ruleset defines.
+    #>
+    return @($script:RuleIds)
+}
 
 function Get-OctoAgentDocsConstant {
+    <#
+    .SYNOPSIS
+    A constant both commands must agree on: the routing markers and the brief's file name.
+    #>
     param([Parameter(Mandatory)][ValidateSet('RoutingStart', 'RoutingEnd', 'BriefName')][string]$Name)
     return $script:Constants[$Name]
 }
@@ -48,15 +58,21 @@ function Resolve-OctoAgentDocsRepository {
 }
 
 function Format-OctoAgentDocsArgument {
-    # Quotes a value for a command line the tools print for copying.
+    <#
+    .SYNOPSIS
+    Quotes a value for a command line the tools print for copying.
+    #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     if ($Value -match '^[\w./\\:~-]+$') { return $Value }
     return "'" + ($Value -replace "'", "''") + "'"
 }
 
 function ConvertTo-OctoAgentDocsProse {
-    # The text without its fenced code blocks. With -KeepLineNumbers each block becomes the
-    # same number of empty lines, so a line number in the result is a line number in the file.
+    <#
+    .SYNOPSIS
+    The text without its fenced code blocks. With -KeepLineNumbers each block becomes the
+    same number of empty lines, so a line number in the result is a line number in the file.
+    #>
     param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
     if (-not $KeepLineNumbers) { return [regex]::Replace($Text, $script:FencePattern, '') }
@@ -64,8 +80,11 @@ function ConvertTo-OctoAgentDocsProse {
 }
 
 function Find-OctoAgentDocsMarker {
-    # Index of the first occurrence of a marker outside fenced code, or -1: a marker quoted
-    # in a ```markdown example is documentation, not the region.
+    <#
+    .SYNOPSIS
+    Index of the first occurrence of a marker outside fenced code, or -1: a marker quoted
+    in a ```markdown example is documentation, not the region.
+    #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Marker)
     $fences = @([regex]::Matches($Text, $script:FencePattern) | ForEach-Object { @{ s = $_.Index; e = $_.Index + $_.Length } })
     $i = $Text.IndexOf($Marker, [System.StringComparison]::Ordinal)
@@ -77,8 +96,11 @@ function Find-OctoAgentDocsMarker {
 }
 
 function Test-OctoAgentDocsShimLike {
-    # True when a CLAUDE.md holds nothing but HTML comments and at most one @import line:
-    # nobody's work is in it, so the shim may replace it.
+    <#
+    .SYNOPSIS
+    True when a CLAUDE.md holds nothing but HTML comments and at most one @import line:
+    nobody's work is in it, so the shim may replace it.
+    #>
     param([AllowNull()][AllowEmptyString()][string]$Content)
     $stripped = [regex]::Replace([string]$Content, '(?s)<!--.*?-->', '')
     $meaningful = @(($stripped -split "`r?`n") | Where-Object { $_.Trim() })
@@ -86,15 +108,21 @@ function Test-OctoAgentDocsShimLike {
 }
 
 function Read-OctoAgentDocsText {
-    # File text with CRLF normalised to LF, so sizes, line counts and comparisons do not
-    # depend on the checkout. Callers that write back read the raw text themselves.
+    <#
+    .SYNOPSIS
+    File text with CRLF normalised to LF, so sizes, line counts and comparisons do not
+    depend on the checkout. Callers that write back read the raw text themselves.
+    #>
     param([Parameter(Mandatory)][string]$Path)
     return [System.IO.File]::ReadAllText($Path).Replace("`r`n", "`n")
 }
 
 function Write-OctoAgentDocsText {
-    # UTF-8 without BOM. A symlink is never written through: the target may be outside the
-    # repository being fixed.
+    <#
+    .SYNOPSIS
+    UTF-8 without BOM. A symlink is never written through: the target may be outside the
+    repository being fixed.
+    #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'The callers decide through their own ShouldProcess; this is the write primitive')]
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Content)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
@@ -121,7 +149,10 @@ function Read-OctoAgentDocsBuiltInRuleset {
 }
 
 function ConvertTo-OctoAgentDocsRuleEntry {
-    # "warn", ["warn"] or ["warn", {...}] into @{ severity; options; valid }.
+    <#
+    .SYNOPSIS
+    "warn", ["warn"] or ["warn", {...}] into @{ severity; options; valid }.
+    #>
     param([AllowNull()]$Raw)
     $severity = if ($Raw -is [string]) { $Raw } elseif ($Raw -is [array] -and $Raw.Count -ge 1) { $Raw[0] } else { $null }
     $options = if ($Raw -is [array] -and $Raw.Count -gt 1 -and $Raw[1] -is [hashtable]) { $Raw[1] } else { @{} }
@@ -129,7 +160,10 @@ function ConvertTo-OctoAgentDocsRuleEntry {
 }
 
 function Get-OctoAgentDocsRuleTier {
-    # The tier a rule reports under, from its ruleDocs entry; 4 (budgets) when unset.
+    <#
+    .SYNOPSIS
+    The tier a rule reports under, from its ruleDocs entry; 4 (budgets) when unset.
+    #>
     param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Id)
     $doc = $Config['ruleDocs'][$Id]
     if ($doc -is [hashtable] -and $doc['tier']) { return [int]$doc['tier'] }
@@ -137,7 +171,10 @@ function Get-OctoAgentDocsRuleTier {
 }
 
 function Get-OctoAgentDocsTierHeading {
-    # 'N. Title - why', the same line in the report, the reference and the brief.
+    <#
+    .SYNOPSIS
+    'N. Title - why', the same line in the report, the reference and the brief.
+    #>
     param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][int]$Tier, [switch]$Markdown)
     $info = $Config['tiers']["$Tier"]
     $title = if ($info -is [hashtable] -and $info['title']) { $info['title'] } else { "Tier $Tier" }

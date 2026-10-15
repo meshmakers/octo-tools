@@ -6,6 +6,141 @@ Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 $script:RuleIds = Get-OctoAgentDocsRuleIdList
 $script:Modes = @('logOnly', 'enforce')
 
+# ---------------------------------------------------------------------- model
+class AgentDocsRuleSet {
+    # The effective ruleset: the built-in file with the override layers merged on top.
+    [hashtable]$Config
+    [string[]]$Floor
+    hidden [hashtable]$BuiltIn = @{}
+    hidden [hashtable]$Rank = @{ off = 0; warn = 1; error = 2 }
+
+    AgentDocsRuleSet() {
+        $this.Config = Read-OctoAgentDocsBuiltInRuleset
+        $this.Floor = @($this.Config['nonRelaxable'])
+        foreach ($id in $script:RuleIds) { $this.BuiltIn[$id] = $this.Config.rules[$id][1] }
+    }
+
+    [void] Merge([hashtable]$Layer, [string]$Source, [bool]$Trusted) {
+        # An untrusted layer (the repository's own file, part of the branch under review) may
+        # raise the mode and the non-relaxable rules, never lower them.
+        if ($Layer.ContainsKey('mode')) {
+            if ($script:Modes -notcontains $Layer.mode) { Write-Warning "Invalid mode '$($Layer.mode)' in $Source - must be logOnly or enforce. Keeping '$($this.Config.mode)'." }
+            elseif (-not $Trusted -and $Layer.mode -eq 'logOnly' -and $this.Config.mode -eq 'enforce') { Write-Warning "$Source asks for mode 'logOnly', which is weaker than 'enforce' - a repository may raise the mode but not lower it. Keeping 'enforce'." }
+            else { $this.Config.mode = $Layer.mode }
+        }
+        foreach ($id in @(if ($Layer['rules'] -is [hashtable]) { $Layer['rules'].Keys })) {
+            if ($script:RuleIds -notcontains $id) { Write-Warning "Unknown rule '$id' in $Source - ignored"; continue }
+            $entry = ConvertTo-OctoAgentDocsRuleEntry $Layer.rules[$id]
+            $current = $this.Config.rules[$id]
+            if (-not $entry.valid) { Write-Warning "Invalid severity '$($entry.severity)' for rule '$id' in $Source - must be off, warn or error. Keeping '$($current[0])'."; continue }
+            if (-not $Trusted -and $this.Floor -contains $id) {
+                if ($this.Rank[$entry.severity] -lt $this.Rank[$current[0]]) { Write-Warning "'$id' is non-relaxable: $Source asks for '$($entry.severity)', keeping '$($current[0])'. Change the org ruleset in octo-tools if this rule is wrong."; continue }
+                $this.Config.rules[$id] = @($entry.severity, $current[1])
+                continue
+            }
+            $merged = $current[1].Clone()
+            foreach ($k in $entry.options.Keys) { $merged[$k] = $entry.options[$k] }
+            $this.Config.rules[$id] = @($entry.severity, $merged)
+        }
+    }
+
+    [string] Mode() { return $this.Config.mode }
+    [string] Severity([string]$Id) { return $this.Config.rules[$Id][0] }
+    [bool] IsOn([string]$Id) { return $this.Severity($Id) -ne 'off' }
+    [int] Tier([string]$Id) { return Get-OctoAgentDocsRuleTier -Config $this.Config -Id $Id }
+
+    [object] Option([string]$Id, [string]$Name) {
+        # A layer that sets an option to null falls back to the built-in value.
+        $v = $this.Config.rules[$Id][1][$Name]
+        if ($null -eq $v) { return $this.BuiltIn[$Id][$Name] }
+        return $v
+    }
+}
+
+class AgentDocsFindings {
+    # Every finding of one run; a finding for a rule that is off is dropped here.
+    [System.Collections.Generic.List[object]]$Items = [System.Collections.Generic.List[object]]::new()
+    hidden [AgentDocsRuleSet]$Rules
+
+    AgentDocsFindings([AgentDocsRuleSet]$Rules) { $this.Rules = $Rules }
+
+    [void] Add([string]$Rule, [string]$File, [string]$Message) { $this.Add($Rule, $File, $Message, $this.Rules.Severity($Rule)) }
+
+    [void] Add([string]$Rule, [string]$File, [string]$Message, [string]$Severity) {
+        if ($Severity -ne 'off') { $this.Items.Add([ordered]@{ severity = $Severity; rule = $Rule; tier = $this.Rules.Tier($Rule); file = $File; message = $Message }) }
+    }
+
+    [object[]] WithSeverity([string]$Severity) { return @($this.Items | Where-Object { $_.severity -eq $Severity }) }
+}
+
+class AgentDocsRepository {
+    # The layout of the repository under check, read once, and its files' text.
+    [string]$Root
+    [string]$Name
+    [string[]]$RootNames
+    [bool]$HasAgents
+    [bool]$HasClaude
+    [string]$AgentsPath
+    [string]$ClaudePath
+    [string]$EntryPath
+    [string]$EntryName = ''
+    [object[]]$Docs = @()
+    [System.Collections.Generic.List[string]]$Written = [System.Collections.Generic.List[string]]::new()
+    hidden [hashtable]$TextCache = @{}
+    hidden [hashtable]$DirCache = @{}
+
+    AgentDocsRepository([string]$Root) {
+        $this.Root = $Root
+        $this.Name = Split-Path -Leaf $Root
+        # By exact name: a case-insensitive file system would accept agents.md, Linux CI would not.
+        $this.RootNames = @(Get-ChildItem -LiteralPath $Root -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        $this.HasAgents = $this.RootNames -ccontains 'AGENTS.md'
+        $this.HasClaude = $this.RootNames -ccontains 'CLAUDE.md'
+        $this.AgentsPath = Join-Path $Root 'AGENTS.md'
+        $this.ClaudePath = Join-Path $Root 'CLAUDE.md'
+        $this.EntryPath = if ($this.HasAgents) { $this.AgentsPath } elseif ($this.HasClaude) { $this.ClaudePath } else { $null }
+        if ($this.EntryPath) { $this.EntryName = Split-Path -Leaf $this.EntryPath }
+        $docsDir = Join-Path $Root 'docs'
+        if (Test-Path -LiteralPath $docsDir) {
+            # Ordinal order: the table is committed, so its order must not depend on the machine's culture.
+            $list = @(Get-ChildItem -LiteralPath $docsDir -Filter '*.md' -File)
+            [array]::Sort($list, [System.Comparison[object]] { param($a, $b) [string]::CompareOrdinal($a.Name, $b.Name) })
+            $this.Docs = $list
+        }
+    }
+
+    [string] ReadText([string]$Path) {
+        if (-not $this.TextCache.ContainsKey($Path)) { $this.TextCache[$Path] = Read-OctoAgentDocsText $Path }
+        return $this.TextCache[$Path]
+    }
+
+    [void] Write([string]$Path, [string]$Content) {
+        Write-OctoAgentDocsText -Path $Path -Content $Content
+        $this.TextCache[$Path] = $Content.Replace("`r`n", "`n")
+        $this.Written.Add((Split-Path -Leaf $Path))
+    }
+
+    [string] Relative([string]$Path) { return [System.IO.Path]::GetRelativePath($this.Root, $Path).Replace('\', '/') }
+
+    [bool] ExistsExactCase([string]$Relative) {
+        # Test-Path is case-insensitive on macOS and Windows; GitHub and Linux CI are not.
+        $current = $this.Root
+        foreach ($segment in ($Relative -split '[\\/]+' | Where-Object { $_ -and $_ -ne '.' })) {
+            if ($segment -eq '..') { $current = Split-Path -Parent $current; continue }
+            if (-not $this.DirCache.ContainsKey($current)) { $this.DirCache[$current] = @([System.IO.Directory]::EnumerateFileSystemEntries($current) | ForEach-Object { [System.IO.Path]::GetFileName($_) }) }
+            if ($this.DirCache[$current] -cnotcontains $segment) { return $false }
+            $current = Join-Path $current $segment
+        }
+        return $true
+    }
+
+    [bool] PointsAtShim([string]$Path) {
+        if ((Split-Path -Leaf $Path) -cne 'CLAUDE.md' -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+        return (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'AGENTS.md')) -and (Test-OctoAgentDocsShimLike $this.ReadText($Path))
+    }
+}
+
+# ------------------------------------------------------------------- command
 function Test-OctoAgentDocs {
     <#
     .SYNOPSIS
@@ -92,228 +227,164 @@ function Test-OctoAgentDocs {
     if (($Rule -or $All) -and -not $Explain) { Write-Warning '-Rule and -All only shape -Explain output; ignored without -Explain' }
     $reference = $Explain -and ($All -or $Rule)
     if ($reference -and $Fix) { Write-Warning '-Fix is ignored with -Explain -All or -Rule: nothing is scanned' }
-    $repo = Resolve-OctoAgentDocsRepository -Path $Path
-    $repoName = Split-Path -Leaf $repo
+    $root = Resolve-OctoAgentDocsRepository -Path $Path
+    $rules = Resolve-RuleSet -Root $root -ConfigPath $ConfigPath -Mode $Mode
 
-    # ------------------------------------------------------------------ config
-    $config = Read-OctoAgentDocsBuiltInRuleset
-    $builtIn = @{}
-    foreach ($id in $script:RuleIds) { $builtIn[$id] = $config.rules[$id][1] }
-    $floor = @($config['nonRelaxable'])
-    $rank = @{ off = 0; warn = 1; error = 2 }
-    if ($ConfigPath -and -not (Test-Path -LiteralPath $ConfigPath)) { throw "-ConfigPath '$ConfigPath' does not exist" }
-    $layers = @(@{ path = (Join-Path $repo '.agent-docs.json'); trusted = $false }, @{ path = $ConfigPath; trusted = $true })
-    foreach ($l in $layers) {
-        if (-not $l.path -or -not (Test-Path -LiteralPath $l.path)) { continue }
-        $over = try { Get-Content -LiteralPath $l.path -Raw | ConvertFrom-Json -AsHashtable } catch { $null }
-        if ($over -isnot [hashtable]) { Write-Warning "Ruleset '$($l.path)' is not a JSON object - ignored"; continue }
-        if ($over.ContainsKey('mode')) {
-            if ($script:Modes -notcontains $over.mode) { Write-Warning "Invalid mode '$($over.mode)' in $($l.path) - must be logOnly or enforce. Keeping '$($config.mode)'." }
-            elseif (-not $l.trusted -and $over.mode -eq 'logOnly' -and $config.mode -eq 'enforce') { Write-Warning "$($l.path) asks for mode 'logOnly', which is weaker than 'enforce' - a repository may raise the mode but not lower it. Keeping 'enforce'." }
-            else { $config.mode = $over.mode }
-        }
-        foreach ($id in @(if ($over['rules'] -is [hashtable]) { $over['rules'].Keys })) {
-            if ($script:RuleIds -notcontains $id) { Write-Warning "Unknown rule '$id' in $($l.path) - ignored"; continue }
-            $entry = ConvertTo-OctoAgentDocsRuleEntry $over.rules[$id]
-            $current = $config.rules[$id]
-            if (-not $entry.valid) { Write-Warning "Invalid severity '$($entry.severity)' for rule '$id' in $($l.path) - must be off, warn or error. Keeping '$($current[0])'."; continue }
-            if (-not $l.trusted -and $floor -contains $id) {
-                # A floor rule may be raised by the repository, never lowered, and keeps its options.
-                if ($rank[$entry.severity] -lt $rank[$current[0]]) { Write-Warning "'$id' is non-relaxable: $($l.path) asks for '$($entry.severity)', keeping '$($current[0])'. Change the org ruleset in octo-tools if this rule is wrong."; continue }
-                $config.rules[$id] = @($entry.severity, $current[1]); continue
-            }
-            $merged = $current[1].Clone()
-            foreach ($k in $entry.options.Keys) { $merged[$k] = $entry.options[$k] }
-            $config.rules[$id] = @($entry.severity, $merged)
-        }
-    }
-    if ($Mode) { $config.mode = $Mode }
-    function Sev { param([string]$Id) $config.rules[$Id][0] }
-    function On { param([string]$Id) (Sev $Id) -ne 'off' }
-    function Opt {
-        # A repository that sets an option to null falls back to the built-in value.
-        param([string]$Id, [string]$Name)
-        $v = $config.rules[$Id][1][$Name]
-        if ($null -eq $v) { $builtIn[$Id][$Name] } else { $v }
-    }
-    function Tier { param([string]$Id) Get-OctoAgentDocsRuleTier -Config $config -Id $Id }
-
-    # ----------------------------------------------------------------- explain
-    function Get-RuleRow {
-        param([string]$Id)
-        $doc = $config['ruleDocs'][$Id]
-        if ($doc -isnot [hashtable]) { $doc = @{} }
-        [ordered]@{ rule = $Id; tier = (Tier $Id); severity = (Sev $Id); nonRelaxable = ($floor -contains $Id); options = $config.rules[$Id][1]; why = [string]$doc['why']; fix = [string]$doc['fix'] }
-    }
-    function Write-RuleRow {
-        param($Row, [string]$Indent = '     ')
-        $colour = switch ($Row.severity) { 'error' { 'Red' } 'warn' { 'DarkYellow' } default { 'DarkGray' } }
-        $lock = if ($Row.nonRelaxable) { ' (non-relaxable)' } else { '' }
-        # Scalars inline, lists as a count; -Json has the full options.
-        $opts = @(foreach ($k in ($Row.options.Keys | Sort-Object)) { $v = $Row.options[$k]; if ($v -is [array]) { "$k=[$($v.Count)]" } else { "$k=$v" } }) -join ', '
-        Write-Host ''
-        Write-Host "${Indent}rule $($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
-        if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host '' }
-        if ($Row.why) { Write-Host "$Indent  why: $($Row.why)" }
-        if ($Row.fix) { Write-Host "$Indent  fix: $($Row.fix)" }
-    }
+    $global:LASTEXITCODE = 0
     if ($reference) {
         $ids = if ($Rule) { @($Rule) } else { @($script:RuleIds) }
-        $unknown = @($ids | Where-Object { $script:RuleIds -notcontains $_ })
-        if ($unknown) { throw "Unknown rule(s): $($unknown -join ', '). Known: $($script:RuleIds -join ', ')" }
-        $rows = @(foreach ($id in $ids) { Get-RuleRow $id })
-        $global:LASTEXITCODE = 0
-        if ($Json) { Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{ repository = $repoName; mode = $config.mode; rules = $rows }); return }
-        Write-Host "Agent docs rules for $repoName (mode: $($config.mode)) - effective severity, in the order to fix them" -ForegroundColor Yellow
-        foreach ($t in @($rows.tier | Sort-Object -Unique)) {
-            Write-Host ''
-            Write-Host "  $(Get-OctoAgentDocsTierHeading -Config $config -Tier $t)" -ForegroundColor White
-            foreach ($r in @($rows | Where-Object { $_.tier -eq $t })) { Write-RuleRow $r }
-        }
-        Write-Host ''
-        Write-Host '  Overrides: .agent-docs.json in the repository, then -ConfigPath, then -Mode. Non-relaxable rules can be raised there, never lowered.' -ForegroundColor Gray
+        Write-RuleReference -Rules $rules -Id $ids -RepositoryName (Split-Path -Leaf $root) -Json:$Json
         return
     }
 
-    # ----------------------------------------------------------------- helpers
-    $findings = [System.Collections.Generic.List[object]]::new()
-    $written = [System.Collections.Generic.List[string]]::new()
-    $textCache = @{}
-    function Add-Finding {
-        param([string]$RuleId, [string]$File, [string]$Message, [string]$As)
-        $sev = if ($As) { $As } else { Sev $RuleId }
-        if ($sev -ne 'off') { $findings.Add([ordered]@{ severity = $sev; rule = $RuleId; tier = (Tier $RuleId); file = $File; message = $Message }) }
+    $repo = [AgentDocsRepository]::new($root)
+    $findings = [AgentDocsFindings]::new($rules)
+    if (-not $repo.EntryPath) { $findings.Add('required-sections', '', 'Neither AGENTS.md nor CLAUDE.md exists - the repository has no entry point') }
+    $shim = Test-ClaudeShim -Rules $rules -Repo $repo -Findings $findings -Fix:$Fix -Force:$Force
+    $briefName = Get-OctoAgentDocsConstant BriefName
+    if (Test-Path -LiteralPath (Join-Path $root $briefName)) {
+        $findings.Add('migration-pending', $briefName, 'Migration brief is still present - follow its steps and delete it in the migration commit')
     }
-    function Get-Text { param([string]$P) if (-not $textCache.ContainsKey($P)) { $textCache[$P] = Read-OctoAgentDocsText $P }; $textCache[$P] }
-    function Get-Lines {
-        # Lines as wc -l counts them: a trailing newline does not add a line.
-        param([string]$Content)
-        if (-not $Content) { return , @() }
-        return , @(($Content.TrimEnd("`n")) -split "`n")
-    }
-    function Split-GlobList { param([string]$Value) return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-    function Get-Frontmatter {
-        # 'key: value' lines between the two '---' fences. Quotes and [ ] around a value are
-        # dropped; other YAML shapes are not supported and read as missing.
-        param([string]$Content)
-        $map = @{}
-        $lines = @($Content -split "`n")
-        if ($lines.Count -lt 2 -or $lines[0].Trim() -ne '---') { return $map }
-        for ($i = 1; $i -lt $lines.Count -and $lines[$i].Trim() -ne '---'; $i++) {
-            if ($lines[$i] -match '^([A-Za-z_][\w-]*)\s*:\s*(.*)$') { $map[$Matches[1]] = $Matches[2].Trim() -replace '^\[(.*)\]$', '$1' -replace '^(["''])(.*)\1$', '$2' }
-        }
-        if ($i -ge $lines.Count) { return @{} }   # no closing fence: not frontmatter
-        return $map
-    }
-    function Get-Anchors {
-        # GitHub-style slugs of the ATX headings: lower case, punctuation dropped, spaces to
-        # hyphens, repeated headings suffixed -1, -2. Compared without regard to case, which
-        # is how github.com and VS Code resolve a fragment.
-        param([string]$Prose)
-        $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        $seen = @{}
-        foreach ($m in [regex]::Matches($Prose, '(?m)^#{1,6}[ \t]+(.*?)[ \t]*$')) {
-            $a = [regex]::Replace($m.Groups[1].Value, '\[([^\]]*)\]\([^)]*\)', '$1').ToLowerInvariant() -replace '[^\p{L}\p{N}\p{M} _-]', '' -replace ' ', '-'
-            if ($seen.ContainsKey($a)) { $seen[$a]++; [void]$set.Add("$a-$($seen[$a])") } else { $seen[$a] = 0; [void]$set.Add($a) }
-        }
-        return , $set
-    }
-    $dirCache = @{}
-    function Test-PathExact {
-        # Test-Path is case-insensitive on macOS and Windows; GitHub and Linux CI are not.
-        param([string]$Root, [string]$Relative)
-        $current = $Root
-        foreach ($segment in ($Relative -split '[\\/]+' | Where-Object { $_ -and $_ -ne '.' })) {
-            if ($segment -eq '..') { $current = Split-Path -Parent $current; continue }
-            if (-not $dirCache.ContainsKey($current)) { $dirCache[$current] = @([System.IO.Directory]::EnumerateFileSystemEntries($current) | ForEach-Object { [System.IO.Path]::GetFileName($_) }) }
-            if ($dirCache[$current] -cnotcontains $segment) { return $false }
-            $current = Join-Path $current $segment
-        }
-        return $true
-    }
-    function Test-PointsAtShim {
-        param([string]$P)
-        if ((Split-Path -Leaf $P) -cne 'CLAUDE.md' -or -not (Test-Path -LiteralPath $P -PathType Leaf)) { return $false }
-        return (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $P) 'AGENTS.md')) -and (Test-OctoAgentDocsShimLike (Get-Text $P))
+    $routes = Test-DocsFolder -Rules $rules -Repo $repo -Findings $findings
+    Test-InvisibleCharacter -Rules $rules -Repo $repo -Findings $findings
+    Test-ReferenceSet -Rules $rules -Repo $repo -Findings $findings
+    if ($repo.EntryPath) {
+        Test-RequiredSection -Rules $rules -Repo $repo -Findings $findings
+        Test-RoutingTable -Rules $rules -Repo $repo -Findings $findings -Route $routes -Fix:$Fix
+        Test-EntryBudget -Rules $rules -Repo $repo -Findings $findings
     }
 
-    # ------------------------------------------------------------ entry + shim
-    # By exact name: a case-insensitive file system would accept agents.md, Linux CI would not.
-    $rootNames = @(Get-ChildItem -LiteralPath $repo -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-    $hasAgents = $rootNames -ccontains 'AGENTS.md'
-    $hasClaude = $rootNames -ccontains 'CLAUDE.md'
-    $agentsPath = Join-Path $repo 'AGENTS.md'
-    $claudePath = Join-Path $repo 'CLAUDE.md'
-    $entryPath = if ($hasAgents) { $agentsPath } elseif ($hasClaude) { $claudePath } else { $null }
-    $entryName = if ($entryPath) { Split-Path -Leaf $entryPath } else { '' }
-    if (-not $entryPath) { Add-Finding 'required-sections' '' 'Neither AGENTS.md nor CLAUDE.md exists - the repository has no entry point' }
-
-    # The shim verdict is computed whatever severity the rule has: Initialize reads it.
-    $shimLines = @(Opt 'shim-valid' 'content')
-    $shimVerdict = 'n/a'
-    if ($hasAgents) {
-        $current = if ($hasClaude) { Get-Text $claudePath } else { $null }
-        $shimVerdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -ceq ($shimLines -join "`n")) { 'ok' } else { 'differs' }
+    $errorCount = $findings.WithSeverity('error').Count
+    $startHere = Get-StartHere -Repo $repo -Findings $findings -PathArgument (Format-OctoAgentDocsArgument -Value $Path)
+    if ($Json) {
+        $fired = @($findings.Items.rule | Sort-Object -Unique)
+        Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{
+            repository   = $repo.Name
+            entryPoint   = $repo.EntryName
+            canonical    = if ($repo.HasAgents) { 'AGENTS.md' } else { 'CLAUDE.md' }
+            shim         = $shim
+            mode         = $rules.Mode()
+            filesWritten = @($repo.Written)
+            routes       = @($routes)
+            findings     = @($findings.Items)
+            startHere    = $startHere
+            explanations = @(if ($Explain) { @(foreach ($id in $fired) { Get-RuleRow -Rules $rules -Id $id }) | Sort-Object -Stable { $_.tier }, { $_.rule } })
+            ruleSet      = $rules.Config.rules
+            summary      = [ordered]@{ errors = $errorCount; warnings = $findings.WithSeverity('warn').Count; success = ($errorCount -eq 0) }
+        })
     }
+    else {
+        Write-FindingReport -Rules $rules -Repo $repo -Findings $findings -RouteCount @($routes).Count -StartHere $startHere -Explain:$Explain -Fix:$Fix
+    }
+
+    # -Explain is a person asking why; the gate is for pipelines.
+    if ($rules.Mode() -eq 'enforce' -and $errorCount -gt 0 -and -not $Explain) {
+        $global:LASTEXITCODE = 1
+        throw "Test-OctoAgentDocs: $errorCount error-severity finding(s) in $($repo.Name)"
+    }
+}
+
+# --------------------------------------------------------------- configuration
+function Resolve-RuleSet {
+    # The built-in ruleset, then the repository's .agent-docs.json, then -ConfigPath, then -Mode.
+    param([string]$Root, [string]$ConfigPath, [string]$Mode)
+    if ($ConfigPath -and -not (Test-Path -LiteralPath $ConfigPath)) { throw "-ConfigPath '$ConfigPath' does not exist" }
+    $rules = [AgentDocsRuleSet]::new()
+    foreach ($layer in @(@{ path = (Join-Path $Root '.agent-docs.json'); trusted = $false }, @{ path = $ConfigPath; trusted = $true })) {
+        if (-not $layer.path -or -not (Test-Path -LiteralPath $layer.path)) { continue }
+        $content = try { Get-Content -LiteralPath $layer.path -Raw | ConvertFrom-Json -AsHashtable } catch { $null }
+        if ($content -isnot [hashtable]) { Write-Warning "Ruleset '$($layer.path)' is not a JSON object - ignored"; continue }
+        $rules.Merge($content, $layer.path, $layer.trusted)
+    }
+    if ($Mode) { $rules.Config.mode = $Mode }
+    return $rules
+}
+
+# ---------------------------------------------------------------- entry + shim
+function Test-ClaudeShim {
+    # Returns the shim verdict (n/a, absent, ok, differs). It is computed whatever the rule's
+    # severity, because Initialize-OctoAgentDocs reads it.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [switch]$Fix, [switch]$Force)
+    if (-not $Repo.HasAgents) { return 'n/a' }
+    $shim = @($Rules.Option('shim-valid', 'content')) -join "`n"
+    $current = if ($Repo.HasClaude) { $Repo.ReadText($Repo.ClaudePath) } else { $null }
+    $verdict = if ($null -eq $current) { 'absent' } elseif ($current.Trim() -ceq $shim) { 'ok' } else { 'differs' }
+    if (-not $Rules.IsOn('shim-valid')) { return $verdict }
+
     # A 'claude.md' is not the shim, and on a case-insensitive file system writing CLAUDE.md
     # would overwrite it - so nothing is written while the two names would collide.
-    $claudeAlias = $rootNames | Where-Object { $_ -ieq 'CLAUDE.md' -and $_ -cne 'CLAUDE.md' } | Select-Object -First 1
-    if ($hasAgents -and (On 'shim-valid') -and $claudeAlias) {
-        Add-Finding 'shim-valid' $claudeAlias "Named '$claudeAlias', not CLAUDE.md - rename it before -Fix can write the shim"
+    $alias = $Repo.RootNames | Where-Object { $_ -ieq 'CLAUDE.md' -and $_ -cne 'CLAUDE.md' } | Select-Object -First 1
+    if ($alias) { $Findings.Add('shim-valid', $alias, "Named '$alias', not CLAUDE.md - rename it before -Fix can write the shim"); return $verdict }
+    if ($verdict -eq 'ok') { return $verdict }
+    if ($Repo.HasClaude -and -not $Force -and -not (Test-OctoAgentDocsShimLike $current)) {
+        $Findings.Add('shim-valid', 'CLAUDE.md', 'Has real content while AGENTS.md is canonical - migrate it by hand, or run -Fix -Force to replace it with the shim')
     }
-    elseif ($hasAgents -and (On 'shim-valid') -and $shimVerdict -ne 'ok') {
-        $safe = -not $hasClaude -or $Force -or (Test-OctoAgentDocsShimLike $current)
-        $realContent = 'Has real content while AGENTS.md is canonical - migrate it by hand, or run -Fix -Force to replace it with the shim'
-        if ($Fix -and $safe -and $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) { Write-OctoAgentDocsText $claudePath (($shimLines -join "`n") + "`n"); $written.Add('CLAUDE.md') }
-        elseif ($Fix -and $safe) { Add-Finding 'shim-valid' 'CLAUDE.md' 'CLAUDE.md shim would be written (run without -WhatIf)' }
-        elseif ($safe) { Add-Finding 'shim-valid' 'CLAUDE.md' "$(if ($hasClaude) { 'CLAUDE.md must contain exactly the shim and nothing else' } else { 'CLAUDE.md shim is absent' }) (run with -Fix)" }
-        else { Add-Finding 'shim-valid' 'CLAUDE.md' $realContent }
-    }
-    $briefName = Get-OctoAgentDocsConstant BriefName
-    if ((On 'migration-pending') -and (Test-Path -LiteralPath (Join-Path $repo $briefName))) {
-        Add-Finding 'migration-pending' $briefName 'Migration brief is still present - follow its steps and delete it in the migration commit'
-    }
+    elseif (-not $Fix) { $Findings.Add('shim-valid', 'CLAUDE.md', "$(if ($Repo.HasClaude) { 'CLAUDE.md must contain exactly the shim and nothing else' } else { 'CLAUDE.md shim is absent' }) (run with -Fix)") }
+    elseif (-not (Update-ClaudeShim -Repo $Repo -Content "$shim`n")) { $Findings.Add('shim-valid', 'CLAUDE.md', 'CLAUDE.md shim would be written (run without -WhatIf)') }
+    return $verdict
+}
 
-    # -------------------------------------------------------------------- docs
-    $docsDir = Join-Path $repo 'docs'
-    $docs = @()
-    if (Test-Path -LiteralPath $docsDir) {
-        # Ordinal order: the table is committed, so its order must not depend on the machine's culture.
-        $docs = @(Get-ChildItem -LiteralPath $docsDir -Filter '*.md' -File)
-        [array]::Sort($docs, [System.Comparison[object]] { param($a, $b) [string]::CompareOrdinal($a.Name, $b.Name) })
-    }
+function Update-ClaudeShim {
+    # True when the shim was written; false when -WhatIf or the user declined.
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    [OutputType([bool])]
+    param([AgentDocsRepository]$Repo, [string]$Content)
+    if (-not $PSCmdlet.ShouldProcess('CLAUDE.md', 'Write the AGENTS.md shim')) { return $false }
+    $Repo.Write($Repo.ClaudePath, $Content)
+    return $true
+}
+
+# ------------------------------------------------------------------------ docs
+function Test-DocsFolder {
+    # Frontmatter and size of every docs/*.md. Returns the routes the table is generated from.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     $routes = [System.Collections.Generic.List[object]]::new()
-    foreach ($d in $docs) {
-        $content = Get-Text $d.FullName
-        $fm = Get-Frontmatter $content
+    $maxDescription = $Rules.Option('frontmatter-present', 'maxDescription')
+    $maxCharacters = $Rules.Option('doc-size', 'maxCharacters')
+    foreach ($d in $Repo.Docs) {
+        $content = $Repo.ReadText($d.FullName)
+        $fm = Get-Frontmatter -Content $content
         $rel = "docs/$($d.Name)"
-        if (On 'frontmatter-present') {
-            $maxDesc = Opt 'frontmatter-present' 'maxDescription'
-            if (-not $fm['description']) { Add-Finding 'frontmatter-present' $rel "No 'description' in frontmatter" }
-            elseif ($fm['description'].Length -gt $maxDesc) { Add-Finding 'frontmatter-present' $rel "description is $($fm['description'].Length) characters, limit $maxDesc - shorten it to one scannable line" }
-        }
+        if (-not $fm['description']) { $Findings.Add('frontmatter-present', $rel, "No 'description' in frontmatter") }
+        elseif ($fm['description'].Length -gt $maxDescription) { $Findings.Add('frontmatter-present', $rel, "description is $($fm['description'].Length) characters, limit $maxDescription - shorten it to one scannable line") }
         $hasRoutes = [bool]$fm['applies_to']
-        if ((On 'doc-reachable') -and -not ($hasRoutes -xor ($fm['background'] -match '^(true|yes)$'))) {
-            Add-Finding 'doc-reachable' $rel "Needs either 'applies_to' globs or 'background: true', not both and not neither"
+        if (-not ($hasRoutes -xor ($fm['background'] -match '^(true|yes)$'))) { $Findings.Add('doc-reachable', $rel, "Needs either 'applies_to' globs or 'background: true', not both and not neither") }
+        if ($content.Length -gt $maxCharacters) {
+            $Findings.Add('doc-size', $rel, "$($content.Length) characters (limit $maxCharacters) - loaded whole whenever this doc is routed. Trim it; split only if it covers more than one topic; or raise the limit in .agent-docs.json")
         }
-        $maxC = Opt 'doc-size' 'maxCharacters'
-        if ((On 'doc-size') -and $content.Length -gt $maxC) {
-            Add-Finding 'doc-size' $rel "$($content.Length) characters (limit $maxC) - loaded whole whenever this doc is routed. Trim it; split only if it covers more than one topic; or raise the limit in .agent-docs.json"
-        }
-        if ($hasRoutes) { $routes.Add([ordered]@{ file = $rel; globs = (Split-GlobList $fm['applies_to']); description = [string]$fm['description'] }) }
+        if ($hasRoutes) { $routes.Add([ordered]@{ file = $rel; globs = (Split-GlobList -Value $fm['applies_to']); description = [string]$fm['description'] }) }
     }
-    $maxDocs = Opt 'docs-count' 'max'
-    if ((On 'docs-count') -and $routes.Count -gt $maxDocs) { Add-Finding 'docs-count' 'docs/' "$($routes.Count) routed docs (limit $maxDocs) - the routing table needs grouping" }
+    $maxDocs = $Rules.Option('docs-count', 'max')
+    if ($routes.Count -gt $maxDocs) { $Findings.Add('docs-count', 'docs/', "$($routes.Count) routed docs (limit $maxDocs) - the routing table needs grouping") }
+    return , $routes
+}
 
-    # --------------------------------------------------------------- integrity
-    # Integrity rules see every Markdown file an agent might read, dotfolders included,
-    # minus scan.ignore from the built-in ruleset. Structural rules stay on the routed set.
-    $integrityFiles = @()
-    if ((On 'no-invisible-characters') -or (On 'link-hosts')) {
-        $ignore = @($config['scan']['ignore'])
-        $integrityFiles = @(Get-ChildItem -LiteralPath $repo -Recurse -Force -File -Filter '*.md' -ErrorAction SilentlyContinue |
-            Where-Object { $relDir = [System.IO.Path]::GetRelativePath($repo, $_.DirectoryName); -not ($relDir -split '[\\/]' | Where-Object { $ignore -contains $_ }) } | Sort-Object FullName)
+function Get-Frontmatter {
+    # 'key: value' lines between the two '---' fences. Quotes and [ ] around a value are
+    # dropped; other YAML shapes are not supported and read as missing.
+    param([string]$Content)
+    $map = @{}
+    $lines = @($Content -split "`n")
+    if ($lines.Count -lt 2 -or $lines[0].Trim() -ne '---') { return $map }
+    for ($i = 1; $i -lt $lines.Count -and $lines[$i].Trim() -ne '---'; $i++) {
+        if ($lines[$i] -match '^([A-Za-z_][\w-]*)\s*:\s*(.*)$') { $map[$Matches[1]] = $Matches[2].Trim() -replace '^\[(.*)\]$', '$1' -replace '^(["''])(.*)\1$', '$2' }
     }
+    if ($i -ge $lines.Count) { return @{} }   # no closing fence: not frontmatter
+    return $map
+}
+
+function Split-GlobList {
+    # Commas separate globs, except inside a {a,b} alternation.
+    param([string]$Value)
+    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+# ------------------------------------------------------------------- integrity
+function Test-InvisibleCharacter {
+    # Every Markdown file an agent might read, dotfolders included, minus scan.ignore from the
+    # built-in ruleset - not only the routed set the structural rules look at.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    if (-not $Rules.IsOn('no-invisible-characters')) { return }
     # Unicode Tag characters, zero-width and format characters, and bidirectional overrides:
     # visible to a model, not to a reviewer. U+200D is reported only outside an emoji sequence.
     $invisible = [ordered]@{
@@ -322,226 +393,282 @@ function Test-OctoAgentDocs {
         'stray zero-width joiner' = '(?<![\p{So}\uFE0F\uDC00-\uDFFF])\u200D|\u200D(?![\p{So}\uFE0F\uD800-\uDBFF])'
         'bidirectional override'  = '[\u202A-\u202E\u2066-\u2069]'
     }
-    $allowed = @(Opt 'link-hosts' 'allow')
-    $ignoreLocal = [bool](Opt 'link-hosts' 'ignoreLocal')
-    foreach ($f in $integrityFiles) {
-        $content = Get-Text $f.FullName
-        $rel = [System.IO.Path]::GetRelativePath($repo, $f.FullName).Replace('\', '/')
-        if (On 'no-invisible-characters') {
-            foreach ($kind in $invisible.Keys) {
-                $hits = [regex]::Matches($content, $invisible[$kind])
-                if ($hits.Count -gt 0) { Add-Finding 'no-invisible-characters' "${rel}:$(($content.Substring(0, $hits[0].Index) -split "`n").Count)" "$($hits.Count) $kind(s) - invisible to a reviewer, not to a model. Remove them" }
-            }
-        }
-        if (On 'link-hosts') {
-            $seen = @{}
-            # The authority ends at '/', '?', '#' or '\' (a browser reads '\' as '/'), so none
-            # of them can make an allowlisted name after '@' look like the host.
-            foreach ($m in [regex]::Matches($content, '(?i)\bhttps?://([^/?#\\\s<>)"''`\]\[]+)')) {
-                $linkHost = (($m.Groups[1].Value -split '@')[-1] -split ':')[0].ToLowerInvariant().TrimEnd('.', ',')
-                if (-not $linkHost -or $seen.ContainsKey($linkHost)) { continue }
-                $seen[$linkHost] = $true
-                $local = -not $linkHost.Contains('.') -or $linkHost -match '\.(local|localhost|internal|invalid)$' -or $linkHost -match '^(127|10|169\.254|192\.168|172\.(1[6-9]|2\d|3[01]))\.\d'
-                if ($ignoreLocal -and $local) { continue }
-                if (-not ($allowed | Where-Object { $linkHost -eq $_ -or $linkHost.EndsWith(".$_", [System.StringComparison]::OrdinalIgnoreCase) })) { Add-Finding 'link-hosts' $rel "Link to '$linkHost' is not on the allowlist" }
-            }
+    $ignore = @($Rules.Config['scan']['ignore'])
+    $files = Get-ChildItem -LiteralPath $Repo.Root -Recurse -Force -File -Filter '*.md' -ErrorAction SilentlyContinue |
+        Where-Object { -not ($Repo.Relative($_.DirectoryName) -split '/' | Where-Object { $ignore -contains $_ }) } | Sort-Object FullName
+    foreach ($f in $files) {
+        $content = $Repo.ReadText($f.FullName)
+        foreach ($kind in $invisible.Keys) {
+            $hits = [regex]::Matches($content, $invisible[$kind])
+            if ($hits.Count -eq 0) { continue }
+            $line = ($content.Substring(0, $hits[0].Index) -split "`n").Count
+            $Findings.Add('no-invisible-characters', "$($Repo.Relative($f.FullName)):$line", "$($hits.Count) $kind(s) - invisible to a reviewer, not to a model. Remove them")
         }
     }
+}
 
-    # -------------------------------------------- references, line length (routed set)
-    $checkFiles = @()
-    if ($entryPath) { $checkFiles += $entryPath }
-    $readme = $rootNames | Where-Object { $_ -ieq 'README.md' } | Select-Object -First 1
-    if ($readme) { $checkFiles += Join-Path $repo $readme }
-    $checkFiles += @($docs | ForEach-Object { $_.FullName })
-    $siblingPattern = Opt 'reference-resolves' 'siblingRepoPattern'
-    $siblingRoot = if ($Global:ROOTPATH) { $Global:ROOTPATH } else { Split-Path -Parent $repo }
-    $anchorCache = @{}
-    function Get-ShimAdvice { param([string]$Ref) "points at a shim - reference '$($Ref -replace 'CLAUDE\.md$', 'AGENTS.md')' instead, since an agent reading the shim gets only '@AGENTS.md'" }
-    function Test-Reference {
-        # One resolver for links and backtick paths: exists, exact case, shim, anchor.
-        param([string]$Rel, [string]$Source, [string]$Target, [string]$Kind)
-        $parts = $Target -split '#', 2
-        $filePart = $parts[0]
-        $anchor = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-        $resolved = if (-not $filePart) { $Source } elseif ($filePart.StartsWith('/')) { Join-Path $repo $filePart.TrimStart('/') } else { Join-Path (Split-Path -Parent $Source) $filePart }
-        if (-not (Test-Path -LiteralPath $resolved)) { Add-Finding 'reference-resolves' $Rel "$Kind not found: $Target"; return }
-        $relToRepo = [System.IO.Path]::GetRelativePath($repo, [System.IO.Path]::GetFullPath($resolved))
-        if ($filePart -and -not $relToRepo.StartsWith('..') -and -not (Test-PathExact $repo $relToRepo)) { Add-Finding 'reference-resolves' $Rel "$Kind differs in case from the file on disk: $Target"; return }
-        if ($filePart -and (Test-PointsAtShim $resolved)) { Add-Finding 'reference-to-shim' $Rel "$Kind $(Get-ShimAdvice $filePart)" }
-        if ($anchor -and $resolved -like '*.md') {
-            $full = (Resolve-Path -LiteralPath $resolved).Path
-            if (-not $anchorCache.ContainsKey($full)) { $anchorCache[$full] = Get-Anchors (ConvertTo-OctoAgentDocsProse (Get-Text $full)) }
-            if (-not $anchorCache[$full].Contains($anchor)) { Add-Finding 'reference-resolves' $Rel "Anchor not found: $Target" }
-        }
-    }
+# ------------------------------------------------------------------ references
+function Test-ReferenceSet {
+    # Links and backtick paths in the entry point, the README and docs/*.md.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the octo-tools profile contract')]
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    if (-not $Rules.IsOn('reference-resolves') -and -not $Rules.IsOn('reference-to-shim')) { return }
+    $readme = $Repo.RootNames | Where-Object { $_ -ieq 'README.md' } | Select-Object -First 1
+    $files = @($Repo.EntryPath, $(if ($readme) { Join-Path $Repo.Root $readme })) + @($Repo.Docs.FullName) | Where-Object { $_ }
+    $siblingPattern = $Rules.Option('reference-resolves', 'siblingRepoPattern')
+    $siblingRoot = if ($Global:ROOTPATH) { $Global:ROOTPATH } else { Split-Path -Parent $Repo.Root }
     $startMarker = Get-OctoAgentDocsConstant RoutingStart
     $endMarker = Get-OctoAgentDocsConstant RoutingEnd
-    foreach ($f in $checkFiles) {
-        $content = Get-Text $f
-        $rel = [System.IO.Path]::GetRelativePath($repo, $f).Replace('\', '/')
-        $prose = ConvertTo-OctoAgentDocsProse $content
-        if ($f -eq $entryPath) {
+    $anchors = @{}
+    foreach ($f in $files) {
+        $source = @{ Repo = $Repo; Findings = $Findings; Anchors = $anchors; Rel = $Repo.Relative($f) }
+        $prose = ConvertTo-OctoAgentDocsProse $Repo.ReadText($f)
+        if ($f -eq $Repo.EntryPath) {
             # The generated table is derived, not written: a stale row naming a doc that is
             # gone is fixed by -Fix, not by a reference finding that would outlive the fix.
             $si = Find-OctoAgentDocsMarker -Text $prose -Marker $startMarker
             $ei = Find-OctoAgentDocsMarker -Text $prose -Marker $endMarker
             if ($si -ge 0 -and $ei -gt $si) { $prose = $prose.Substring(0, $si) + $prose.Substring($ei) }
         }
-        if ((On 'reference-resolves') -or (On 'reference-to-shim')) {
-            # Inline links, with code spans removed first: `[label](path.md)` is quoted syntax.
-            foreach ($m in [regex]::Matches(($prose -replace '`[^`\n]*`', ''), '\]\(\s*<?([^)\s>]+)>?')) {
-                $target = [System.Uri]::UnescapeDataString($m.Groups[1].Value)
-                if ($target -match '^([A-Za-z][A-Za-z0-9+.-]*:|//)') { continue }   # URL
-                Test-Reference $rel $f $target 'Link target'
+        # Inline links, with code spans removed first: `[label](path.md)` is quoted syntax.
+        foreach ($m in [regex]::Matches(($prose -replace '`[^`\n]*`', ''), '\]\(\s*<?([^)\s>]+)>?')) {
+            $target = [System.Uri]::UnescapeDataString($m.Groups[1].Value)
+            if ($target -match '^([A-Za-z][A-Za-z0-9+.-]*:|//)') { continue }   # URL
+            Test-ReferenceTarget @source -From $f -Target $target -Kind 'Link target'
+        }
+        # Paths in backticks: `docs/topic.md`. A bare `CLAUDE.md` means this repository's own.
+        foreach ($m in [regex]::Matches($prose, '`([^`\s]+\.md)`')) {
+            $ref = $m.Groups[1].Value
+            $shimPath = $null
+            if ($ref -ceq 'CLAUDE.md') { $shimPath = $Repo.ClaudePath }
+            elseif ($ref -notmatch '/' -or $ref -match '^(\.\.|~|/|[A-Za-z]:)' -or $ref -match '[*?\[{<>]') { continue }   # a phrase, an outside path, or a pattern
+            elseif ($siblingPattern -and $ref -match $siblingPattern) { $shimPath = Join-Path $siblingRoot $ref }
+            if ($shimPath) {
+                if ($Repo.PointsAtShim($shimPath)) { $Findings.Add('reference-to-shim', $source.Rel, "``$ref`` $(Get-ShimAdvice -Reference $ref)") }
+                continue
             }
-            # Paths in backticks: `docs/topic.md`. A bare `CLAUDE.md` means this repository's own.
-            foreach ($m in [regex]::Matches($prose, '`([^`\s]+\.md)`')) {
-                $ref = $m.Groups[1].Value
-                if ($ref -ceq 'CLAUDE.md') { if (Test-PointsAtShim $claudePath) { Add-Finding 'reference-to-shim' $rel "``CLAUDE.md`` $(Get-ShimAdvice $ref)" }; continue }
-                if ($ref -notmatch '/' -or $ref -match '^(\.\.|~|/|[A-Za-z]:)' -or $ref -match '[*?\[{<>]') { continue }   # a phrase, an outside path, or a pattern
-                if ($siblingPattern -and $ref -match $siblingPattern) {
-                    if (Test-PointsAtShim (Join-Path $siblingRoot $ref)) { Add-Finding 'reference-to-shim' $rel "``$ref`` $(Get-ShimAdvice $ref)" }
-                    continue
-                }
-                Test-Reference $rel $agentsPath $ref 'Referenced file'
-            }
+            Test-ReferenceTarget @source -From $Repo.AgentsPath -Target $ref -Kind 'Referenced file'
         }
     }
+}
 
-    # --------------------------------------------- entry point: budgets, sections, routing
-    if ($entryPath) {
-        $entry = Get-Text $entryPath
-        if (On 'required-sections') {
-            # Level-2 headings outside fenced code, matched without regard to case. Nothing is
-            # ever filled in: a missing section is reported, not written.
-            $headings = @([regex]::Matches((ConvertTo-OctoAgentDocsProse $entry), '(?m)^##[ \t]+(.*?)[ \t]*$') | ForEach-Object { $_.Groups[1].Value })
-            $missing = @(foreach ($want in @(Opt 'required-sections' 'sections')) { if ($headings -notcontains $want) { "'## $want'" } })
-            if ($missing.Count -eq 1) { Add-Finding 'required-sections' $entryName "Missing section $($missing[0]) - every repo's entry point carries it" }
-            elseif ($missing.Count -gt 1) { Add-Finding 'required-sections' $entryName "Missing sections $($missing -join ', ') - every repo's entry point carries them" }
-        }
-        if (On 'routing-current') {
-            $withDesc = [bool](Opt 'routing-current' 'includeDescriptions')
-            $table = if ($withDesc) { @('| When you change | Read first | What it covers |', '|---|---|---|') } else { @('| When you change | Read first |', '|---|---|') }
-            foreach ($r in $routes) {
-                $globs = @($r.globs | ForEach-Object { "``$_``" }) -join ', '
-                $table += if ($withDesc) { "| $globs | ``$($r.file)`` | $($r.description -replace '\|', '\|') |" } else { "| $globs | ``$($r.file)`` |" }
-            }
-            $generated = $table -join "`n"
-            $si = Find-OctoAgentDocsMarker -Text $entry -Marker $startMarker
-            $ei = Find-OctoAgentDocsMarker -Text $entry -Marker $endMarker
-            if ($si -lt 0 -or $ei -lt $si) { Add-Finding 'routing-current' $entryName "Add $startMarker and $endMarker around the routing table" }
-            elseif ($entry.Substring($si + $startMarker.Length, $ei - $si - $startMarker.Length) -cne "`n$generated`n") {
-                if ($Fix -and $PSCmdlet.ShouldProcess($entryName, 'Regenerate the routing table')) {
-                    # Spliced into the raw text with the file's own line endings.
-                    $raw = [System.IO.File]::ReadAllText($entryPath)
-                    $eol = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
-                    $rsi = Find-OctoAgentDocsMarker -Text $raw -Marker $startMarker; $rei = Find-OctoAgentDocsMarker -Text $raw -Marker $endMarker
-                    $newRaw = $raw.Substring(0, $rsi + $startMarker.Length) + $eol + ($generated -replace "`n", $eol) + $eol + $raw.Substring($rei)
-                    Write-OctoAgentDocsText $entryPath $newRaw
-                    $written.Add($entryName)
-                    $textCache[$entryPath] = $newRaw.Replace("`r`n", "`n")
-                }
-                elseif ($Fix) { Add-Finding 'routing-current' $entryName 'Generated routing table would be rewritten (run without -WhatIf)' }
-                else { Add-Finding 'routing-current' $entryName 'Generated routing table is out of date (run with -Fix)' }
-            }
-        }
-
-        # Budgets are measured on the text left behind, so a -Fix run and the next run agree.
-        $entry = Get-Text $entryPath
-        $entryLines = (Get-Lines $entry).Count
-        $maxL = Opt 'entry-point-lines' 'max'
-        if ((On 'entry-point-lines') -and $entryLines -gt $maxL) { Add-Finding 'entry-point-lines' $entryName "$entryLines lines over the budget of $maxL - this file loads in every session. Move detail into docs/ and route it with applies_to" }
-        $maxC = Opt 'entry-point-characters' 'max'; $warnAt = Opt 'entry-point-characters' 'warnAt'
-        if (On 'entry-point-characters') {
-            if ($entry.Length -gt $maxC) { Add-Finding 'entry-point-characters' $entryName "$($entry.Length) characters over the budget of $maxC - move detail into docs/, or shorten the longest lines" }
-            elseif ($warnAt -gt 0 -and $entry.Length -gt $warnAt) { Add-Finding 'entry-point-characters' $entryName "$($entry.Length) characters, past the $warnAt target but under the $maxC limit - worth trimming before it grows" 'warn' }
-        }
-        if (On 'line-length') {
-            $maxLine = Opt 'line-length' 'max'; $maxTable = Opt 'line-length' 'tables'; $cap = Opt 'line-length' 'maxReported'
-            $lines = Get-Lines (ConvertTo-OctoAgentDocsProse $entry -KeepLineNumbers)
-            $hits = 0
-            for ($i = 0; $i -lt $lines.Count; $i++) {
-                $line = $lines[$i]
-                $isTable = $line.TrimStart().StartsWith('|')
-                $limit = if ($isTable) { $maxTable } else { $maxLine }
-                # A line without any whitespace (a URL, a hash) cannot be wrapped and is exempt.
-                if ($line.Length -le $limit -or $line -match '^\s*(```|~~~)' -or $line.Trim() -notmatch '\s') { continue }
-                $hits++
-                if ($hits -le $cap) { Add-Finding 'line-length' "${entryName}:$($i + 1)" "$(if ($isTable) { "table row is $($line.Length) characters, limit $limit - shorten the globs or the description in the doc's frontmatter" } else { "line is $($line.Length) characters, limit $limit" })" }
-            }
-            if ($hits -gt $cap) { Add-Finding 'line-length' $entryName "$($hits - $cap) further over-length lines not listed" }
-        }
+function Test-ReferenceTarget {
+    # One resolver for links and backtick paths: exists, exact case, shim, anchor.
+    param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [hashtable]$Anchors, [string]$Rel, [string]$From, [string]$Target, [string]$Kind)
+    $filePart, $anchor = $Target -split '#', 2
+    $resolved = if (-not $filePart) { $From } elseif ($filePart.StartsWith('/')) { Join-Path $Repo.Root $filePart.TrimStart('/') } else { Join-Path (Split-Path -Parent $From) $filePart }
+    if (-not (Test-Path -LiteralPath $resolved)) { $Findings.Add('reference-resolves', $Rel, "$Kind not found: $Target"); return }
+    $relToRepo = [System.IO.Path]::GetRelativePath($Repo.Root, [System.IO.Path]::GetFullPath($resolved))
+    if ($filePart -and -not $relToRepo.StartsWith('..') -and -not $Repo.ExistsExactCase($relToRepo)) { $Findings.Add('reference-resolves', $Rel, "$Kind differs in case from the file on disk: $Target"); return }
+    if ($filePart -and $Repo.PointsAtShim($resolved)) { $Findings.Add('reference-to-shim', $Rel, "$Kind $(Get-ShimAdvice -Reference $filePart)") }
+    if ($anchor -and $resolved -like '*.md') {
+        $full = (Resolve-Path -LiteralPath $resolved).Path
+        if (-not $Anchors.ContainsKey($full)) { $Anchors[$full] = Get-HeadingAnchor -Prose (ConvertTo-OctoAgentDocsProse $Repo.ReadText($full)) }
+        if (-not $Anchors[$full].Contains($anchor)) { $Findings.Add('reference-resolves', $Rel, "Anchor not found: $Target") }
     }
+}
 
-    # ------------------------------------------------------------------ output
-    $errors = @($findings | Where-Object { $_.severity -eq 'error' })
-    $warnings = @($findings | Where-Object { $_.severity -eq 'warn' })
-    $fired = @($findings.rule | Sort-Object -Unique)
+function Get-ShimAdvice {
+    param([string]$Reference)
+    return "points at a shim - reference '$($Reference -replace 'CLAUDE\.md$', 'AGENTS.md')' instead, since an agent reading the shim gets only '@AGENTS.md'"
+}
+
+function Get-HeadingAnchor {
+    # GitHub-style slugs of the ATX headings: lower case, punctuation dropped, spaces to
+    # hyphens, repeated headings suffixed -1, -2. Compared without regard to case, which
+    # is how github.com and VS Code resolve a fragment.
+    param([string]$Prose)
+    $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $seen = @{}
+    foreach ($m in [regex]::Matches($Prose, '(?m)^#{1,6}[ \t]+(.*?)[ \t]*$')) {
+        $a = [regex]::Replace($m.Groups[1].Value, '\[([^\]]*)\]\([^)]*\)', '$1').ToLowerInvariant() -replace '[^\p{L}\p{N}\p{M} _-]', '' -replace ' ', '-'
+        if ($seen.ContainsKey($a)) { $seen[$a]++; [void]$set.Add("$a-$($seen[$a])") } else { $seen[$a] = 0; [void]$set.Add($a) }
+    }
+    return , $set
+}
+
+# ----------------------------------------------------------------- entry point
+function Test-RequiredSection {
+    # Level-2 headings outside fenced code, matched without regard to case. Nothing is ever
+    # filled in: a missing section is reported, not written.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    $headings = @([regex]::Matches((ConvertTo-OctoAgentDocsProse $Repo.ReadText($Repo.EntryPath)), '(?m)^##[ \t]+(.*?)[ \t]*$') | ForEach-Object { $_.Groups[1].Value })
+    $missing = @(foreach ($want in @($Rules.Option('required-sections', 'sections'))) { if ($headings -notcontains $want) { "'## $want'" } })
+    if ($missing.Count -eq 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing section $($missing[0]) - every repo's entry point carries it") }
+    elseif ($missing.Count -gt 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing sections $($missing -join ', ') - every repo's entry point carries them") }
+}
+
+function Test-RoutingTable {
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [object[]]$Route, [switch]$Fix)
+    if (-not $Rules.IsOn('routing-current')) { return }
+    $generated = Format-RoutingTable -Route $Route -WithDescription ([bool]$Rules.Option('routing-current', 'includeDescriptions'))
+    $startMarker = Get-OctoAgentDocsConstant RoutingStart
+    $endMarker = Get-OctoAgentDocsConstant RoutingEnd
+    $entry = $Repo.ReadText($Repo.EntryPath)
+    $si = Find-OctoAgentDocsMarker -Text $entry -Marker $startMarker
+    $ei = Find-OctoAgentDocsMarker -Text $entry -Marker $endMarker
+    if ($si -lt 0 -or $ei -lt $si) { $Findings.Add('routing-current', $Repo.EntryName, "Add $startMarker and $endMarker around the routing table"); return }
+    if ($entry.Substring($si + $startMarker.Length, $ei - $si - $startMarker.Length) -ceq "`n$generated`n") { return }
+    if (-not $Fix) { $Findings.Add('routing-current', $Repo.EntryName, 'Generated routing table is out of date (run with -Fix)') }
+    elseif (-not (Update-RoutingTable -Repo $Repo -Table $generated)) { $Findings.Add('routing-current', $Repo.EntryName, 'Generated routing table would be rewritten (run without -WhatIf)') }
+}
+
+function Format-RoutingTable {
+    param([object[]]$Route, [bool]$WithDescription)
+    $table = if ($WithDescription) { @('| When you change | Read first | What it covers |', '|---|---|---|') } else { @('| When you change | Read first |', '|---|---|') }
+    foreach ($r in $Route) {
+        $globs = @($r.globs | ForEach-Object { "``$_``" }) -join ', '
+        $table += if ($WithDescription) { "| $globs | ``$($r.file)`` | $($r.description -replace '\|', '\|') |" } else { "| $globs | ``$($r.file)`` |" }
+    }
+    return $table -join "`n"
+}
+
+function Update-RoutingTable {
+    # Splices the table into the raw text, keeping the file's own line endings. True when
+    # written; false when -WhatIf or the user declined.
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    [OutputType([bool])]
+    param([AgentDocsRepository]$Repo, [string]$Table)
+    if (-not $PSCmdlet.ShouldProcess($Repo.EntryName, 'Regenerate the routing table')) { return $false }
+    $startMarker = Get-OctoAgentDocsConstant RoutingStart
+    $raw = [System.IO.File]::ReadAllText($Repo.EntryPath)
+    $eol = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $si = Find-OctoAgentDocsMarker -Text $raw -Marker $startMarker
+    $ei = Find-OctoAgentDocsMarker -Text $raw -Marker (Get-OctoAgentDocsConstant RoutingEnd)
+    $Repo.Write($Repo.EntryPath, $raw.Substring(0, $si + $startMarker.Length) + $eol + ($Table -replace "`n", $eol) + $eol + $raw.Substring($ei))
+    return $true
+}
+
+function Test-EntryBudget {
+    # Measured on the text -Fix leaves behind, so a -Fix run and the next run agree.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    $entry = $Repo.ReadText($Repo.EntryPath)
+    $name = $Repo.EntryName
+    $lineCount = (Get-TextLine -Content $entry).Count
+    $maxLines = $Rules.Option('entry-point-lines', 'max')
+    if ($lineCount -gt $maxLines) { $Findings.Add('entry-point-lines', $name, "$lineCount lines over the budget of $maxLines - this file loads in every session. Move detail into docs/ and route it with applies_to") }
+    $maxCharacters = $Rules.Option('entry-point-characters', 'max')
+    $warnAt = $Rules.Option('entry-point-characters', 'warnAt')
+    if ($entry.Length -gt $maxCharacters) { $Findings.Add('entry-point-characters', $name, "$($entry.Length) characters over the budget of $maxCharacters - move detail into docs/, or shorten the longest lines") }
+    elseif ($Rules.IsOn('entry-point-characters') -and $warnAt -gt 0 -and $entry.Length -gt $warnAt) {
+        $Findings.Add('entry-point-characters', $name, "$($entry.Length) characters, past the $warnAt target but under the $maxCharacters limit - worth trimming before it grows", 'warn')
+    }
+    if (-not $Rules.IsOn('line-length')) { return }
+    $maxLine = $Rules.Option('line-length', 'max')
+    $maxTable = $Rules.Option('line-length', 'tables')
+    $cap = $Rules.Option('line-length', 'maxReported')
+    $lines = Get-TextLine -Content (ConvertTo-OctoAgentDocsProse $entry -KeepLineNumbers)
+    $hits = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $isTable = $line.TrimStart().StartsWith('|')
+        $limit = if ($isTable) { $maxTable } else { $maxLine }
+        # A line without any whitespace (a URL, a hash) cannot be wrapped and is exempt.
+        if ($line.Length -le $limit -or $line -match '^\s*(```|~~~)' -or $line.Trim() -notmatch '\s') { continue }
+        $hits++
+        if ($hits -gt $cap) { continue }
+        $what = if ($isTable) { "table row is $($line.Length) characters, limit $limit - shorten the globs or the description in the doc's frontmatter" } else { "line is $($line.Length) characters, limit $limit" }
+        $Findings.Add('line-length', "${name}:$($i + 1)", $what)
+    }
+    if ($hits -gt $cap) { $Findings.Add('line-length', $name, "$($hits - $cap) further over-length lines not listed") }
+}
+
+function Get-TextLine {
+    # Lines as wc -l counts them: a trailing newline does not add a line.
+    param([string]$Content)
+    if (-not $Content) { return , @() }
+    return , @(($Content.TrimEnd("`n")) -split "`n")
+}
+
+# ---------------------------------------------------------------------- output
+function Get-StartHere {
     # Where to start: the cause behind most of the findings, at most two sentences.
+    param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [string]$PathArgument)
+    $fired = @($Findings.Items.rule | Sort-Object -Unique)
     $causes = @()
-    $pathArg = Format-OctoAgentDocsArgument -Value $Path
     if ($fired -contains 'no-invisible-characters') { $causes += 'a file carries characters a reviewer cannot see. Remove them before anything else.' }
     if ($fired -contains 'migration-pending') { $causes += 'the migration brief is still present - follow its steps and delete it in the migration commit.' }
-    elseif (-not $hasAgents -and $hasClaude -and ($fired | Where-Object { $_ -in 'required-sections', 'entry-point-characters', 'entry-point-lines' })) { $causes += "this repository has not migrated to AGENTS.md, and the entry-point findings follow from that. Initialize-OctoAgentDocs -Path $pathArg writes the migration brief." }
-    elseif (-not $entryPath) { $causes += "this repository has no agent instructions yet. Initialize-OctoAgentDocs -Path $pathArg writes the entry point and the shim." }
-    if (-not $causes -and $findings.Count -gt 0 -and -not ($findings | Where-Object { $_.tier -lt 4 })) { $causes += 'only budgets are left. Move content into routed docs rather than trimming it in place.' }
-    $startHere = if ($causes.Count -eq 0) { $null } elseif ($causes.Count -eq 1) { $causes[0] } else { "$($causes[0]) After that: $($causes[1])" }
+    elseif (-not $Repo.HasAgents -and $Repo.HasClaude -and ($fired | Where-Object { $_ -in 'required-sections', 'entry-point-characters', 'entry-point-lines' })) { $causes += "this repository has not migrated to AGENTS.md, and the entry-point findings follow from that. Initialize-OctoAgentDocs -Path $PathArgument writes the migration brief." }
+    elseif (-not $Repo.EntryPath) { $causes += "this repository has no agent instructions yet. Initialize-OctoAgentDocs -Path $PathArgument writes the entry point and the shim." }
+    if (-not $causes -and $Findings.Items.Count -gt 0 -and -not ($Findings.Items | Where-Object { $_.tier -lt 4 })) { $causes += 'only budgets are left. Move content into routed docs rather than trimming it in place.' }
+    if ($causes.Count -eq 0) { return $null }
+    if ($causes.Count -eq 1) { return $causes[0] }
+    return "$($causes[0]) After that: $($causes[1])"
+}
 
-    if ($Json) {
-        Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{
-            repository   = $repoName
-            entryPoint   = $entryName
-            canonical    = if ($hasAgents) { 'AGENTS.md' } else { 'CLAUDE.md' }
-            shim         = $shimVerdict
-            mode         = $config.mode
-            filesWritten = @($written)
-            routes       = @($routes)
-            findings     = @($findings)
-            startHere    = $startHere
-            explanations = @(if ($Explain) { @(foreach ($id in $fired) { Get-RuleRow $id }) | Sort-Object -Stable { $_.tier }, { $_.rule } })
-            ruleSet      = $config.rules
-            summary      = [ordered]@{ errors = $errors.Count; warnings = $warnings.Count; success = ($errors.Count -eq 0) }
-        })
-    }
+function Write-FindingReport {
+    # By tier, errors before warnings, then by file; detection order within a file.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [int]$RouteCount, [string]$StartHere, [switch]$Explain, [switch]$Fix)
+    $items = $Findings.Items
+    Write-Host "Agent docs check: $($Repo.Name) (entry point: $($Repo.EntryName), mode: $($Rules.Mode()))" -ForegroundColor Yellow
+    if ($items.Count -eq 0) { Write-Host "  clean - $RouteCount routed doc$(if ($RouteCount -ne 1) { 's' })" -ForegroundColor Green }
     else {
-        Write-Host "Agent docs check: $repoName (entry point: $entryName, mode: $($config.mode))" -ForegroundColor Yellow
-        if ($findings.Count -eq 0) { Write-Host "  clean - $($routes.Count) routed doc$(if ($routes.Count -ne 1) { 's' })" -ForegroundColor Green }
-        else {
-            $fileCount = @($findings | ForEach-Object { ($_.file -split ':')[0] } | Where-Object { $_ } | Sort-Object -Unique).Count
-            Write-Host "  $($errors.Count) error(s), $($warnings.Count) warning(s) in $fileCount file(s)" -ForegroundColor Gray
-            if ($startHere) { Write-Host "  Start here: $startHere" -ForegroundColor Cyan }
-            # By tier, errors before warnings, then by file; detection order within a file.
-            foreach ($t in @($findings.tier | Sort-Object -Unique)) {
-                Write-Host ''
-                Write-Host "  $(Get-OctoAgentDocsTierHeading -Config $config -Tier $t)" -ForegroundColor White
-                $group = @($findings | Where-Object { $_.tier -eq $t } | Sort-Object -Stable { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })
-                $width = ($group.rule | Measure-Object -Maximum -Property Length).Maximum
-                foreach ($x in $group) {
-                    $colour = if ($x.severity -eq 'error') { 'Red' } else { 'DarkYellow' }
-                    Write-Host "     [$($x.severity)]".PadRight(13) -ForegroundColor $colour -NoNewline
-                    Write-Host $x.rule.PadRight($width + 2) -ForegroundColor Cyan -NoNewline
-                    Write-Host "$(if ($x.file) { "$($x.file): " })$($x.message)" -ForegroundColor $colour
-                }
-                if ($Explain) { foreach ($id in @($group.rule | Sort-Object -Unique)) { Write-RuleRow (Get-RuleRow $id) } }
-            }
+        $fileCount = @($items | ForEach-Object { ($_.file -split ':')[0] } | Where-Object { $_ } | Sort-Object -Unique).Count
+        Write-Host "  $($Findings.WithSeverity('error').Count) error(s), $($Findings.WithSeverity('warn').Count) warning(s) in $fileCount file(s)" -ForegroundColor Gray
+        if ($StartHere) { Write-Host "  Start here: $StartHere" -ForegroundColor Cyan }
+        foreach ($t in @($items.tier | Sort-Object -Unique)) {
             Write-Host ''
+            Write-Host "  $(Get-OctoAgentDocsTierHeading -Config $Rules.Config -Tier $t)" -ForegroundColor White
+            $group = @($items | Where-Object { $_.tier -eq $t } | Sort-Object -Stable { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })
+            $width = ($group.rule | Measure-Object -Maximum -Property Length).Maximum
+            foreach ($x in $group) {
+                $colour = if ($x.severity -eq 'error') { 'Red' } else { 'DarkYellow' }
+                Write-Host "     [$($x.severity)]".PadRight(13) -ForegroundColor $colour -NoNewline
+                Write-Host $x.rule.PadRight($width + 2) -ForegroundColor Cyan -NoNewline
+                Write-Host "$(if ($x.file) { "$($x.file): " })$($x.message)" -ForegroundColor $colour
+            }
+            if ($Explain) { foreach ($id in @($group.rule | Sort-Object -Unique)) { Write-RuleRow -Row (Get-RuleRow -Rules $Rules -Id $id) } }
         }
-        if ($written.Count -gt 0) { Write-Host "  rewrote $($written -join ', ')" -ForegroundColor Cyan }
-        elseif ($Fix -and -not $WhatIfPreference) { Write-Host '  nothing to rewrite' -ForegroundColor Cyan }
-        if ($findings.Count -eq 0) {
-            Write-Host '  0 error(s), 0 warning(s)' -ForegroundColor Gray
-            if ($Explain) { Write-Host '  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All' -ForegroundColor Gray }
-        }
-        elseif (-not $Explain) { Write-Host '  add -Explain for why and how to fix, or -Explain <rule> for one rule' -ForegroundColor Gray }
+        Write-Host ''
     }
+    if ($Repo.Written.Count -gt 0) { Write-Host "  rewrote $($Repo.Written -join ', ')" -ForegroundColor Cyan }
+    elseif ($Fix -and -not $WhatIfPreference) { Write-Host '  nothing to rewrite' -ForegroundColor Cyan }
+    if ($items.Count -eq 0) {
+        Write-Host '  0 error(s), 0 warning(s)' -ForegroundColor Gray
+        if ($Explain) { Write-Host '  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All' -ForegroundColor Gray }
+    }
+    elseif (-not $Explain) { Write-Host '  add -Explain for why and how to fix, or -Explain <rule> for one rule' -ForegroundColor Gray }
+}
 
-    # -Explain is a person asking why; the gate is for pipelines.
-    $global:LASTEXITCODE = 0
-    if ($config.mode -eq 'enforce' -and $errors.Count -gt 0 -and -not $Explain) {
-        $global:LASTEXITCODE = 1
-        throw "Test-OctoAgentDocs: $($errors.Count) error-severity finding(s) in $repoName"
+# --------------------------------------------------------------------- explain
+function Write-RuleReference {
+    # -Explain -All / -Rule: the rules with this repository's effective severity, nothing scanned.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
+    param([AgentDocsRuleSet]$Rules, [string[]]$Id, [string]$RepositoryName, [switch]$Json)
+    $unknown = @($Id | Where-Object { $script:RuleIds -notcontains $_ })
+    if ($unknown) { throw "Unknown rule(s): $($unknown -join ', '). Known: $($script:RuleIds -join ', ')" }
+    $rows = @(foreach ($i in $Id) { Get-RuleRow -Rules $Rules -Id $i })
+    if ($Json) { Write-OctoJson -Command 'Test-OctoAgentDocs' -Data ([ordered]@{ repository = $RepositoryName; mode = $Rules.Mode(); rules = $rows }); return }
+    Write-Host "Agent docs rules for $RepositoryName (mode: $($Rules.Mode())) - effective severity, in the order to fix them" -ForegroundColor Yellow
+    foreach ($t in @($rows.tier | Sort-Object -Unique)) {
+        Write-Host ''
+        Write-Host "  $(Get-OctoAgentDocsTierHeading -Config $Rules.Config -Tier $t)" -ForegroundColor White
+        foreach ($r in @($rows | Where-Object { $_.tier -eq $t })) { Write-RuleRow -Row $r }
     }
+    Write-Host ''
+    Write-Host '  Overrides: .agent-docs.json in the repository, then -ConfigPath, then -Mode. Non-relaxable rules can be raised there, never lowered.' -ForegroundColor Gray
+}
+
+function Get-RuleRow {
+    param([AgentDocsRuleSet]$Rules, [string]$Id)
+    $doc = $Rules.Config['ruleDocs'][$Id]
+    if ($doc -isnot [hashtable]) { $doc = @{} }
+    return [ordered]@{ rule = $Id; tier = $Rules.Tier($Id); severity = $Rules.Severity($Id); nonRelaxable = ($Rules.Floor -contains $Id); options = $Rules.Config.rules[$Id][1]; why = [string]$doc['why']; fix = [string]$doc['fix'] }
+}
+
+function Write-RuleRow {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
+    param($Row, [string]$Indent = '     ')
+    $colour = switch ($Row.severity) { 'error' { 'Red' } 'warn' { 'DarkYellow' } default { 'DarkGray' } }
+    $lock = if ($Row.nonRelaxable) { ' (non-relaxable)' } else { '' }
+    # Scalars inline, lists as a count; -Json has the full options.
+    $opts = @(foreach ($k in ($Row.options.Keys | Sort-Object)) { $v = $Row.options[$k]; if ($v -is [array]) { "$k=[$($v.Count)]" } else { "$k=$v" } }) -join ', '
+    Write-Host ''
+    Write-Host "${Indent}rule $($Row.rule)  [$($Row.severity)]$lock" -ForegroundColor $colour -NoNewline
+    if ($opts) { Write-Host "  $opts" -ForegroundColor DarkGray } else { Write-Host '' }
+    if ($Row.why) { Write-Host "$Indent  why: $($Row.why)" }
+    if ($Row.fix) { Write-Host "$Indent  fix: $($Row.fix)" }
 }
 
 Export-ModuleMember -Function @('Test-OctoAgentDocs')

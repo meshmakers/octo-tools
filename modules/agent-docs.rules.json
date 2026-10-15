@@ -1,5 +1,4 @@
 {
-  "$schema": "./agent-docs.rules.schema.json",
   "schemaVersion": 1,
   "mode": "logOnly",
   "nonRelaxable": [
@@ -101,20 +100,6 @@
       "error",
       {}
     ],
-    "link-hosts": [
-      "off",
-      {
-        "ignoreLocal": true,
-        "allow": [
-          "docs.claude.com",
-          "github.com",
-          "learn.microsoft.com",
-          "docs.meshmakers.cloud",
-          "kubernetes.io",
-          "sigs.k8s.io"
-        ]
-      }
-    ],
     "migration-pending": [
       "warn",
       {}
@@ -203,11 +188,6 @@
       "tier": 1,
       "why": "Unicode tag, zero-width and bidirectional override characters carry text a reviewer cannot see but a model reads.",
       "fix": "Delete the characters; if the file is generated, fix the generator."
-    },
-    "link-hosts": {
-      "tier": 1,
-      "why": "An agent follows links, so an external host outside the allowlist is a way to feed it text nobody reviewed.",
-      "fix": "Use an allowed host, or add the host to link-hosts.allow in .agent-docs.json with a reason."
     },
     "migration-pending": {
       "tier": 2,

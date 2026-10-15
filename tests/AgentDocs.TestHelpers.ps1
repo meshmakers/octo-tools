@@ -1,5 +1,8 @@
 # Dot-sourced by the agent-docs test files inside BeforeAll. Builds throw-away repositories
 # under the temp folder and reads the tools' output in both of its shapes.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test fixtures under the temp folder; -WhatIf has no meaning here')]
+param()
+
 Import-Module (Join-Path $PSScriptRoot '../modules/OctoJsonOutput.psm1')
 Import-Module (Join-Path $PSScriptRoot '../modules/OctoAgentDocs.Common.psm1')
 Import-Module (Join-Path $PSScriptRoot '../modules/Test-OctoAgentDocs.psm1')
@@ -47,7 +50,7 @@ function Get-Result {
     param([string]$Root, [hashtable]$Extra = @{})
     return ((Test-OctoAgentDocs -Path $Root -Json @Extra 3>$null 6>$null) | ConvertFrom-Json)
 }
-function Get-Rules { param($Result, [string]$Rule) @($Result.data.findings | Where-Object { $_.rule -eq $Rule }) }
+function Get-RuleFinding { param($Result, [string]$Rule) @($Result.data.findings | Where-Object { $_.rule -eq $Rule }) }
 function Get-Output {
     # The rendered lines of a command, host and warning streams included; -NoNewline host
     # records are joined into their line the way a console shows them.
@@ -60,4 +63,4 @@ function Get-Output {
     }
     return @($sb.ToString() -split "`n")
 }
-function Remove-Fixtures { foreach ($f in $script:Fixtures) { Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue } }
+function Remove-Fixture { foreach ($f in $script:Fixtures) { Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue } }
