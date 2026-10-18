@@ -20,6 +20,9 @@ function Test-HostPortOpen([string]$hostName, [int]$port) {
 function Get-OctoKubernetesStatus {
     param(
         [Parameter()] [string]$ClusterName = "kind",
+        # The S3 store check writes one small probe object (a COPY TO of a system table) and deletes it
+        # again; -SkipS3Probe keeps the whole status read-only.
+        [switch]$SkipS3Probe,
         [switch]$Json
     )
     $ctx = "kind-$ClusterName"
@@ -53,8 +56,14 @@ function Get-OctoKubernetesStatus {
         }
 
         $ports = @()
-        foreach ($p in @(@{n="mongodb";port=27017}, @{n="rabbitmq-amqp";port=5672}, @{n="rabbitmq-mgmt";port=15672}, @{n="cratedb-psql";port=5432}, @{n="cratedb-http";port=4301})) {
+        foreach ($p in @(@{n="mongodb";port=27017}, @{n="rabbitmq-amqp";port=5672}, @{n="rabbitmq-mgmt";port=15672}, @{n="cratedb-psql";port=5432}, @{n="cratedb-http";port=4301}, @{n="s3-store";port=8333})) {
             $ports += @{ name = $p.n; port = $p.port; open = [bool](Test-HostPortOpen "localhost" $p.port) }
+        }
+
+        $s3 = $null
+        & kubectl --context $ctx -n octo-infra get statefulset seaweedfs 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $s3 = (Test-OctoKubernetesS3Store -ClusterName $ClusterName -SkipCopyProbe:$SkipS3Probe -Json | ConvertFrom-Json).data
         }
 
         $data = [ordered]@{
@@ -62,6 +71,7 @@ function Get-OctoKubernetesStatus {
             pods          = $podsByNs
             helmReleases  = $helmReleases
             ports         = $ports
+            s3Store       = $s3
         }
         Write-OctoJson -Command 'Get-OctoKubernetesStatus' -Data $data
         return
@@ -77,9 +87,18 @@ function Get-OctoKubernetesStatus {
     & helm --kube-context $ctx list -A
 
     Write-Host "== Host port reachability ==" -ForegroundColor Cyan
-    foreach ($p in @(@{n="mongodb";port=27017}, @{n="rabbitmq-amqp";port=5672}, @{n="rabbitmq-mgmt";port=15672}, @{n="cratedb-psql";port=5432}, @{n="cratedb-http";port=4301})) {
+    foreach ($p in @(@{n="mongodb";port=27017}, @{n="rabbitmq-amqp";port=5672}, @{n="rabbitmq-mgmt";port=15672}, @{n="cratedb-psql";port=5432}, @{n="cratedb-http";port=4301}, @{n="s3-store";port=8333})) {
         $state = if (Test-HostPortOpen "localhost" $p.port) { "OPEN" } else { "closed" }
         Write-Host ("  {0,-16} localhost:{1,-6} {2}" -f $p.n, $p.port, $state)
+    }
+
+    & kubectl --context $ctx -n octo-infra get statefulset seaweedfs 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Test-OctoKubernetesS3Store -ClusterName $ClusterName -SkipCopyProbe:$SkipS3Probe | Out-Null
+    }
+    else {
+        Write-Host "== S3 store ==" -ForegroundColor Cyan
+        Write-Host "  not installed (Install-OctoKubernetesS3Store); the archive dump uses the row path" -ForegroundColor DarkGray
     }
 }
 

@@ -17,6 +17,7 @@ HOST (macOS / Windows)                       kind cluster "kind" (Docker)
 Start-Octo host processes (HTTPS):           ns octo-infra:
   identity 5003 · asset-repo 5001              mongodb (1-member RS "rs", keyFile)
   communication-controller 5015 · bot 5009     rabbitmq · cratedb (single-node)
+                                                 seaweedfs (local S3 store, archive COPY staging)
 Refinery Studio (ng serve 4200)              ns octo-operator-system:
 octo-cli                                       CRDs + communication-operator (central)
                                              ns octo:
@@ -80,6 +81,7 @@ octo-cli                                       CRDs + communication-operator (ce
 | MongoDB | `mongodb-0.mongodb.octo-infra.svc.cluster.local:27017` (RS `rs`) | `localhost:27017` |
 | RabbitMQ | `rabbitmq.octo-infra.svc.cluster.local:5672` | `localhost:5672` (AMQP) / `15672` (mgmt) |
 | CrateDB | `cratedb.octo-infra.svc.cluster.local` (psql 5432 / http 4200) | `localhost:5432` (psql) / `4301` (http UI) |
+| S3 store (SeaweedFS) | `seaweedfs.octo-infra:8333` (plain http) | `localhost:8333` |
 
 There is exactly **one** CrateDB — host-run services and in-cluster adapters share it. The host
 services connect as the built-in superuser `crate` (their compiled-in default), while deployed
@@ -90,6 +92,82 @@ after the CrateDB rollout (`Initialize-OctoKindCrateDbUser`: `CREATE USER "octo-
 password from `clusterSecrets.streamDataPassword` + `GRANT ALL PRIVILEGES`; an existing user is
 left untouched). On a cluster created before this step existed, run
 `Initialize-OctoKindCrateDbUser` once (or re-run `Install-OctoKubernetes`).
+
+### Local S3 store (archive COPY staging)
+
+The archive part of a tenant dump uses CrateDB `COPY TO` / `COPY FROM`, which address a location
+every CrateDB node and the bot can reach (concept:
+`octo-construction-kit-engine/docs/concept-tenant-backup-native-archive-dump.md`, §5 and §10).
+Locally that location is an S3-compatible store in `octo-infra`: **SeaweedFS** (`weed mini`, image
+`chrislusf/seaweedfs:4.48`; Garage is the second candidate and is not built). It is the same code
+path as on test-2 and prod-1, which use S3 as well.
+
+| | |
+|---|---|
+| Pod / volume | StatefulSet `seaweedfs`, PVC `data-seaweedfs-0` (20 Gi, `local-path`), manifest `infra/s3-store.yaml` |
+| Bucket | `octo-artifacts` (created at pod start) |
+| Endpoint for the bot (host process) | `http://localhost:8333` (kind mapping `30333` -> `8333`, or the relay container, see below) |
+| Endpoint for CrateDB (inside the cluster) | `http://seaweedfs.octo-infra:8333`; in a statement `s3://<key>:<secret>@seaweedfs.octo-infra:8333/octo-artifacts/<prefix>/` with `WITH (protocol = 'http')` |
+| Credential | generated once at install time into the Secret **`octo-infra/seaweedfs-s3`** (keys `accessKey`, `secretKey`, `s3.json`). It exists nowhere else: not in a repository, not in a file, never printed. Anonymous requests are refused. By hand: `kubectl -n octo-infra get secret seaweedfs-s3 -o jsonpath='{.data.accessKey}'` (base64). |
+
+`Install-OctoKubernetes` adds the store as the last infra step (`-SkipS3Store` leaves it out; without
+the store the stack behaves exactly as before and the archive dump stays on the row path). On a
+cluster that already exists, add it without touching anything else:
+
+```powershell
+Install-OctoKubernetesS3Store          # idempotent; additive: no restart, recreate or delete of anything existing
+Test-OctoKubernetesS3Store             # the check below
+```
+
+**Host port on an existing cluster.** kind cannot add a host port mapping to a running cluster.
+`kind-cluster.yaml` maps `8333` for clusters created from now on; on an older cluster
+`Install-OctoKubernetesS3Store` starts a small relay container, `octo-kind-s3-relay` (`alpine/socat`,
+`--restart unless-stopped`, bound to `127.0.0.1:8333`, on the docker network `kind`, labelled
+`octo-tools.cluster=<name>`) that forwards to the node port. It is not part of the cluster;
+`Uninstall-OctoKubernetes` removes it. Another cluster that maps the same host ports (`octomesh` of
+getting-started) cannot run at the same time, as for all other infra ports.
+
+**Job log filter.** CrateDB records every finished statement with its full text in `sys.jobs_log`,
+which for a `COPY` includes the S3 secret key. The persistent cluster setting
+`stats.jobs_log_filter = 'stmt NOT ILIKE ''copy %'''` keeps `COPY` statements out; every other
+statement is recorded as before. `Install-OctoKubernetesS3Store` sets it **before** the store is
+usable (`Set-OctoKubernetesCrateDbJobLogFilter`, also callable on its own). A value that is not the
+default is left untouched and reported. It is a cluster setting; no restart is needed.
+
+**Status check.** `Get-OctoKubernetesStatus` ends with the S3 section; `Test-OctoKubernetesS3Store`
+runs it alone (`-Json` for scripts, `-SkipCopyProbe` for the read-only variant). It reports, without
+printing a key:
+
+| Check | Passes when |
+|---|---|
+| `pod` | `seaweedfs-0` is ready |
+| `host` | the store answers on `localhost:8333`, refuses an anonymous request and lists the bucket with the credential |
+| `inCluster` | the CrateDB pod reaches `seaweedfs.octo-infra:8333` (TCP and HTTP answer) |
+| `jobLogFilter` | `stats.jobs_log_filter` is the expected filter |
+| `copy`, `objects`, `jobsLog` | a `COPY TO` of a three-row probe table (own schema `octo_tools_check`, dropped again) runs on the CrateDB node into the store under the cluster name, the objects are visible through the host port and are deleted again, and no `COPY` entry appears in `sys.jobs_log` while an ordinary `SELECT` does. The `COPY` with the real key only runs when the filter is active and a `COPY` with a canary key left no trace. |
+
+`Get-OctoKubernetesStatus -SkipS3Probe` keeps the whole status read-only (no probe table, no object).
+
+**Settings of the locally started bot.** `Start-Octo` calls `Set-OctoLocalS3StoreEnvironment` before
+the services start (`-s3Store $false` opts out): when the Secret exists and the store answers on the
+host port, the bot gets `OCTO_ARTIFACTSTORAGE__PROVIDER=S3`, `...__S3__SERVICEURL=http://localhost:8333`,
+`...__S3__BUCKET=octo-artifacts`, `...__S3__REGION`, `...__S3__FORCEPATHSTYLE=true`, the credential from
+the Secret (`...__S3__ACCESSKEYID`, `...__S3__SECRETACCESSKEY`) and the second endpoint
+`...__S3__CRATEDBSERVICEURL=http://seaweedfs.octo-infra:8333`, under which CrateDB reaches the same
+store. **With the S3 provider the bot keeps tenant dumps and restore uploads in the store instead of
+on its disk**, as on test-2 and prod-1. Without the store (or with `-s3Store $false`) the bot keeps its
+file system store.
+
+Memory: the pod has a 4 Gi limit (request 1 Gi). Reading a multi-GB object makes `weed mini` buffer in
+memory: a 5.5 GB read took the process from ~200 MiB to about 1.1 GiB and killed the former 1 Gi pod
+(OOMKilled). The manifest therefore sets `-s3.readerCacheSizeMB=256` (the default 0 leaves in-flight GET
+buffers unlimited) and `GOMEMLIMIT=2560MiB` (the Go heap otherwise keeps growing with every read). Measured
+with the 5.5 GB object read three times in a row: peak process memory 1.5 GiB, no restart. The pod's page
+cache also fills toward the limit while large objects are read; that is reclaimable and not a leak.
+
+Persistence: objects survive a restart of the store pod (PVC); they do not survive
+`Uninstall-OctoKubernetes`. The staged objects are working files of a dump or restore run, not a backup.
+Remove only the store (destructive for the staged objects): `Uninstall-OctoKubernetesS3Store`.
 
 ## Prerequisites
 
@@ -104,7 +182,7 @@ required — the dev-registry pre-flight uses `Test-Connection -TcpPort`, which 
 `octo-helm-core` must be checked out next to the other repos (it ships the CRDs + operator chart).
 
 > **Port collision with docker-compose infra.** The kind infra binds the *same* host ports
-> (27017/5672/15672/5432/4301) as the legacy `Start-OctoInfrastructure` docker-compose stack.
+> (27017/5672/15672/5432/4301/8333) as the legacy `Start-OctoInfrastructure` docker-compose stack.
 > They **cannot run at the same time.** `Install-OctoKubernetes` refuses to run while the
 > docker-compose containers (`mongo-0.mongo`, `rabbitmq`, `cratedb01`) are up — stop them first
 > with `Stop-OctoInfrastructure`.
@@ -244,10 +322,25 @@ Add-OctoLocalCaTrust            # idempotent; Remove-OctoLocalCaTrust removes it
 macOS adds it to the System keychain as a trusted root; Windows imports into
 `Cert:\LocalMachine\Root`; Linux uses `update-ca-certificates`.
 
+## Stop and start (data stays)
+
+`Stop-OctoInfrastructure` / `Start-OctoInfrastructure` only handle the docker-compose infra. To stop the
+kind infra without deleting it, stop the node container and start it again; the PVCs, the store objects
+and the persistent CrateDB settings (job log filter) survive:
+
+```powershell
+docker stop kind-control-plane
+docker start kind-control-plane     # then: kubectl --context kind-kind -n octo-infra wait --for=condition=Ready pod --all
+```
+
+The S3 store's host relay container (`octo-kind-s3-relay`, clusters created before the host port mapping)
+keeps running on its own (`--restart unless-stopped`); `Test-OctoKubernetesS3Store` shows whether
+everything is back.
+
 ## Teardown
 
 ```powershell
-Uninstall-OctoKubernetes      # deletes the kind cluster AND its data (Mongo/Crate PVCs)
+Uninstall-OctoKubernetes      # deletes the kind cluster AND its data (Mongo/Crate/S3 store PVCs)
 ```
 
 `Uninstall-OctoKubernetes` also removes the local root CA from the OS trust store (so no orphaned
@@ -298,6 +391,14 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
   "octo-system"`** — the CrateDB application user is missing (cluster created before the seeding
   step existed). Run `Initialize-OctoKindCrateDbUser` (idempotent), or re-run
   `Install-OctoKubernetes`. Host-run services are unaffected — they connect as `crate`.
+- **`Test-OctoKubernetesS3Store` fails on `host` although the pod is ready** — nothing listens on
+  `localhost:8333`: the relay container is stopped (`docker start octo-kind-s3-relay`, or re-run
+  `Install-OctoKubernetesS3Store`), or another process holds the port (`lsof -nP -iTCP:8333`).
+- **`jobLogFilter` fails** — `stats.jobs_log_filter` is not the expected filter. Run
+  `Set-OctoKubernetesCrateDbJobLogFilter`. Do not run a `COPY` with the S3 key until the check passes:
+  the key would be readable in `sys.jobs_log`.
+- **The bot does not use the store** — `Start-Octo` printed "Bot artifact store: file system": the Secret
+  `octo-infra/seaweedfs-s3` is missing or `localhost:8333` does not answer. Run `Test-OctoKubernetesS3Store`.
 - **Adapter deployed but stuck at `Unregistered`, operator itself connected** — the adapter pods
   got a controller address they cannot reach. Check what the deployment was actually given and
   whether it resolves to something reachable:
