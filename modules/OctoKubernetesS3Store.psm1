@@ -575,8 +575,8 @@ and the store answers on the host port; otherwise a value left over from an earl
 shell is removed and the bot keeps its file system store (the row path of the archive dump). Nothing here is
 printed. Returns $true when the store settings are in place.
 
-The name of the second-endpoint variable is the contract with the staging location of octo-common-services
-(ArchiveCopyStagingLocation): change it here when that contract names it differently.
+The second-endpoint variable OCTO_ARTIFACTSTORAGE__S3__CRATEDBSERVICEURL is the S3ArtifactStorageOptions.CrateDbServiceUrl
+property of octo-common-services (section ArtifactStorage).
 #>
     [CmdletBinding()]
     param(
