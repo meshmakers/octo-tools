@@ -59,7 +59,7 @@ is signed by an internal CA the node doesn't trust).
 
 ## 1 · Stop the legacy docker-compose infra
 
-The kind infra binds the **same** host ports (27017/5672/15672/5432/4301) as the old
+The kind infra binds the **same** host ports (27017/5672/15672/5432/4301/8333) as the old
 `Start-OctoInfrastructure` stack — they cannot run together. `Install-OctoKubernetes` refuses to
 run while the compose containers are up.
 
@@ -73,7 +73,8 @@ Stop-OctoInfrastructure
 
 ```powershell
 # Cluster + CRDs + namespaces + in-cluster infra (mongo/rabbit/crate) + Mongo RS init +
-# CrateDB app user (octo-system, for deployed adapters) + ingress-nginx + cert-manager
+# CrateDB app user (octo-system, for deployed adapters) + local S3 store (SeaweedFS, host port 8333,
+# CrateDB job log filter; -SkipS3Store leaves it out) + ingress-nginx + cert-manager
 # (mm-cloud-issuer, CA trusted) + the Communication Operator (workload identity/TLS is
 # wired from the ASP.NET dev certificate — the host services need not be running yet).
 # Also configures the node to skip TLS verification for the your-dev-registry.example.com dev registry.
@@ -114,8 +115,9 @@ Register-OctoCliContext -Installation local -TenantId meshtest
 Get-OctoKubernetesStatus
 ```
 
-You should have: a kind cluster (one Docker container) running Mongo / RabbitMQ / CrateDB +
-the CRDs + the operator, with `identity:5003`, `asset-repo:5001`, `communication-controller:5015`,
+You should have: a kind cluster (one Docker container) running Mongo / RabbitMQ / CrateDB + the
+local S3 store (the status ends with an `== S3 store ==` section, all `OK`; it writes and deletes one
+small probe object, `-SkipS3Probe` keeps it read-only) + the CRDs + the operator, with `identity:5003`, `asset-repo:5001`, `communication-controller:5015`,
 `bot:5009` running natively on the host.
 
 ---
@@ -172,6 +174,7 @@ Start-OctoInfrastructure          # (optional) go back to the legacy docker-comp
 
 | Symptom | Fix |
 |---|---|
+| `Get-OctoKubernetesStatus`: S3 store `host` fails | the relay container (`octo-kind-s3-relay`, clusters created before the store) is stopped or port 8333 is taken → `Install-OctoKubernetesS3Store` (see `README.md`, "Local S3 store") |
 | `Install-OctoKubernetes` refuses immediately | docker-compose infra still running → `Stop-OctoInfrastructure` |
 | Windows: `kind` / cmdlet says *"kind is not on PATH"* right after `winget install` | winget didn't update the running shell → restart `pwsh` (or add `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Kubernetes.kind_*\` to PATH), then `kind version` |
 | Windows: `Get-OctoKubernetesStatus` shows host ports `closed` but infra pods are Running | Docker Desktop's port-proxy first-connect lag (fixed: probe now waits 2.5s). Confirm with `kind get clusters` + `docker port kind-control-plane`; the ports are mapped to `127.0.0.1` |
