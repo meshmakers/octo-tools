@@ -158,6 +158,13 @@ store. **With the S3 provider the bot keeps tenant dumps and restore uploads in 
 on its disk**, as on test-2 and prod-1. Without the store (or with `-s3Store $false`) the bot keeps its
 file system store.
 
+Memory: the pod has a 4 Gi limit (request 1 Gi). Reading a multi-GB object makes `weed mini` buffer in
+memory: a 5.5 GB read took the process from ~200 MiB to about 1.1 GiB and killed the former 1 Gi pod
+(OOMKilled). The manifest therefore sets `-s3.readerCacheSizeMB=256` (the default 0 leaves in-flight GET
+buffers unlimited) and `GOMEMLIMIT=2560MiB` (the Go heap otherwise keeps growing with every read). Measured
+with the 5.5 GB object read three times in a row: peak process memory 1.5 GiB, no restart. The pod's page
+cache also fills toward the limit while large objects are read; that is reclaimable and not a leak.
+
 Persistence: objects survive a restart of the store pod (PVC); they do not survive
 `Uninstall-OctoKubernetes`. The staged objects are working files of a dump or restore run, not a backup.
 Remove only the store (destructive for the staged objects): `Uninstall-OctoKubernetesS3Store`.

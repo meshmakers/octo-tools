@@ -56,6 +56,10 @@ spec:
             # Bound the memory of in-flight GET buffers (default 0 = unlimited): a multi-GB object
             # streamed back out otherwise buffers without limit and the pod is OOM-killed.
             - "-s3.readerCacheSizeMB=256"
+          env:
+            # Go soft memory limit: makes the garbage collector hold the heap below the container
+            # limit (4Gi) instead of letting it grow with every large read.
+            - { name: GOMEMLIMIT, value: "2560MiB" }
           ports:
             - { containerPort: 8333, name: s3 }
           volumeMounts:
