@@ -315,6 +315,21 @@ Add-OctoLocalCaTrust            # idempotent; Remove-OctoLocalCaTrust removes it
 macOS adds it to the System keychain as a trusted root; Windows imports into
 `Cert:\LocalMachine\Root`; Linux uses `update-ca-certificates`.
 
+## Stop and start (data stays)
+
+`Stop-OctoInfrastructure` / `Start-OctoInfrastructure` only handle the docker-compose infra. To stop the
+kind infra without deleting it, stop the node container and start it again; the PVCs, the store objects
+and the persistent CrateDB settings (job log filter) survive:
+
+```powershell
+docker stop kind-control-plane
+docker start kind-control-plane     # then: kubectl --context kind-kind -n octo-infra wait --for=condition=Ready pod --all
+```
+
+The S3 store's host relay container (`octo-kind-s3-relay`, clusters created before the host port mapping)
+keeps running on its own (`--restart unless-stopped`); `Test-OctoKubernetesS3Store` shows whether
+everything is back.
+
 ## Teardown
 
 ```powershell
