@@ -46,6 +46,10 @@ Helm release name for the CRDs chart. Defaults to "octo-mesh-crds".
 Namespace into which the CRDs Helm release is installed. Defaults to
 "octo-operator-system".
 
+.PARAMETER SkipS3Store
+Do not add the local S3-compatible object store (SeaweedFS) and its CrateDB job log filter. The store
+holds the staging area of the archive COPY TO / COPY FROM dump; without it the dump uses the row path.
+
 .PARAMETER ExposeLan
 Bind the infra + ingress host ports on 0.0.0.0 instead of the default 127.0.0.1
 (loopback), so other machines on the LAN can reach them. Exposes MongoDB / CrateDB /
@@ -69,6 +73,10 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         [Parameter()] [string]$CrdReleaseName = "octo-mesh-crds",
         [Parameter()] [string]$CrdNamespace = "octo-operator-system",
         [Parameter()] [switch]$SkipInfra,
+        # Skip the local S3-compatible object store (SeaweedFS) that the archive COPY TO / COPY FROM
+        # staging area uses, and the CrateDB job log filter that belongs to it. Without the store the
+        # stack behaves as before (row path); it can be added later with Install-OctoKubernetesS3Store.
+        [Parameter()] [switch]$SkipS3Store,
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
@@ -315,6 +323,16 @@ server = "https://$DevRegistry"
             Write-Error "CrateDB application-user seeding failed. Aborting — kind-deployed adapters could not write stream data archives."
             return
         }
+
+        # 7) Local S3 store for the archive COPY TO / COPY FROM staging area (AB#5967): pod, bucket,
+        #    host port 8333, the CrateDB job log filter that keeps the S3 key out of sys.jobs_log.
+        #    Without it the stack works as before (archive dump on the row path).
+        if (-not $SkipS3Store) {
+            if (-not (Install-OctoKubernetesS3Store -ClusterName $ClusterName)) {
+                Write-Error "Local S3 store setup failed. Aborting — re-run Install-OctoKubernetesS3Store, or pass -SkipS3Store to go on without it."
+                return
+            }
+        }
     }
 
     $caTrustNote = $null
@@ -399,6 +417,10 @@ server = "https://$DevRegistry"
     Write-Host "  kind cluster:      $ClusterName" -ForegroundColor Cyan
     Write-Host "  CRDs release:      $CrdReleaseName in namespace $CrdNamespace" -ForegroundColor Cyan
     Write-Host "  Pool namespace:    $PoolNamespace" -ForegroundColor Cyan
+    if (-not $SkipInfra -and -not $SkipS3Store) {
+        $s3 = Get-OctoKubernetesS3StoreInfo
+        Write-Host "  S3 store:          $($s3.HostEndpoint) (cluster: $($s3.InClusterEndpoint), bucket $($s3.Bucket))" -ForegroundColor Cyan
+    }
     if (-not $SkipOperator) {
         Write-Host "  Operator:          deployed (dev registry, :main-latest)" -ForegroundColor Cyan
     }

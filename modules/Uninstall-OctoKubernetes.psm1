@@ -32,6 +32,13 @@ function Uninstall-OctoKubernetes {
     }
     if (-not $Json) { Write-Host "Cluster '$ClusterName' deleted." -ForegroundColor Green }
 
+    # The host relay container of the local S3 store (only present on clusters created before the
+    # store's host port was mapped by kind-cluster.yaml) outlives the cluster: remove it so the host
+    # port is free again. Never touches anything else.
+    if (Get-Command Remove-OctoKubernetesS3Relay -ErrorAction SilentlyContinue) {
+        if ((Remove-OctoKubernetesS3Relay -ClusterName $ClusterName) -and -not $Json) { Write-Host "S3 store relay container removed." -ForegroundColor Green }
+    }
+
     # Reverse the OS-level CA trust that Install-OctoKubernetes added. The CA's private key
     # died with the cluster, but its public cert lingers as a trusted root in the system
     # store until removed. Non-fatal + guarded so a missing cmdlet or a declined sudo prompt

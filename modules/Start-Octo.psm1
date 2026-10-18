@@ -88,6 +88,9 @@ If set to $true, the MCP Service will be started if the octo-mcp-service directo
 .PARAMETER aiService
 If set to $true, the AI Service will be started if the octo-ai-services directory exists locally. If set to $false, it will not be started. Defaults to $true.
 
+.PARAMETER s3Store
+If set to $true (default) and the local S3 store of the kind cluster is installed and answers on its host port, the Bot Service starts with the S3 artifact store settings (provider, host endpoint, bucket, credential read from the cluster Secret, and the second endpoint under which CrateDB reaches the store). Without the store, or with $false, the bot keeps its file system artifact store. Nothing is printed of the credential. See kubernetes/README.md, "Local S3 store".
+
 .PARAMETER aiWorker
 If set to $true, the standalone AI Worker (Remote agent-worker host, see #4130 Phase B) will be started if the octo-ai-services directory exists locally. Defaults to $false because the AI Service's default Subprocess mode (AiWorker:Mode=Subprocess) spawns the agent CLI directly without this host — only flip this on when you want to exercise the Remote agent-worker path locally.
 
@@ -135,6 +138,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$mcpService = $true,
         [Parameter()] [Boolean]$aiService = $true,
         [Parameter()] [Boolean]$aiWorker = $false,
+        [Parameter()] [Boolean]$s3Store = $true,
         [Parameter()] [Boolean]$httpActivator = $false,
         [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "https://{release}.localhost"
     )
@@ -309,9 +313,26 @@ Use this function to selectively start OctoMesh services based on your requireme
         Remove-Item Env:OCTO_PLATFORMSERVICES__MCPSERVICEURL -ErrorAction SilentlyContinue
     }
 
+    # AB#5967 / AB#6967: the bot's artifact store is the local S3 store of the kind cluster when it is
+    # installed and answers (same code path as test-2 / prod-1); the second endpoint tells the staging
+    # location how CrateDB reaches it. Both directions, like the settings above: without the store a
+    # value left over from an earlier Start-Octo of this shell is removed and the bot keeps its file
+    # system store. The credential comes from the cluster Secret and is never printed.
+    if ($botService -and $s3Store) {
+        if (Set-OctoLocalS3StoreEnvironment) {
+            Write-Host "Bot artifact store: local S3 store ($((Get-OctoKubernetesS3StoreInfo).HostEndpoint), bucket $((Get-OctoKubernetesS3StoreInfo).Bucket))" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Bot artifact store: file system (local S3 store not installed or not reachable)" -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Set-OctoLocalS3StoreEnvironment -Disable | Out-Null
+    }
+
     # Set environment to development, because so we get more information in the logs
     $env:ASPNETCORE_ENVIRONMENT = "Development"
-    
+
     Create-LogDirectory -branch $branch
     Delete-LogFile -branch $branch -file "IdentityServices.log"
     Delete-LogFile -branch $branch -file "PolicyServices.log"
