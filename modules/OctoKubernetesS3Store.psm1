@@ -65,6 +65,7 @@ locally started bot); never print it.
     [CmdletBinding()]
     param([string]$ClusterName = "kind")
     $info = Get-OctoKubernetesS3StoreInfo
+    if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return $null }
     $json = & kubectl --context "kind-$ClusterName" -n $info.Namespace get secret $info.SecretName -o json 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
     $data = ($json | ConvertFrom-Json).data
@@ -362,6 +363,10 @@ function Remove-OctoKubernetesS3Relay {
     $owner = & docker inspect -f '{{index .Config.Labels "octo-tools.cluster"}}' $info.RelayContainer 2>$null
     if ($LASTEXITCODE -eq 0 -and "$owner".Trim() -eq $ClusterName) {
         & docker rm -f $info.RelayContainer | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not remove the S3 store relay container '$($info.RelayContainer)'; the host port may stay occupied. Remove it with 'docker rm -f $($info.RelayContainer)'."
+            return $false
+        }
         return $true
     }
     return $false
@@ -604,7 +609,7 @@ property of octo-common-services (section ArtifactStorage).
     }
 
     $credential = $null
-    if ((Get-Command kubectl -ErrorAction SilentlyContinue) -and (Test-OctoLocalPortOpen $info.HostPort)) {
+    if (Test-OctoLocalPortOpen $info.HostPort) {
         $credential = Get-OctoKubernetesS3StoreCredential -ClusterName $ClusterName
     }
     if (-not $credential) {
