@@ -154,6 +154,14 @@ Notes for the loop:
   System model along. The local CK catalog is `<checkout>/.octo/local-catalog` (Start-Octo points
   `OCTO_LocalFileSystemCatalog__RootPath` at it).
 
+# Working on many tenants
+
+`Invoke-OctoTenantSweep` runs one octo-cli command against a list of tenants with per-tenant authentication
+(octo-cli 3.5.27 or newer), a `-WhatIf` listing, a per-tenant result table and `-Json`; a tenant the operator is
+not provisioned in is reported as `Denied` and the sweep goes on. `Register-OctoCliContext -TenantId a,b,c`
+registers the contexts for it in one call. No token is ever read or printed. Details and examples:
+[docs/tenant-sweep.md](docs/tenant-sweep.md).
+
 # Tests
 
 Pester tests for the build tooling live in `tests/` (they run against a fake checkout in `TestDrive`
