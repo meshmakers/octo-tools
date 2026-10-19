@@ -159,8 +159,16 @@ Notes for the loop:
 `Invoke-OctoTenantSweep` runs one octo-cli command against a list of tenants with per-tenant authentication
 (octo-cli 3.5.27 or newer), a `-WhatIf` listing, a per-tenant result table and `-Json`; a tenant the operator is
 not provisioned in is reported as `Denied` and the sweep goes on. `Register-OctoCliContext -TenantId a,b,c`
-registers the contexts for it in one call. No token is ever read or printed. Details and examples:
-[docs/tenant-sweep.md](docs/tenant-sweep.md).
+registers the contexts for it in one call. No token is ever read or printed. GraphQL over many tenants goes
+through the octo-cli command `GraphQl` (`-IncludeOutput` returns the answer per tenant):
+
+```powershell
+$q = '{ runtime { runtimeEntities(ckId:"System/Entity", first:1) { totalCount } } }'
+Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutput `
+    -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q
+```
+
+Details and examples: [docs/tenant-sweep.md](docs/tenant-sweep.md).
 
 # Tests
 

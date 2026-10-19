@@ -16,11 +16,14 @@ function Invoke-OctoCliCapture {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string[]]$Arguments)
 
-    $output = & octo-cli @Arguments 2>&1 | Out-String
+    $items = @(& octo-cli @Arguments 2>&1)
     $code = $LASTEXITCODE
+    $output = $items | Out-String
+    # Standard output only (stderr arrives as ErrorRecord): the clean answer of commands such as GraphQl.
+    $stdout = @($items | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) | Out-String
     # Unix reports exit -4 as 252; normalise to the signed value octo-cli documents.
     if ($code -gt 127) { $code -= 256 }
-    [pscustomobject]@{ ExitCode = $code; Output = $output }
+    [pscustomobject]@{ ExitCode = $code; Output = $output; Stdout = $stdout }
 }
 
 function Protect-OctoSweepText {
@@ -143,6 +146,10 @@ function Invoke-OctoTenantSweep {
     .PARAMETER ShowOutput
         Also write the (scrubbed) octo-cli output of every tenant to the information stream.
 
+    .PARAMETER IncludeOutput
+        Add a `Stdout` property to every row: the scrubbed standard output of octo-cli (for `GraphQl` the
+        response JSON, ready for ConvertFrom-Json). Rows are objects only; combine with -Json to get it in the envelope.
+
     .PARAMETER Json
         Emit the standard octo-tools JSON envelope instead of the table.
 
@@ -151,6 +158,13 @@ function Invoke-OctoTenantSweep {
 
     .EXAMPLE
         Invoke-OctoTenantSweep -Context test2_octosystem -AllTenants -CliArguments '-c','ProvisionCurrentUser','-ttid','{tenant}'
+
+    .EXAMPLE
+        # GraphQL over many tenants (octo-cli GraphQl, AB#7027): one read-only query, the answer per tenant
+        $q = '{ runtime { runtimeEntities(ckId:"System/Entity", first:1) { totalCount } } }'
+        Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutput `
+            -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q |
+            ForEach-Object { [pscustomobject]@{ Tenant = $_.Tenant; Outcome = $_.Outcome; Total = ($_.Stdout | ConvertFrom-Json).data.runtime.runtimeEntities.totalCount } }
     #>
     [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Template')]
     param(
@@ -174,6 +188,7 @@ function Invoke-OctoTenantSweep {
         [switch]$AllTenants,
         [string[]]$Exclude = @(),
         [switch]$ShowOutput,
+        [switch]$IncludeOutput,
         [switch]$Json
     )
 
@@ -215,7 +230,9 @@ function Invoke-OctoTenantSweep {
             $r = Invoke-OctoCliCapture -Arguments $p.CliArgs
             $res = Resolve-OctoSweepOutcome -ExitCode $r.ExitCode -Output $r.Output
             if ($ShowOutput) { Write-Information (Protect-OctoSweepText $r.Output) -InformationAction Continue }
-            [pscustomobject]@{ Tenant = $p.Tenant; Context = $p.Context; Outcome = $res.Outcome; ExitCode = $r.ExitCode; Cause = $res.Cause }
+            $row = [ordered]@{ Tenant = $p.Tenant; Context = $p.Context; Outcome = $res.Outcome; ExitCode = $r.ExitCode; Cause = $res.Cause }
+            if ($IncludeOutput) { $row['Stdout'] = (Protect-OctoSweepText $r.Stdout).Trim() }
+            [pscustomobject]$row
         }
         catch {
             [pscustomobject]@{ Tenant = $p.Tenant; Context = $p.Context; Outcome = 'Failed'; ExitCode = $null; Cause = (Protect-OctoSweepText $_.Exception.Message) }

@@ -52,17 +52,46 @@ Invoke-OctoTenantSweep -Installation test2 -Tenant a,b -CliArguments '-c','Clear
 | `-Tenant` / `-AllTenants` / `-Exclude` | The tenant list; `-AllTenants` runs `GetTenants --all` (needs a system tenant context). |
 | `-WhatIf` | Dry run: rows with outcome `Planned`. |
 | `-ShowOutput` | Also write the scrubbed octo-cli output per tenant to the information stream. |
+| `-IncludeOutput` | Adds `Stdout` (scrubbed octo-cli standard output, e.g. the GraphQL response) to every row. |
 | `-Json` | JSON envelope instead of row objects. |
 
 Outcomes: `Ok` (exit 0), `Denied` (exit -4 or a denial/provisioning message), `Failed` (anything else, e.g. an
 unknown context). The sweep runs the tenants one after the other and never stops at a failing tenant.
 
-## GraphQL and files routes
+## GraphQL over many tenants
 
-* A GraphQL command for octo-cli is delivered by AB#7027. Until it is released the GraphQL sweeps have no
-  supported path; as soon as it exists it is used like any other command here.
+`octo-cli -c GraphQl -tid <tenant> (-q <text> | -f <file> | -si) [-vars <json|@file>] [-on <operation>]` (AB#7027,
+octo-cli on `main`) sends one query or mutation to `tenants/<tenant>/GraphQL` with the token for that tenant (same rule
+as every other command, AB#6836) and writes the response JSON unmodified to standard output (banner and log lines go to
+standard error). That makes it a normal sweep command; `-IncludeOutput` adds the scrubbed standard output to every row:
+
+```powershell
+$q = '{ runtime { runtimeEntities(ckId:"System/Entity", first:1) { totalCount } } }'
+
+# one system-tenant context, the tenant goes into -tid (read-only query here; a mutation works the same way)
+Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv,wwc26 -IncludeOutput `\
+    -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q |
+  ForEach-Object {
+      [pscustomobject]@{
+          Tenant = $_.Tenant; Outcome = $_.Outcome; Cause = $_.Cause
+          Total  = if ($_.Outcome -eq 'Ok') { ($_.Stdout | ConvertFrom-Json).data.runtime.runtimeEntities.totalCount }
+      }
+  }
+
+# long documents: -f query.graphql, variables: -vars '{"first":10}' or -vars @vars.json
+```
+
+A GraphQL error in the response (non-empty `errors`) makes octo-cli exit -5, so the row is `Failed` with the first message
+as cause; a tenant without provisioning is `Denied`. Never copy a token into a `curl` or Python call instead.
+
+## Files routes, pool deploy, Python helpers
+
 * The files-migration status routes (`system/v1/files/migration-status/{tenant}`, `files/capabilities`) have no
   CLI command and get none: the files migration is finished (AB#6183, decision 2026-10-19), the scripts that
   call them are retired, not ported.
+* Impersonation loops use the existing command `SwitchServiceAccountsToImpersonation` (sweep it with `-Context` and
+  `-tid {tenant}`), not curl against `serviceAccount/switchToImpersonation`.
+* Deploying a communication pool (`POST .../v1/Pool/deploy?poolRtId=`) has **no CLI command** (known gap, not part of
+  AB#6840). The call needs a token issued for that tenant (a context of that tenant); do not take it from another context.
 * The Python helpers in `octo-claude-skills/skills/octo/scripts` use the active context's token for the
   context's **own** tenant and are not affected by the gate.

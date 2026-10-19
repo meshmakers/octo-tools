@@ -136,6 +136,17 @@ Describe 'sweep' {
     }
 }
 
+Describe 'output of the answer' {
+    It 'rows carry no Stdout unless -IncludeOutput is given; with it the scrubbed stdout is added' {
+        Set-CliMock { [pscustomobject]@{ ExitCode = 0; Output = 'noise'; Stdout = "{`"v`":1} $script:Canary" } }
+        $plain = Invoke-OctoTenantSweep -Installation t2 -Tenant a -CliArguments '-c', 'GraphQl'
+        $plain.PSObject.Properties.Name | Should -Not -Contain 'Stdout'
+        $with = Invoke-OctoTenantSweep -Installation t2 -Tenant a -CliArguments '-c', 'GraphQl' -IncludeOutput
+        $with.Stdout | Should -BeLike '{"v":1}*'
+        $with.Stdout | Should -Not -BeLike '*eyJ*'
+    }
+}
+
 Describe 'token hygiene' {
     It 'a token-shaped string in the octo-cli output never reaches rows, JSON or the information stream' {
         Set-CliMock -PerTenant {
@@ -172,6 +183,7 @@ Describe 'real process wrapper (fake octo-cli on the PATH)' -Skip:($IsWindows) {
 case "$*" in
   *--help*) echo "Octo Mesh Management Tool, Version 3.5.27.0"; exit 0 ;;
   *t2_bad*) echo "Access to tenant 'bad' denied (not provisioned). Run ProvisionCurrentUser -ttid bad"; echo "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjYW5hcnkifQ.c2ln" >&2; exit 252 ;;
+  *GraphQl*) echo "banner and log line on stderr" >&2; echo '{"data":{"runtime":{"n":7}}}'; exit 0 ;;
   *) echo ok; exit 0 ;;
 esac
 '@ | Set-Content -Path $fake -NoNewline
@@ -190,5 +202,11 @@ esac
         $rows.Outcome | Should -Be 'Ok', 'Denied', 'Ok'
         $rows[1].ExitCode | Should -Be -4
         ($rows | ConvertTo-Json -Depth 5) | Should -Not -BeLike '*eyJ*'
+    }
+    It '-IncludeOutput returns the clean stdout of GraphQl (stderr banner stays out) as parseable JSON' {
+        $rows = Invoke-OctoTenantSweep -Installation t2 -Tenant a, b -IncludeOutput -CliArguments '-c', 'GraphQl', '-tid', '{tenant}', '-q', '{ x }'
+        $rows.Outcome | Should -Be 'Ok', 'Ok'
+        ($rows[0].Stdout | ConvertFrom-Json).data.runtime.n | Should -Be 7
+        $rows[0].Stdout | Should -Not -BeLike '*banner*'
     }
 }
