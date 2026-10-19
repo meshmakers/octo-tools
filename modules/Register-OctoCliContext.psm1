@@ -22,7 +22,10 @@ function Register-OctoCliContext {
         `local`, your test cluster, your staging or prod clusters).
 
     .PARAMETER TenantId
-        Tenant id to bind the context to (required).
+        Tenant id to bind the context to (required). Accepts a list: one context per tenant is
+        registered in one call (`-TenantId a,b,c`, AB#6840), named `<installation>[_<suffix>]_<tenant>`.
+        With more than one tenant the active context is never switched (like -NoSwitch); a login is
+        still started per tenant unless -NoLogin is set. Pair with Invoke-OctoTenantSweep.
 
     .PARAMETER UriSuffix
         Optional URI suffix used for sub-environments (e.g. 'pr123' becomes the
@@ -47,6 +50,9 @@ function Register-OctoCliContext {
         Register-OctoCliContext -Installation local -TenantId meshtest
 
     .EXAMPLE
+        Register-OctoCliContext -Installation example-test -TenantId tenant-a,tenant-b,tenant-c -NoSwitch -NoLogin
+
+    .EXAMPLE
         Register-OctoCliContext -Installation example-test -TenantId mytenant -UriSuffix pr123 -IncludeReporting
     #>
     [CmdletBinding()]
@@ -57,7 +63,7 @@ function Register-OctoCliContext {
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$TenantId,
+        [string[]]$TenantId,
 
         [string]$UriSuffix = "",
 
@@ -69,6 +75,51 @@ function Register-OctoCliContext {
     )
 
     $inst = Get-OctoInstallation -Name $Installation
+    $tenants = @($TenantId | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if (-not $tenants.Count) { throw "TenantId must name at least one tenant." }
+    $multi = $tenants.Count -gt 1
+    $switchContext = (-not $NoSwitch) -and (-not $multi)
+    $results = @()
+
+    $errors = @()
+    foreach ($tenant in $tenants) {
+        try {
+            $results += Register-OctoCliContextForTenant -Inst $inst -Installation $Installation -TenantId $tenant `
+                -UriSuffix $UriSuffix -IncludeReporting:$IncludeReporting -IncludeAi:$IncludeAi `
+                -SwitchContext:$switchContext -NoLogin:$NoLogin -Json:$Json -Quiet:$multi
+        }
+        catch {
+            if (-not $multi) { throw }
+            # One tenant must not stop the others; report all failures at the end.
+            $errors += "${tenant}: $($_.Exception.Message)"
+            $results += [pscustomobject]@{ TenantId = $tenant; ContextName = $null; Data = (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ error = $_.Exception.Message }) }
+        }
+    }
+    if ($errors.Count -and -not $Json) {
+        throw "Registering contexts failed for $($errors.Count) of $($tenants.Count) tenants: $($errors -join '; ')"
+    }
+
+    if (-not $Json) { return }
+
+    if (-not $multi) {
+        Write-OctoJson -Command 'Register-OctoCliContext' -Data $results[0].Data
+        return
+    }
+    $ok = -not ($results | Where-Object { -not $_.Data.success })
+    Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success $ok -ExitCode ($results | ForEach-Object { $_.Data.exitCode } | Where-Object { $_ } | Select-Object -First 1) -Extra @{
+        contexts = @($results | ForEach-Object { [ordered]@{ tenantId = $_.TenantId; context = $_.ContextName; success = $_.Data.success; exitCode = $_.Data.exitCode } })
+    })
+}
+
+function Register-OctoCliContextForTenant {
+    # One tenant of Register-OctoCliContext. Unchanged behaviour of the former single-tenant cmdlet;
+    # under -Json it returns the action result instead of writing it so the caller can aggregate.
+    [CmdletBinding()]
+    param($Inst, [string]$Installation, [string]$TenantId, [string]$UriSuffix, [switch]$IncludeReporting,
+        [switch]$IncludeAi, [switch]$SwitchContext, [switch]$NoLogin, [switch]$Json, [switch]$Quiet)
+
+    $inst = $Inst
+    $NoSwitch = -not $SwitchContext
 
     $uriExtension = if ($UriSuffix) { "-$UriSuffix" } else { "" }
     $contextSuffix = if ($UriSuffix) { "_$UriSuffix" } else { "" }
@@ -101,59 +152,60 @@ function Register-OctoCliContext {
     )
 
     if ($IncludeReporting) {
-        if (-not $Json) { Write-Host "Including reporting" }
+        if (-not $Json -and -not $Quiet) { Write-Host "Including reporting" }
         $addArgs += @('-rsu', $rsu)
     }
     else {
-        if (-not $Json) { Write-Host "Excluding reporting" }
+        if (-not $Json -and -not $Quiet) { Write-Host "Excluding reporting" }
     }
 
     if ($IncludeAi) {
-        if (-not $Json) { Write-Host "Including AI" }
+        if (-not $Json -and -not $Quiet) { Write-Host "Including AI" }
         $addArgs += @('-aisu', $aisu)
     }
     else {
-        if (-not $Json) { Write-Host "Excluding AI" }
+        if (-not $Json -and -not $Quiet) { Write-Host "Excluding AI" }
     }
 
     if ($Json) {
         & octo-cli @addArgs | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = 'octo-cli AddContext failed' })
-            return
+            return [pscustomobject]@{ TenantId = $TenantId; ContextName = $contextName; Data = (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = 'octo-cli AddContext failed' }) }
         }
 
         if (-not $NoSwitch) {
             & octo-cli -c UseContext -n $contextName | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = 'octo-cli UseContext failed' })
-                return
+                return [pscustomobject]@{ TenantId = $TenantId; ContextName = $contextName; Data = (New-OctoActionResult -Success $false -ExitCode $LASTEXITCODE -Extra @{ error = 'octo-cli UseContext failed' }) }
             }
         }
 
         if (-not $NoLogin) {
-            & octo-cli -c Login -i | Out-Null
+            & octo-cli --context $contextName -c Login -i | Out-Null
         }
 
-        Write-OctoJson -Command 'Register-OctoCliContext' -Data (New-OctoActionResult -Success ($LASTEXITCODE -eq 0) -ExitCode $LASTEXITCODE)
-        return
+        return [pscustomobject]@{ TenantId = $TenantId; ContextName = $contextName; Data = (New-OctoActionResult -Success ($LASTEXITCODE -eq 0) -ExitCode $LASTEXITCODE) }
     }
 
     Write-Host "Registering context '$contextName' for installation '$Installation' (tenant '$TenantId')"
-    & octo-cli @addArgs
+    & octo-cli @addArgs | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "octo-cli AddContext failed with exit code $LASTEXITCODE"
     }
 
     if (-not $NoSwitch) {
-        & octo-cli -c UseContext -n $contextName
+        & octo-cli -c UseContext -n $contextName | Out-Host
         if ($LASTEXITCODE -ne 0) {
             throw "octo-cli UseContext failed with exit code $LASTEXITCODE"
         }
     }
 
     if (-not $NoLogin) {
-        & octo-cli -c Login -i
+        & octo-cli --context $contextName -c Login -i | Out-Host
+    }
+
+    if (-not $Json) {
+        [pscustomobject]@{ TenantId = $TenantId; ContextName = $contextName; Data = $null }
     }
 }
 
