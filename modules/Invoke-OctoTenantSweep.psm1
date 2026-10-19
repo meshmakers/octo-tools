@@ -161,10 +161,10 @@ function Invoke-OctoTenantSweep {
 
     .EXAMPLE
         # GraphQL over many tenants (octo-cli GraphQl, AB#7027): one read-only query, the answer per tenant
-        $q = '{ runtime { runtimeEntities(ckId:"System/Entity", first:1) { totalCount } } }'
+        $q = '{ constructionKit { models(first:1) { totalCount } } }'
         Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutput `
             -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q |
-            ForEach-Object { [pscustomobject]@{ Tenant = $_.Tenant; Outcome = $_.Outcome; Total = ($_.Stdout | ConvertFrom-Json).data.runtime.runtimeEntities.totalCount } }
+            ForEach-Object { [pscustomobject]@{ Tenant = $_.Tenant; Outcome = $_.Outcome; Total = ($_.Stdout | ConvertFrom-Json).data.constructionKit.models.totalCount } }
     #>
     [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Template')]
     param(

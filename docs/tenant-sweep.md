@@ -66,7 +66,7 @@ as every other command, AB#6836) and writes the response JSON unmodified to stan
 standard error). That makes it a normal sweep command; `-IncludeOutput` adds the scrubbed standard output to every row:
 
 ```powershell
-$q = '{ runtime { runtimeEntities(ckId:"System/Entity", first:1) { totalCount } } }'
+$q = '{ constructionKit { models(first:1) { totalCount } } }'
 
 # one system-tenant context, the tenant goes into -tid (read-only query here; a mutation works the same way)
 Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv,wwc26 -IncludeOutput `\
@@ -74,7 +74,7 @@ Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv,wwc26 -Includ
   ForEach-Object {
       [pscustomobject]@{
           Tenant = $_.Tenant; Outcome = $_.Outcome; Cause = $_.Cause
-          Total  = if ($_.Outcome -eq 'Ok') { ($_.Stdout | ConvertFrom-Json).data.runtime.runtimeEntities.totalCount }
+          Total  = if ($_.Outcome -eq 'Ok') { ($_.Stdout | ConvertFrom-Json).data.constructionKit.models.totalCount }
       }
   }
 

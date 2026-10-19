@@ -163,7 +163,7 @@ registers the contexts for it in one call. No token is ever read or printed. Gra
 through the octo-cli command `GraphQl` (`-IncludeOutput` returns the answer per tenant):
 
 ```powershell
-$q = '{ runtime { runtimeEntities(ckId:"System/Entity", first:1) { totalCount } } }'
+$q = '{ constructionKit { models(first:1) { totalCount } } }'
 Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutput `
     -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q
 ```
