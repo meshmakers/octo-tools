@@ -93,6 +93,28 @@ password from `clusterSecrets.streamDataPassword` + `GRANT ALL PRIVILEGES`; an e
 left untouched). On a cluster created before this step existed, run
 `Initialize-OctoKindCrateDbUser` once (or re-run `Install-OctoKubernetes`).
 
+### CrateDB upgrades (Update-OctoCrateDb)
+
+`kubernetes/infra/cratedb.yaml` pins the CrateDB version (`image: crate:<x.y.z>`). A newer CrateDB cannot be
+undone: a data directory that a newer version has opened does not start under an older one. So
+`Install-OctoKubernetes` never applies the manifest blindly over an existing volume, it runs
+`Update-OctoCrateDb -Context kind-<name>` (the context is always explicit):
+
+| Situation | Result |
+|---|---|
+| No CrateDB yet | the manifest is applied |
+| Running version = manifest version | nothing to upgrade (the manifest is applied, the image does not change) |
+| Running version **newer** than the manifest | error, the manifest is **not** applied. Update octo-tools (`git pull`) instead |
+| Running version older | free disk space is checked, a snapshot is taken into the local backup repository (`/data/backup`, `path.repo`), then the upgrade runs step by step |
+
+CrateDB 6.x can only be reached from 5.10.1 or later, so a volume below 5.10.1 goes 5.9.x -> 5.10.16 -> 6.x.
+After each step the cmdlet waits for the rollout, the expected version and all tables GREEN, and compares
+the row count of every table with the count before the upgrade (fewer rows is an error). The snapshot
+(`upgrade_<timestamp>.pre_upgrade`) holds the data of the version you came from; there is no downgrade, to go back
+you restore it into a fresh CrateDB of that version. If the disk is too small for the snapshot the cmdlet asks;
+`-SkipCrateDbSnapshot` (on `Install-OctoKubernetes`) or `-SkipSnapshot` (on `Update-OctoCrateDb`) upgrades without it.
+The same logic ships as `scripts/om-upgrade-cratedb.ps1` in getting-started (AB#7139).
+
 ### Local S3 store (archive COPY staging)
 
 The archive part of a tenant dump uses CrateDB `COPY TO` / `COPY FROM`, which address a location

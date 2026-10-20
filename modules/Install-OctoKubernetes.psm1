@@ -50,6 +50,10 @@ Namespace into which the CRDs Helm release is installed. Defaults to
 Do not add the local S3-compatible object store (SeaweedFS) and its CrateDB job log filter. The store
 holds the staging area of the archive COPY TO / COPY FROM dump; without it the dump uses the row path.
 
+.PARAMETER SkipCrateDbSnapshot
+An existing CrateDB is upgraded by Update-OctoCrateDb (never a downgrade, snapshot first, 5.9 -> 6.x via
+5.10.16). Pass this to upgrade without the snapshot, e.g. when the disk is too small for it.
+
 .PARAMETER ExposeLan
 Bind the infra + ingress host ports on 0.0.0.0 instead of the default 127.0.0.1
 (loopback), so other machines on the LAN can reach them. Exposes MongoDB / CrateDB /
@@ -77,6 +81,8 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         # staging area uses, and the CrateDB job log filter that belongs to it. Without the store the
         # stack behaves as before (row path); it can be added later with Install-OctoKubernetesS3Store.
         [Parameter()] [switch]$SkipS3Store,
+        # Upgrade an existing CrateDB without the pre-upgrade snapshot (see Update-OctoCrateDb).
+        [Parameter()] [switch]$SkipCrateDbSnapshot,
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
@@ -258,6 +264,15 @@ server = "https://$DevRegistry"
 
         # 3) Apply infra workloads
         foreach ($m in @("rabbitmq.yaml", "cratedb.yaml", "mongodb.yaml")) {
+            if ($m -eq "cratedb.yaml") {
+                # Never a plain apply: an existing CrateDB data volume is upgraded step by step
+                # (snapshot first, 5.9 -> 6.x via 5.10.16) and is never downgraded (AB#7139).
+                try {
+                    $null = Update-OctoCrateDb -Context $ctx -ManifestPath (Join-Path $infraDir $m) -SkipSnapshot:$SkipCrateDbSnapshot
+                }
+                catch { Write-Error "CrateDB install/upgrade failed: $($_.Exception.Message)"; return }
+                continue
+            }
             & kubectl --context $ctx apply -f (Join-Path $infraDir $m)
             if ($LASTEXITCODE -ne 0) { Write-Error "kubectl apply $m failed"; return }
         }
