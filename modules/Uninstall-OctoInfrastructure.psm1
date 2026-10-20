@@ -3,6 +3,8 @@ function Uninstall-OctoInfrastructure
 {
     param([switch]$Json)
 
+    Write-OctoComposeDeprecation -Command 'Uninstall-OctoInfrastructure'
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
@@ -21,6 +23,8 @@ function Uninstall-OctoInfrastructure
     if (-not $Json) { Write-Host "Stopping containers and cleaning up volumes"; }
     docker compose down -v
     $exitCode = $LASTEXITCODE
+    # The volumes are gone, so is the record of the version that wrote them.
+    if ($exitCode -eq 0) { Clear-OctoComposeCrateVersion }
 
     Set-Location $basedir
 

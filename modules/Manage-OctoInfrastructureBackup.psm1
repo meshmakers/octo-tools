@@ -59,6 +59,8 @@ function Backup-OctoInfrastructure {
         [switch]$Json
     )
 
+    Write-OctoComposeDeprecation -Command 'Backup-OctoInfrastructure'
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return
@@ -144,6 +146,8 @@ function Restore-OctoInfrastructure {
         [string]$Name,
         [switch]$Json
     )
+
+    Write-OctoComposeDeprecation -Command 'Restore-OctoInfrastructure'
 
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
@@ -234,6 +238,8 @@ function Get-OctoInfrastructureBackup {
         [switch]$Json
     )
 
+    Write-OctoComposeDeprecation -Command 'Get-OctoInfrastructureBackup'
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return
@@ -291,6 +297,8 @@ function Remove-OctoInfrastructureBackup {
         [switch]$Force,
         [switch]$Json
     )
+
+    Write-OctoComposeDeprecation -Command 'Remove-OctoInfrastructureBackup'
 
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"

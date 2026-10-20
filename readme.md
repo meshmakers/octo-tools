@@ -1,6 +1,6 @@
 OctoMesh is a powerful tool designed to seamlessly transform raw data into meaningful information, all while ensuring that the data is imbued with the context it needs to be truly insightful. Whether you're working with structured data, unstructured data, or anything in between, OctoMesh empowers you to harness the full potential of your data.
 
-This repository contains tools to simplify the development and deployment of OctoMesh. It includes a PowerShell profile to simplify the development process and a set of scripts to manage the infrastructure with docker-compose.
+This repository contains tools to simplify the development and deployment of OctoMesh. It includes a PowerShell profile to simplify the development process and a set of scripts to manage the local infrastructure. **kind (`Install-OctoKubernetes`) is the only supported local infrastructure.** The docker-compose scripts (`Install-/Start-/Stop-/Uninstall-OctoInfrastructure`, `Backup-/Restore-OctoInfrastructure`) are deprecated and will be removed on 2026-12-31; see `kubernetes/README.md`, section "Migrating from docker-compose".
 
 # Getting started
 

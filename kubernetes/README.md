@@ -408,8 +408,45 @@ Uninstall-OctoKubernetes      # deletes the kind cluster AND its data (Mongo/Cra
 
 `Uninstall-OctoKubernetes` also removes the local root CA from the OS trust store (so no orphaned
 "OctoMesh Local Dev Root CA" is left trusted after the cluster — whose private key it relied on — is
-gone); pass `-KeepCaTrust` to leave it in place. To go back to the legacy docker-compose infra
-afterwards: `Start-OctoInfrastructure`.
+gone); pass `-KeepCaTrust` to leave it in place. The legacy docker-compose infra is deprecated
+(removal 2026-12-31) and no longer a way back, see "Migrating from docker-compose".
+
+## Migrating from docker-compose
+
+**kind is the only supported local infrastructure.** The docker-compose setup
+(`Install-/Start-/Stop-/Uninstall-OctoInfrastructure`, `Get-OctoInfrastructureStatus`,
+`Backup-/Restore-/Get-/Remove-OctoInfrastructure(Backup)`, `infrastructure/docker-compose.yml`) is deprecated and
+**will be removed on 2026-12-31**. Until then every one of those cmdlets prints a warning, and
+`Start-OctoInfrastructure` / `Install-OctoInfrastructure` never change the CrateDB image of existing volumes: CrateDB
+cannot be downgraded and compose would recreate all three nodes at once. They refuse when the data was written by another
+CrateDB version than the compose file pins. The version is known from the images of the existing `cratedb*` containers and
+from a record in `~/.config/octo-tools/compose-crate-version.txt` (written on start, kept by `Stop-`, cleared by
+`Uninstall-`). Volumes of unknown version (no container, no record) need `-AcceptUnknownCrateVolumes` once, and only if
+you know they were written by the version in the compose file.
+
+Compose and kind bind the same host ports, so they never run together. Move over like this:
+
+1. **Your local data is disposable** (most developer machines). Optionally keep a safety copy of the volumes first, then
+   throw the compose stack away and start kind:
+   ```powershell
+   Stop-OctoInfrastructure
+   Backup-OctoInfrastructure -Name before-kind     # optional, stays under infrastructure/backups/
+   Uninstall-OctoInfrastructure                    # deletes the containers AND the volumes
+   Install-OctoKubernetes
+   ```
+   Then create your tenants again (`om-bootstrap-tenant.ps1` in getting-started, or `octo-cli`).
+2. **You want to keep tenant data.** Dump each tenant while compose still runs, move over, restore it into kind:
+   ```powershell
+   # compose still running, services started: dump every tenant you want to keep
+   octo-cli -c Dump -tid <tenantId> -f <tenantId>.tar.gz -w
+   Stop-Octo; Stop-OctoInfrastructure
+   Install-OctoKubernetes            # compose and kind share the ports, so only after the stop
+   Start-Octo
+   octo-cli -c Restore -tid <tenantId> -db <database> -f <tenantId>.tar.gz -w   # into kind, then check the tenant
+   ```
+   Keep the dump files until you checked the tenants in kind. The compose volumes stay on disk until you run
+   `Uninstall-OctoInfrastructure`, so nothing is lost by moving.
+3. You do not need the data at all: skip the backup, run `Uninstall-OctoInfrastructure` and `Install-OctoKubernetes`.
 
 ## Backups
 

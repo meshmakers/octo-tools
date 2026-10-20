@@ -25,7 +25,9 @@ function Test-OctoKindInfraRunning {
 }
 
 function Install-OctoInfrastructure {
-    param([switch]$Json)
+    param([switch]$Json, [switch]$AcceptUnknownCrateVolumes)
+
+    Write-OctoComposeDeprecation -Command 'Install-OctoInfrastructure'
 
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
@@ -36,6 +38,9 @@ function Install-OctoInfrastructure {
         Write-Error "A local kind cluster is running and binds the same host ports (27017/5672/15672/5432/4301) as the docker-compose infrastructure. Run 'Uninstall-OctoKubernetes' first (or stop the kind cluster) before starting the docker-compose infrastructure."
         return
     }
+
+    $composeFile = Join-Path $infrastructurePath "docker-compose.yml"
+    if (-not (Assert-OctoComposeCrateImage -ComposeFile $composeFile -AcceptUnknownCrateVolumes:$AcceptUnknownCrateVolumes)) { return }
 
     $PSStyle.Progress.View = "Classic"
     Write-Progress -Activity 'Install Octo infrastructure' -Status 'Initializing infrastructure for OctoMesh' -PercentComplete 0
@@ -61,6 +66,7 @@ function Install-OctoInfrastructure {
     
     # run ...
     docker compose up -d
+    if ($LASTEXITCODE -eq 0) { Save-OctoComposeCrateVersion -Version (Get-OctoComposeCrateVersion -ComposeFile $composeFile) }
     
     Write-Progress -Activity 'Install Octo infrastructure' -Status  "Waiting for the containers to be started..." -PercentComplete 40
     Wait-DockerContainer mongo-0.mongo

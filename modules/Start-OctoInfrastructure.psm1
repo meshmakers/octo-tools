@@ -14,7 +14,9 @@ function Test-OctoKindInfraRunning {
 
 function Start-OctoInfrastructure
 {
-    param([switch]$Json)
+    param([switch]$Json, [switch]$AcceptUnknownCrateVolumes)
+
+    Write-OctoComposeDeprecation -Command 'Start-OctoInfrastructure'
 
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
@@ -26,12 +28,16 @@ function Start-OctoInfrastructure
         return
     }
 
+    $composeFile = Join-Path $infrastructurePath "docker-compose.yml"
+    if (-not (Assert-OctoComposeCrateImage -ComposeFile $composeFile -AcceptUnknownCrateVolumes:$AcceptUnknownCrateVolumes)) { return }
+
     $basedir = $PWD
     Set-Location $infrastructurePath
 
     if (-not $Json) { Write-Host "Starting Octo infrastructure" }
     docker compose up -d
     $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) { Save-OctoComposeCrateVersion -Version (Get-OctoComposeCrateVersion -ComposeFile $composeFile) }
 
     Set-Location $basedir
 
