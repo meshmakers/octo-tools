@@ -3,6 +3,8 @@ function Stop-OctoInfrastructure
 {
     param([switch]$Json)
 
+    Write-OctoComposeDeprecation -Command 'Stop-OctoInfrastructure'
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;
@@ -12,6 +14,8 @@ function Stop-OctoInfrastructure
     Set-Location $infrastructurePath
 
     if (-not $Json) { Write-Host "Stopping Octo infrastructure" }
+    # The containers carry the CrateDB version; record it before they are removed.
+    Save-OctoComposeCrateVersionFromContainers
     docker compose down
     $exitCode = $LASTEXITCODE
 

@@ -93,6 +93,69 @@ password from `clusterSecrets.streamDataPassword` + `GRANT ALL PRIVILEGES`; an e
 left untouched). On a cluster created before this step existed, run
 `Initialize-OctoKindCrateDbUser` once (or re-run `Install-OctoKubernetes`).
 
+### CrateDB upgrades (Update-OctoCrateDb)
+
+`kubernetes/infra/cratedb.yaml` pins the CrateDB version (`image: crate:<x.y.z>`). A newer CrateDB cannot be
+undone: a data directory that a newer version has opened does not start under an older one. So
+`Install-OctoKubernetes` never applies the manifest blindly over an existing volume, it runs
+`Update-OctoCrateDb -Context kind-<name>` (the context is always explicit):
+
+| Situation | Result |
+|---|---|
+| No CrateDB yet | the manifest is applied |
+| Running version = manifest version | nothing to upgrade (the manifest is applied, the image does not change) |
+| Running version **newer** than the manifest | error, the manifest is **not** applied. Update octo-tools (`git pull`) instead |
+| Running version older | free disk space is checked, a snapshot is taken into the local backup repository (`/data/backup`, `path.repo`), then the upgrade runs step by step |
+
+CrateDB 6.x can only be reached from 5.10.1 or later, so a volume below 5.10.1 goes 5.9.x -> 5.10.16 -> 6.x.
+After each step the cmdlet waits for the rollout, the expected version and all tables GREEN, and compares
+the row count of every table with the count before the upgrade (fewer rows or a missing table is a loud warning, not an abort). The snapshot
+(`upgrade_<timestamp>.pre_upgrade`) holds the data of the version you came from; there is no downgrade, to go back
+you restore it into a fresh CrateDB of that version. If the disk is too small for the snapshot the cmdlet asks (`-NonInteractive` aborts instead);
+`-SkipCrateDbSnapshot` (on `Install-OctoKubernetes`) or `-SkipSnapshot` (on `Update-OctoCrateDb`) upgrades without it.
+`Update-OctoCrateDb` only works on a local kind cluster (`kind-…` context, kind nodes). A volume without a StatefulSet is refused (its data may be newer than the manifest) unless `-AssumeFreshCrateDbVolume`/`-AssumeFreshVolume` is given. A row-count difference after a step is a warning naming the tables, not an abort. Only 5.x and 6.x paths are known; anything else is refused.
+
+The same logic ships as `scripts/om-upgrade-cratedb.ps1` in getting-started (AB#7139).
+
+#### Going back: restore the snapshot
+
+An upgrade cannot be undone in place, but the pre-upgrade snapshot lets you return to the old version. **The snapshot
+lives in the same volume as the data (`/data/backup` inside `data-cratedb-0`): deleting the volume
+(`kubectl delete pvc data-cratedb-0`, or deleting the cluster) deletes the snapshot with it.** Copy it out first if it
+matters. The script prints the snapshot location and the old version when it takes the snapshot
+(`CrateDB: snapshot upgrade_<timestamp>.pre_upgrade (/data/backup/upgrade-<timestamp>-from-<old version>, CrateDB <old version>)`).
+
+```pwsh
+$ctx = "kind-kind"; $old = "5.9.10"          # the version from the snapshot line
+kubectl --context $ctx -n octo-infra scale statefulset cratedb --replicas=0
+# remove the data the newer version has opened, keep /data/backup (the snapshot):
+@"
+apiVersion: v1
+kind: Pod
+metadata: { name: cratedb-wipe, namespace: octo-infra }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: wipe
+      image: busybox:1.36
+      command: ["sh", "-c", "rm -rf /data/data && ls /data"]
+      volumeMounts: [{ name: data, mountPath: /data }]
+  volumes:
+    - { name: data, persistentVolumeClaim: { claimName: data-cratedb-0 } }
+"@ | kubectl --context $ctx apply -f -
+kubectl --context $ctx -n octo-infra wait --for=jsonpath='{.status.phase}'=Succeeded pod/cratedb-wipe --timeout=120s
+kubectl --context $ctx -n octo-infra delete pod cratedb-wipe
+# start the OLD version on the now empty data directory:
+kubectl --context $ctx -n octo-infra set image statefulset/cratedb cratedb=crate:$old
+kubectl --context $ctx -n octo-infra scale statefulset cratedb --replicas=1
+kubectl --context $ctx -n octo-infra rollout status statefulset/cratedb
+# register the snapshot directory and restore everything:
+kubectl --context $ctx -n octo-infra exec cratedb-0 -c cratedb -- crash -c "CREATE REPOSITORY restore_repo TYPE fs WITH (location='/data/backup/upgrade-<timestamp>-from-$old')"
+kubectl --context $ctx -n octo-infra exec cratedb-0 -c cratedb -- crash -c "RESTORE SNAPSHOT restore_repo.pre_upgrade ALL WITH (wait_for_completion = true)"
+```
+
+The restore was verified on a throwaway kind cluster (5.9.10 snapshot, 6.4.6 data: counts and GREEN as before). Afterwards the next `Install-OctoKubernetes` upgrades again, because the manifest pins 6.4.6; to stay on the old version use a checkout whose `kubernetes/infra/cratedb.yaml` pins it.
+
 ### Local S3 store (archive COPY staging)
 
 The archive part of a tenant dump uses CrateDB `COPY TO` / `COPY FROM`, which address a location
@@ -345,8 +408,45 @@ Uninstall-OctoKubernetes      # deletes the kind cluster AND its data (Mongo/Cra
 
 `Uninstall-OctoKubernetes` also removes the local root CA from the OS trust store (so no orphaned
 "OctoMesh Local Dev Root CA" is left trusted after the cluster — whose private key it relied on — is
-gone); pass `-KeepCaTrust` to leave it in place. To go back to the legacy docker-compose infra
-afterwards: `Start-OctoInfrastructure`.
+gone); pass `-KeepCaTrust` to leave it in place. The legacy docker-compose infra is deprecated
+(removal 2026-12-31) and no longer a way back, see "Migrating from docker-compose".
+
+## Migrating from docker-compose
+
+**kind is the only supported local infrastructure.** The docker-compose setup
+(`Install-/Start-/Stop-/Uninstall-OctoInfrastructure`, `Get-OctoInfrastructureStatus`,
+`Backup-/Restore-/Get-/Remove-OctoInfrastructure(Backup)`, `infrastructure/docker-compose.yml`) is deprecated and
+**will be removed on 2026-12-31**. Until then every one of those cmdlets prints a warning, and
+`Start-OctoInfrastructure` / `Install-OctoInfrastructure` never change the CrateDB image of existing volumes: CrateDB
+cannot be downgraded and compose would recreate all three nodes at once. They refuse when the data was written by another
+CrateDB version than the compose file pins. The version is known from the images of the existing `cratedb*` containers and
+from a record in `~/.config/octo-tools/compose-crate-version.txt` (written on start, kept by `Stop-`, cleared by
+`Uninstall-`). Volumes of unknown version (no container, no record) need `-AcceptUnknownCrateVolumes` once, and only if
+you know they were written by the version in the compose file.
+
+Compose and kind bind the same host ports, so they never run together. Move over like this:
+
+1. **Your local data is disposable** (most developer machines). Optionally keep a safety copy of the volumes first, then
+   throw the compose stack away and start kind:
+   ```powershell
+   Stop-OctoInfrastructure
+   Backup-OctoInfrastructure -Name before-kind     # optional, stays under infrastructure/backups/
+   Uninstall-OctoInfrastructure                    # deletes the containers AND the volumes
+   Install-OctoKubernetes
+   ```
+   Then create your tenants again (`om-bootstrap-tenant.ps1` in getting-started, or `octo-cli`).
+2. **You want to keep tenant data.** Dump each tenant while compose still runs, move over, restore it into kind:
+   ```powershell
+   # compose still running, services started: dump every tenant you want to keep
+   octo-cli -c Dump -tid <tenantId> -f <tenantId>.tar.gz -w
+   Stop-Octo; Stop-OctoInfrastructure
+   Install-OctoKubernetes            # compose and kind share the ports, so only after the stop
+   Start-Octo
+   octo-cli -c Restore -tid <tenantId> -db <database> -f <tenantId>.tar.gz -w   # into kind, then check the tenant
+   ```
+   Keep the dump files until you checked the tenants in kind. The compose volumes stay on disk until you run
+   `Uninstall-OctoInfrastructure`, so nothing is lost by moving.
+3. You do not need the data at all: skip the backup, run `Uninstall-OctoInfrastructure` and `Install-OctoKubernetes`.
 
 ## Backups
 

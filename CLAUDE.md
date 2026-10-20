@@ -10,7 +10,7 @@ OctoMesh is a data transformation platform that converts raw data into meaningfu
 
 - **Primary Language**: PowerShell scripting
 - **Platform**: .NET 10.0 microservices
-- **Infrastructure**: Docker Compose with MongoDB replica set, CrateDB cluster, and RabbitMQ
+- **Infrastructure**: a local kind cluster (`Install-OctoKubernetes`) with MongoDB, CrateDB and RabbitMQ is the only supported local infrastructure. The Docker Compose setup is deprecated, removal 2026-12-31 (AB#7141)
 - **Frontend**: Angular — Data Refinery Studio (octo-frontend-refinery-studio)
 
 ## Architecture
@@ -61,7 +61,8 @@ helper sets a safe `-Depth` so nested data isn't silently truncated).
 - `Initialize-OctoLaneUserProps -branch <lane>` - Source of the per-checkout, uncommitted `<lane>/Octo.User.props` (imported by every repo's `Directory.Build.props`; sets `RestorePackagesPath=<lane>/.nuget-packages`, so Rider and plain `dotnet build` use the lane cache too). Creates the file only when missing; an existing file (main's carries more settings) is never changed, only checked
 - `Invoke-BuildAndStartOcto` - Build everything and start the application
 
-### Infrastructure Management
+### Infrastructure Management (docker-compose, DEPRECATED, removal 2026-12-31)
+kind (`Install-OctoKubernetes`, below) is the only supported local infrastructure. Every cmdlet in this section and the backup cmdlets print a deprecation warning. `Start-/Install-OctoInfrastructure` never change the CrateDB image of existing volumes (`OctoComposeInfra.psm1`): they refuse when the data was written by another CrateDB version than the compose file pins (a record in `~/.config/octo-tools/compose-crate-version.txt` plus the images of existing `cratedb` containers; `Stop-` records it before the containers go, `Uninstall-` clears it; existing volumes of unknown version need `-AcceptUnknownCrateVolumes` once). Migration: `kubernetes/README.md`, "Migrating from docker-compose".
 - `Start-OctoInfrastructure` - Start Docker infrastructure (MongoDB, CrateDB, RabbitMQ)
 - `Stop-OctoInfrastructure` - Stop Docker infrastructure
 - `Install-OctoInfrastructure` - Initial infrastructure setup
@@ -72,6 +73,7 @@ helper sets a safe `-Depth` so nested data isn't silently truncated).
 ### Local Kubernetes (Kind) dev environment
 An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, the CRDs, and the Communication Operator run inside a local [kind](https://kind.sigs.k8s.io/) cluster (the core .NET services still run as host processes via `Start-Octo`). The two infra modes share the same host ports and **cannot run at the same time**. Full runbook: `kubernetes/README.md`; from-scratch setup: `kubernetes/QUICKSTART.md`.
 - `Install-OctoKubernetes` - Create the kind cluster + CRDs + namespaces + in-cluster infra (incl. seeding the CrateDB application user `octo-system` that deployed adapters connect with, AB#5232) + ingress-nginx/cert-manager, then deploy the operator (idempotent; refuses while the docker-compose infra is up)
+- `Update-OctoCrateDb` - Guarded CrateDB apply/upgrade of a kind cluster (AB#7139); `Install-OctoKubernetes` calls it instead of a plain `kubectl apply` of `infra/cratedb.yaml` (`-SkipCrateDbSnapshot` passes through). `-Context` is mandatory (never the current context). Fresh install: apply. Running version (`sys.nodes`) = manifest `image: crate:<x.y.z>`: no-op. Running newer than the manifest: error, manifest NOT applied (CrateDB cannot be downgraded). Older: free-disk check, snapshot into `path.repo` (`/data/backup`), then step by step (below 5.10.1 to 6.x via 5.10.16), after each step rollout + version + all tables GREEN + a row-count difference is a warning that names the tables; refuses a non-kind context, a volume without a StatefulSet (unless `-AssumeFreshCrateDbVolume`) and unknown major jumps. `-SkipSnapshot` / `-NonInteractive`. getting-started has the same logic as the standalone `scripts/om-upgrade-cratedb.ps1`; keep both in step
 - `Initialize-OctoKindCrateDbUser` - Idempotently seed the CrateDB application user (`octo-system`, name/password read from `kubernetes/operator-dev-values.yaml`) in the kind CrateDB. Run once on clusters created before the seeding step existed — without it, adapter archive writes fail with `trust authentication failed for user "octo-system"`.
 - `Deploy-OctoOperator` - (Re)deploy the Communication Operator standalone from the dev registry (`:main-latest`). Wires up trust for the host's TLS certificate on its own (no client in the cluster has a bypass — see `kubernetes/README.md`): read off the running controller, or exported from the ASP.NET dev-cert store when the controller is down (so `Install-OctoKubernetes` wires it correctly before `Start-Octo` ever ran, AB#5232). Also projects `authUri` on the certificate's SAN hostname plus `additionalValidIssuers` (`https://localhost:5003/`, from `operator-dev-values.yaml`) into every workload. `-SkipControllerTlsTrust` opts out. `-SkipRegistryCheck` deploys against an image already loaded into the node.
 - `Get-OctoKubernetesStatus` - Show pods, Helm releases, host-port reachability and the local S3 store check for the kind cluster (`-SkipS3Probe` keeps it read-only)
@@ -97,7 +99,7 @@ An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, t
 - `Remove-GlobalNuGetPackages [-path <cache>]` - Remove the local 999.0.0 Meshmakers packages from a NuGet package cache (default `~/.nuget/packages`). Each lane restores into its own cache, `<lane>/.nuget-packages`, configured via `RestorePackagesPath` in `<lane>/Octo.User.props`; `Invoke-BuildAll`/`Sync-NuGetPackages` use `Remove-OctoLaneNuGetPackages -laneSettings` instead, which cleans the caches of `Get-OctoRangePackageCaches`: an isolated lane (dev) only its own cache, never the global one; main its lane cache (if `RestorePackagesPath` is set) and the global cache - always only `meshmakers.*/999.0.0`. Without `-laneSettings` this cmdlet cleans just the given path
 - `Copy-NuGetPackages -directory <repo> -branch main [-modifiedSince <time> | -onlyChanged]` / `Copy-AllNuGetPackages -branch main` - Copy DebugL packages into `<lane>/nuget` (Copy-All: newest file per package wins, duplicates are warned about, a newer package already in nuget/ is kept)
 
-### Infrastructure Backup (MongoDB + CrateDB)
+### Infrastructure Backup (MongoDB + CrateDB, docker-compose, DEPRECATED)
 Backups operate on the Docker volumes; stop the infrastructure first (`Stop-OctoInfrastructure`). Stored under `infrastructure/backups/`.
 - `Backup-OctoInfrastructure` - Back up all infrastructure volumes (optional `-Name`, defaults to a timestamp)
 - `Restore-OctoInfrastructure` - Restore volumes from a named backup (`-Name`; omit to list backups)
@@ -124,17 +126,17 @@ This cmdlet pair assumes your clusters do not bind a persistent `cluster-owner` 
 
 - `/modules/` - PowerShell modules for all development commands
 - `/tests/` - Pester tests (`Invoke-Pester ./tests`); they use a fake checkout in `TestDrive` and mock the build step - never run real builds or touch the real NuGet folders from tests
-- `/infrastructure/` - Docker Compose configuration and MongoDB init scripts
+- `/infrastructure/` - Docker Compose configuration and MongoDB init scripts (deprecated, removal 2026-12-31)
 - `/kubernetes/` - Local kind cluster manifests, Helm values, and the dev-env runbooks (`README.md` / `QUICKSTART.md`)
 - `/assets/` - Terminal profile assets and logos
 
 ## Development Workflow
 
-1. Start infrastructure: `Start-OctoInfrastructure`
+1. Start infrastructure: `Install-OctoKubernetes` (first time; afterwards the kind cluster keeps running or is started with Docker)
 2. Build projects: `Invoke-BuildAll`
 3. Start application: `Start-Octo`
 4. Make changes and rebuild as needed
-5. Clean up when done: `Stop-OctoInfrastructure`
+5. Clean up when done: `Stop-Octo` (the kind infra keeps running; `Uninstall-OctoKubernetes` deletes it with its data)
 
 ## Important Notes
 
@@ -142,4 +144,4 @@ This cmdlet pair assumes your clusters do not bind a persistent `cluster-owner` 
 - Zenon plug-in projects require Windows and use MSBuild
 - All PowerShell modules are automatically loaded via profile.ps1
 - Custom user profiles can be added in `~/.pwsh/profile.ps1`
-- Infrastructure runs entirely in Docker containers defined in `infrastructure/docker-compose.yml`
+- Local infrastructure runs in the kind cluster (`kubernetes/`); `infrastructure/docker-compose.yml` is deprecated (removal 2026-12-31)

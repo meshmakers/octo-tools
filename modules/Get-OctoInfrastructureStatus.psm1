@@ -3,6 +3,8 @@ function Get-OctoInfrastructureStatus
 {
     param([switch]$Json)
 
+    Write-OctoComposeDeprecation -Command 'Get-OctoInfrastructureStatus'
+
     if (!(Test-Path $infrastructurePath)) {
         Write-Error "Infrastructure path $infrastructurePath does not exist"
         return;

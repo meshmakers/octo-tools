@@ -59,6 +59,10 @@ is signed by an internal CA the node doesn't trust).
 
 ## 1 · Stop the legacy docker-compose infra
 
+> The docker-compose infra is deprecated (removal 2026-12-31); kind is the only supported local
+> infrastructure. Your data in the compose volumes does not move by itself: see "Migrating from
+> docker-compose" in `README.md` before you uninstall anything.
+
 The kind infra binds the **same** host ports (27017/5672/15672/5432/4301/8333) as the old
 `Start-OctoInfrastructure` stack — they cannot run together. `Install-OctoKubernetes` refuses to
 run while the compose containers are up.
