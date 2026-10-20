@@ -278,7 +278,7 @@ server = "https://$DevRegistry"
                 # Never a plain apply: an existing CrateDB data volume is upgraded step by step
                 # (snapshot first, 5.9 -> 6.x via 5.10.16) and is never downgraded (AB#7139).
                 try {
-                    $null = Update-OctoCrateDb -Context $ctx -ManifestPath (Join-Path $infraDir $m) -SkipSnapshot:$SkipCrateDbSnapshot -NonInteractive:$NonInteractive -AssumeFreshVolume:$AssumeFreshCrateDbVolume
+                    $null = Update-OctoCrateDb -Context $ctx -ManifestPath (Join-Path $infraDir $m) -SkipSnapshot:$SkipCrateDbSnapshot -NonInteractive:($NonInteractive -or $Json) -AssumeFreshVolume:$AssumeFreshCrateDbVolume
                 }
                 catch { Write-Error "CrateDB install/upgrade failed: $($_.Exception.Message)"; return }
                 continue

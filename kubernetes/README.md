@@ -109,7 +109,7 @@ undone: a data directory that a newer version has opened does not start under an
 
 CrateDB 6.x can only be reached from 5.10.1 or later, so a volume below 5.10.1 goes 5.9.x -> 5.10.16 -> 6.x.
 After each step the cmdlet waits for the rollout, the expected version and all tables GREEN, and compares
-the row count of every table with the count before the upgrade (fewer rows is an error). The snapshot
+the row count of every table with the count before the upgrade (fewer rows or a missing table is a loud warning, not an abort). The snapshot
 (`upgrade_<timestamp>.pre_upgrade`) holds the data of the version you came from; there is no downgrade, to go back
 you restore it into a fresh CrateDB of that version. If the disk is too small for the snapshot the cmdlet asks (`-NonInteractive` aborts instead);
 `-SkipCrateDbSnapshot` (on `Install-OctoKubernetes`) or `-SkipSnapshot` (on `Update-OctoCrateDb`) upgrades without it.
