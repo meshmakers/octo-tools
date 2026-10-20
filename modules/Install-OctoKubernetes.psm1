@@ -54,6 +54,12 @@ holds the staging area of the archive COPY TO / COPY FROM dump; without it the d
 An existing CrateDB is upgraded by Update-OctoCrateDb (never a downgrade, snapshot first, 5.9 -> 6.x via
 5.10.16). Pass this to upgrade without the snapshot, e.g. when the disk is too small for it.
 
+.PARAMETER AssumeFreshCrateDbVolume
+A CrateDB volume (data-cratedb-0) without a StatefulSet is refused, because its data may be newer than the manifest; this treats it as empty.
+
+.PARAMETER NonInteractive
+Never ask a question; where one would be needed (CrateDB snapshot without enough disk space) the install aborts.
+
 .PARAMETER ExposeLan
 Bind the infra + ingress host ports on 0.0.0.0 instead of the default 127.0.0.1
 (loopback), so other machines on the LAN can reach them. Exposes MongoDB / CrateDB /
@@ -83,6 +89,10 @@ Requires kind, helm, and kubectl on PATH. The CRDs chart is read from
         [Parameter()] [switch]$SkipS3Store,
         # Upgrade an existing CrateDB without the pre-upgrade snapshot (see Update-OctoCrateDb).
         [Parameter()] [switch]$SkipCrateDbSnapshot,
+        # Treat an existing CrateDB volume without a StatefulSet as empty (see Update-OctoCrateDb).
+        [Parameter()] [switch]$AssumeFreshCrateDbVolume,
+        # Never ask a question (CrateDB snapshot without enough disk space aborts instead). Use it for agents and CI.
+        [Parameter()] [switch]$NonInteractive,
         # Skip installing ingress-nginx + cert-manager + the mm-cloud-issuer CA ClusterIssuer.
         # By default they are installed so the local cluster exposes web workloads like staging.
         [Parameter()] [switch]$SkipIngress,
@@ -268,7 +278,7 @@ server = "https://$DevRegistry"
                 # Never a plain apply: an existing CrateDB data volume is upgraded step by step
                 # (snapshot first, 5.9 -> 6.x via 5.10.16) and is never downgraded (AB#7139).
                 try {
-                    $null = Update-OctoCrateDb -Context $ctx -ManifestPath (Join-Path $infraDir $m) -SkipSnapshot:$SkipCrateDbSnapshot
+                    $null = Update-OctoCrateDb -Context $ctx -ManifestPath (Join-Path $infraDir $m) -SkipSnapshot:$SkipCrateDbSnapshot -NonInteractive:$NonInteractive -AssumeFreshVolume:$AssumeFreshCrateDbVolume
                 }
                 catch { Write-Error "CrateDB install/upgrade failed: $($_.Exception.Message)"; return }
                 continue
