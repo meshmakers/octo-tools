@@ -302,6 +302,17 @@ reachable and every link resolves, and that no file carries invisible characters
 Tag, zero-width, bidirectional overrides) - text a reviewer cannot see but a model reads.
 Findings are grouped in the order to fix them: integrity, entry point, docs, budgets.
 
+`AGENTS.md` is the one canonical file and must work with any agent, so it and `docs/*.md`
+carry no Claude-style `@path` import (`@docs/x.md`, `@./a.md`, `@~/x.md`, `@/abs/x.md`,
+`@AGENTS.md`): other agents ignore that line and never see the imported text. Rule
+`no-eager-import` (error, non-relaxable) reports each one with file and line; only the
+`CLAUDE.md` shim imports. Like Claude Code it reads `@` at the start of a line or after
+whitespace and skips inline code, fenced blocks and HTML comments; e-mail addresses, npm
+scopes, decorators and mentions are not imports; an `@name/sub` without a file extension
+and without a `./`, `~/` or `/` prefix is treated as a package, not a path. Borderline:
+`@/components` is reported, while `**@docs/x.md**` (no whitespace before the `@`) is not.
+A `CLAUDE.md` that is still the entry point is checked the same way.
+
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
 from each doc's `applies_to` frontmatter, and writes the `CLAUDE.md` shim. It never writes
 prose, and leaves a `CLAUDE.md` with real content alone unless you pass `-Force`.
