@@ -411,8 +411,9 @@ function Test-EagerImport {
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($lines[$i] -notmatch '@') { continue }
             $line = [regex]::Replace($lines[$i], '(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)', '')
-            foreach ($m in [regex]::Matches($line, '(?<!\S)@(\S+)')) {
-                $target = ($m.Groups[1].Value -replace '#.*$', '').TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '"', "'")
+            foreach ($m in [regex]::Matches($line, '(?<!\S)@((?:[^\s\\]|\\ )+)')) {
+                # '\ ' is an escaped space inside the path, as Claude Code reads it.
+                $target = ($m.Groups[1].Value.Replace('\ ', '_') -replace '#.*$', '').TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '"', "'")
                 if ($target -match '^(\.{1,2}/|~/|/)[^/\s]' -or $target -match $textFile -or $target -match $nestedFile) {
                     $Findings.Add('no-eager-import', "$($Repo.Relative($f)):$($i + 1)", "'@$target' is a Claude-only import: other agents ignore it and never see that content. Link it as [text]($target) or state the path in prose")
                 }

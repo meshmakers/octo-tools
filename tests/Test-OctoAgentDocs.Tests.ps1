@@ -612,6 +612,8 @@ Describe 'no-eager-import' {
         @{ what = 'an import after a blockquote marker'; text = '> @docs/x.md' }
         @{ what = 'an import with a heading fragment'; text = 'See @docs/x.md#setup' }
         @{ what = 'a source file in a folder'; text = 'Read @src/Foo.cs' }
+        @{ what = 'a path with an escaped space'; text = 'See @Design\ Docs/api-conventions.md now' }
+        @{ what = 'a bare name with an escaped space'; text = 'See @My\ Notes.md now' }
     ) {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' $text
