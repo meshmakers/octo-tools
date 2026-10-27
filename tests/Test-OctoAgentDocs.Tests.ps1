@@ -614,7 +614,7 @@ Describe 'globs-match' {
         $f.Count | Should -Be 1
         $f[0].file | Should -Be 'docs/one.md:3'
         $f[0].message | Should -Match "'moved/\*\*'"
-        $f[0].severity | Should -Be 'warn'
+        $f[0].severity | Should -Be 'error'
         $f[0].tier | Should -Be 3
     }
     It 'reports only the globs that do not match' {
@@ -679,6 +679,11 @@ Describe 'globs-match' {
         Set-Doc $r 'src/{a,b'
         @((Get-RuleFinding (Get-Result $r) 'globs-match').message | Where-Object { $_ -match "unclosed '\{'" }).Count | Should -Be 1
     }
+    It 'fails enforce mode on a stale glob' {
+        $r = New-Fixture
+        Set-Doc $r 'moved/**'
+        { Test-OctoAgentDocs -Path $r -Mode enforce 6>$null 3>$null } | Should -Throw '*error-severity finding*'
+    }
     It 'can be switched off by the repository and is explained' {
         $r = New-Fixture
         Set-Doc $r 'moved/**'
@@ -686,6 +691,7 @@ Describe 'globs-match' {
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
         $row = ((Test-OctoAgentDocs -Explain globs-match -Json 6>$null) | ConvertFrom-Json).data.rules[0]
         $row.tier | Should -Be 3
+        $row.nonRelaxable | Should -BeFalse
         $row.why | Should -Not -BeNullOrEmpty
         $row.fix | Should -Not -BeNullOrEmpty
     }

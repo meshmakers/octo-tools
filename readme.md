@@ -302,7 +302,7 @@ reachable and every link resolves, and that no file carries invisible characters
 Tag, zero-width, bidirectional overrides) - text a reviewer cannot see but a model reads.
 Findings are grouped in the order to fix them: integrity, entry point, docs, budgets.
 
-Rule `globs-match` (warn) reports each `applies_to` glob that matches no file, with the doc and
+Rule `globs-match` (error, so enforce mode stops a rename that orphans a doc; a repository may lower it in `.agent-docs.json` with a reason) reports each `applies_to` glob that matches no file, with the doc and
 the line of `applies_to`, so a doc is never routed to code that was moved or renamed. With
 several globs only the ones that match nothing are reported; `background: true` docs are not
 checked. The files are what git lists (tracked, plus untracked files that are not ignored),

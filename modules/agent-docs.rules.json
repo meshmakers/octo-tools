@@ -55,7 +55,7 @@
       {}
     ],
     "globs-match": [
-      "warn",
+      "error",
       {}
     ],
     "reference-resolves": [
@@ -161,7 +161,7 @@
     "globs-match": {
       "tier": 3,
       "why": "A glob that matches no file routes an agent to a doc for code that was moved or renamed, so the doc is never read when it matters.",
-      "fix": "Update the glob to the new location, or remove it; a doc that has no code to route on belongs under background: true."
+      "fix": "Update the glob to the new location, or remove it; a doc that has no code to route on belongs under background: true. A repository that must keep a glob for code it does not have yet can lower the rule in .agent-docs.json, with a reason."
     },
     "reference-resolves": {
       "tier": 2,
