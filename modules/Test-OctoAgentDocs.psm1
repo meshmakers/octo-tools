@@ -145,7 +145,7 @@ function Test-OctoAgentDocs {
 
     .DESCRIPTION
     Checks the entry point (AGENTS.md, or CLAUDE.md before a migration), the README and
-    docs/*.md: sections, budgets, frontmatter, links, the CLAUDE.md shim, invisible
+    docs/*.md: sections, budgets, frontmatter, applies_to globs, links, the CLAUDE.md shim, invisible
     characters and the generated routing table. -Fix regenerates only the routing table and
     the shim; hand-written text is never changed. 'Test-OctoAgentDocs -Explain -All' lists
     every rule with its reason.
@@ -237,6 +237,7 @@ function Test-OctoAgentDocs {
         $findings.Add('migration-pending', $briefName, 'Migration brief is still present - follow its steps and delete it in the migration commit')
     }
     $routes = Test-DocsFolder -Rules $rules -Repo $repo -Findings $findings
+    Test-GlobMatch -Rules $rules -Repo $repo -Findings $findings
     Test-InvisibleCharacter -Rules $rules -Repo $repo -Findings $findings
     Test-ReferenceSet -Rules $rules -Repo $repo -Findings $findings
     if ($repo.EntryPath) {
@@ -345,6 +346,78 @@ function Test-DocsFolder {
     return , $routes
 }
 
+function Test-GlobMatch {
+    # Every applies_to glob must match at least one file; a stale glob routes to nothing.
+    # Background docs have no globs to check.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    if (-not $Rules.IsOn('globs-match')) { return }
+    $files = $null
+    foreach ($d in $Repo.Docs) {
+        $content = $Repo.ReadText($d.FullName)
+        $fm = Get-Frontmatter -Content $content
+        if (-not $fm['applies_to'] -or $fm['background'] -match '^(true|yes)$') { continue }
+        if ($null -eq $files) { $files = Get-RepositoryFile -Rules $Rules -Repo $Repo }
+        $line = 1 + @($content -split "`n" | Select-String -Pattern '^applies_to\s*:' -List | ForEach-Object { $_.LineNumber - 1 } | Select-Object -First 1)[0]
+        foreach ($glob in (Split-GlobList -Value $fm['applies_to'])) {
+            $pattern = ConvertTo-GlobRegex -Glob $glob
+            if (-not $pattern) { $Findings.Add('globs-match', "docs/$($d.Name):$line", "applies_to glob '$glob' has an unclosed '{'"); continue }
+            $regex = [regex]::new($pattern)
+            if (-not $files.Where({ $regex.IsMatch($_) }, 'First')) {
+                $Findings.Add('globs-match', "docs/$($d.Name):$line", "applies_to glob '$glob' matches no file - the doc is routed to code that is not there")
+            }
+        }
+    }
+}
+
+function Get-RepositoryFile {
+    # Repository-relative paths: what git knows (tracked, plus untracked files that are not
+    # ignored) in a git checkout, otherwise a walk. Folders in scan.ignore are left out of both.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo)
+    $ignore = @($Rules.Config['scan']['ignore'])
+    $paths = $null
+    if (Test-Path -LiteralPath (Join-Path $Repo.Root '.git')) {
+        $out = & git -C $Repo.Root ls-files -z --cached --others --exclude-standard 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            # --cached still lists a tracked file that was deleted from the working tree.
+            $gone = & git -C $Repo.Root ls-files -z --deleted 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $deleted = @(("$($gone -join '')" -split "`0") | Where-Object { $_ })
+                $paths = @(("$($out -join '')" -split "`0") | Where-Object { $_ -and $deleted -cnotcontains $_ })
+            }
+        }
+    }
+    if ($null -eq $paths) {
+        $paths = @(Get-ChildItem -LiteralPath $Repo.Root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $Repo.Relative($_.FullName) })
+    }
+    return , @($paths | Where-Object { -not (($_ -split '/' | Select-Object -SkipLast 1) | Where-Object { $ignore -contains $_ }) })
+}
+
+function ConvertTo-GlobRegex {
+    # '**' crosses folders, '*' and '?' stay inside one, {a,b} alternates. A glob without a
+    # slash matches at any depth, and a trailing slash means everything below it. $null for an
+    # unclosed '{'.
+    param([string]$Glob)
+    $g = $Glob.Trim() -replace '^\./', '' -replace '^/', ''
+    if ($g.EndsWith('/')) { $g += '**' }
+    $body = [System.Text.StringBuilder]::new()
+    $depth = 0
+    for ($i = 0; $i -lt $g.Length; $i++) {
+        $c = $g[$i]
+        if ($c -eq '*' -and $i + 1 -lt $g.Length -and $g[$i + 1] -eq '*') {
+            $i++
+            if ($i + 1 -lt $g.Length -and $g[$i + 1] -eq '/') { $i++; [void]$body.Append('(?:.*/)?') } else { [void]$body.Append('.*') }
+        }
+        elseif ($c -eq '*') { [void]$body.Append('[^/]*') }
+        elseif ($c -eq '?') { [void]$body.Append('[^/]') }
+        elseif ($c -eq '{') { $depth++; [void]$body.Append('(?:') }
+        elseif ($c -eq '}' -and $depth -gt 0) { $depth--; [void]$body.Append(')') }
+        elseif ($c -eq ',' -and $depth -gt 0) { [void]$body.Append('|') }
+        else { [void]$body.Append([regex]::Escape([string]$c)) }
+    }
+    if ($depth -gt 0) { return $null }
+    return "^$(if ($g -notmatch '/') { '(?:.*/)?' })$($body.ToString())$"
+}
+
 function Get-Frontmatter {
     # 'key: value' lines between the two '---' fences. Quotes and [ ] around a value are
     # dropped; other YAML shapes are not supported and read as missing.
@@ -362,7 +435,8 @@ function Get-Frontmatter {
 function Split-GlobList {
     # Commas separate globs, except inside a {a,b} alternation.
     param([string]$Value)
-    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # A glob quoted inside a flow list ([a/**, "b/**"]) loses its quotes.
+    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() -replace '^(["''])(.*)\1$', '$2' } | Where-Object { $_ })
 }
 
 function Test-InvisibleCharacter {
