@@ -380,8 +380,10 @@ function Get-RepositoryFile {
         if ($LASTEXITCODE -eq 0) {
             # --cached still lists a tracked file that was deleted from the working tree.
             $gone = & git -C $Repo.Root ls-files -z --deleted 2>$null
-            $deleted = @(("$($gone -join '')" -split "`0") | Where-Object { $_ })
-            $paths = @(("$($out -join '')" -split "`0") | Where-Object { $_ -and $deleted -cnotcontains $_ })
+            if ($LASTEXITCODE -eq 0) {
+                $deleted = @(("$($gone -join '')" -split "`0") | Where-Object { $_ })
+                $paths = @(("$($out -join '')" -split "`0") | Where-Object { $_ -and $deleted -cnotcontains $_ })
+            }
         }
     }
     if ($null -eq $paths) {
@@ -433,7 +435,8 @@ function Get-Frontmatter {
 function Split-GlobList {
     # Commas separate globs, except inside a {a,b} alternation.
     param([string]$Value)
-    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # A glob quoted inside a flow list ([a/**, "b/**"]) loses its quotes.
+    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() -replace '^(["''])(.*)\1$', '$2' } | Where-Object { $_ })
 }
 
 function Test-InvisibleCharacter {

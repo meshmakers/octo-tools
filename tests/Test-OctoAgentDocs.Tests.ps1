@@ -227,7 +227,7 @@ Describe 'docs and frontmatter' {
     }
     It 'reads <shape> in applies_to' -ForEach @(
         @{ shape = 'a quoted value'; value = "'*.cs, tests/**'"; globs = @('*.cs', 'tests/**') }
-        @{ shape = 'a flow sequence'; value = '[src/**, "tests/**"]'; globs = @('src/**', '"tests/**"') }
+        @{ shape = 'a flow sequence'; value = '[src/**, "tests/**"]'; globs = @('src/**', 'tests/**') }
         @{ shape = 'a brace expansion without splitting it'; value = 'src/**/*.{cs,csproj}, tests/**'; globs = @('src/**/*.{cs,csproj}', 'tests/**') }
     ) {
         $r = New-Fixture -NoFix
@@ -664,6 +664,12 @@ Describe 'globs-match' {
         $f = Get-RuleFinding (Get-Result $r) 'globs-match'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match "'gen/\*\*'"
+    }
+    It 'reads quoted globs in a flow list' {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'tests/t.cs') 'x'
+        Set-Doc $r '[src/**, "tests/**", ''src/*.cs'']'
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
     }
     It 'does not count a tracked file that was deleted from the working tree' {
         $r = New-Fixture
