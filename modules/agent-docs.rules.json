@@ -54,6 +54,10 @@
       "error",
       {}
     ],
+    "globs-match": [
+      "warn",
+      {}
+    ],
     "reference-resolves": [
       "error",
       {
@@ -153,6 +157,11 @@
       "tier": 3,
       "why": "A doc nobody routes to is never read, and a doc marked both routed and background has no clear role.",
       "fix": "Give it applies_to globs, or mark it background: true if it is reference material only."
+    },
+    "globs-match": {
+      "tier": 3,
+      "why": "A glob that matches no file routes an agent to a doc for code that was moved or renamed, so the doc is never read when it matters.",
+      "fix": "Update the glob to the new location, or remove it; a doc that has no code to route on belongs under background: true."
     },
     "reference-resolves": {
       "tier": 2,

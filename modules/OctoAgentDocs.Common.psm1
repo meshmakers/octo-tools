@@ -13,7 +13,7 @@ $script:FencePattern = '(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[`~]*[ \t]*
 # Every rule the built-in ruleset defines.
 $script:RuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
-    'frontmatter-present', 'doc-reachable', 'reference-resolves', 'reference-to-shim',
+    'frontmatter-present', 'doc-reachable', 'globs-match', 'reference-resolves', 'reference-to-shim',
     'routing-current', 'docs-count', 'shim-valid', 'required-sections',
     'no-invisible-characters', 'migration-pending'
 )
