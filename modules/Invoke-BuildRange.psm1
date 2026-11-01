@@ -698,6 +698,8 @@ function Invoke-BuildRange {
         [switch]$verifyTests,
         [ValidateSet('Auto', 'On', 'Off')]
         [string]$laneIsolation = 'Auto',
+        # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog.
+        [switch]$skipCkSync,
         [switch]$Json
     )
 
@@ -865,6 +867,11 @@ function Invoke-BuildRange {
             $savedRepoEnvironment = Set-OctoBuildEnvironment -environment @{ RestoreSources = $entry.RestoreSources }
         }
         try {
+            # AB#7974: before the CK compile gate of this repository runs, bring the private catalog's intermediate
+            # versions of its ckLanguage 2 models into the lane's local catalog (warning + fix command on failure).
+            if ($configuration -ieq 'DebugL' -and $entry.Mode -eq 'dotnet' -and -not $skipCkSync) {
+                [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.Path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
+            }
             $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
             $buildWatch.Stop()
             $tests = $null

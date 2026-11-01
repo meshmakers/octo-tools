@@ -76,6 +76,9 @@ Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-commo
 
 Per repository, in build order:
 
+0. (DebugL, AB#7974) `Sync-OctoCkIntermediateVersions` brings the private catalog's intermediate versions of the
+   repository's ckLanguage 2 CK models into `<lane>/.octo/local-catalog`, so the CK compile gate does not fail with
+   `OCTO-CK203` (see "CK intermediate versions" below). `-skipCkSync` turns it off.
 1. `dotnet build -c DebugL -nodeReuse:false` of the solution's `src/` projects only (a temporary
    `.slnf` in the temp folder; `-includeTests` builds the whole solution, `-verifyTests` compiles
    the projects outside `src/` right after with a second `.slnf`). There is no forced restore: the
@@ -122,6 +125,7 @@ build fails on locked files.
 | `-msbuildProperties` | Extra MSBuild global properties (`-p:Name=Value`) for the `dotnet build` of **every** repository in the run. Global properties override values set in project files. `Invoke-BuildAll` and `Invoke-Build` accept the same parameter. Not applied to `build.ps1` / frontend / zenon builds (warning). Do **not** use it for `OctoPublishCkModel`: that stops every CK model of the run from being published into the local catalog, so downstream CK compiles see stale models (a warning is printed when `OctoPublishCkModel=false` applies to more than one repository). |
 | `-msbuildPropertiesPerRepo` | Properties for single repositories (overriding `-msbuildProperties`; a key outside the selected range is warned about, add it with `-include`), e.g. `@{ 'octo-identity-services' = @{ OctoPublishCkModel = 'false' } }` to keep only identity's CK model out of the shared local catalog. Also on `Invoke-BuildAll`. |
 | `-purgeStaleCache` | Purge global-cache `999.0.0` folders whose recorded SHA-512 differs from `<checkout>/nuget` before the first build (see below). Without it they are only reported. |
+| `-skipCkSync` | Skip the CK intermediate-version sync before each repository (also on `Invoke-BuildAll`). |
 | `-WhatIf` / `-Json` | Print the plan only / emit one JSON document (early exits emit `success: false` and set `$LASTEXITCODE` to 1). |
 
 The build order (`mm-*` -> pinned `octo-*` -> remaining `octo-*` alphabetically) lives in
@@ -153,6 +157,28 @@ Notes for the loop:
   tenant is resolved (with a downgrade guard), so a rebuilt and restarted service brings its newer
   System model along. The local CK catalog is `<checkout>/.octo/local-catalog` (Start-Octo points
   `OCTO_LocalFileSystemCatalog__RootPath` at it).
+
+**CK intermediate versions (AB#7974).** The compile gate of a `ckLanguage: 2` model (baseline source `Local`, the
+default outside CI) compares the declared version with the newest version of the same major below it in the local
+catalog (plus the cached GitHub catalogs, which `Octo.User.props` usually switches off). When the local catalog holds
+`System.Identity` 2.26.0 but never got 2.27.0/2.28.0 (built only in other lanes or PR builds with
+`OctoPublishCkModel=false`), the diff 2.26.0 -> 2.29.0 lacks the acknowledgements that 2.28.0 carries and the build fails
+with 7x `OCTO-CK203`. `Invoke-BuildAll` and `Invoke-BuildRange` (DebugL) therefore run, before each repository,
+
+```powershell
+Sync-OctoCkIntermediateVersions -repositoryPath <repo> -localCatalogRoot <lane>/.octo/local-catalog [-WhatIf]
+```
+
+For every `ckModel.yaml` with `ckLanguage: 2` below `<repo>/src` it lists the private catalog's versions of the declared
+major strictly between the newest local version below the declared one and the declared version (read from the GitHub
+Pages mirror `https://meshmakers.github.io/construction-kit-libraries-build/`, no token) and publishes them byte for
+byte, ascending, with `octo-ckc -c Publish -f <file> -c LocalFileSystemCatalog -lcr <lane>/.octo/local-catalog` (index
+updated). Only published versions are copied; a local catalog without a version of that major gets nothing. An
+unreachable mirror is a warning and changes nothing; a failed publish prints a warning with the exact command. octo-ckc
+is the lane's `octo-construction-kit-engine/bin/DebugL/net10.0/publish/octo-ckc`, else the one on `PATH` (`-ckc`).
+The logic is the script block of `octo-pipeline-templates/templates/steps/ck-sync-intermediate-versions.yml` (the same
+rule the r* tag builds use to fill the public catalog), vendored verbatim as `modules/scripts/Sync-CkIntermediateVersions.ps1`;
+`tests/CkIntermediateSync.Tests.ps1` checks the copy when a templates checkout is found (`OCTO_PIPELINE_TEMPLATES_PATH`).
 
 # Working on many tenants
 
