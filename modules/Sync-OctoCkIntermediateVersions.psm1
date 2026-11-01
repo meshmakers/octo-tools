@@ -68,9 +68,13 @@ function Sync-OctoCkIntermediateVersions {
         ([IO.Path]::GetFullPath($localCatalogRoot).TrimEnd('/', '\') -replace '\\', '/') -like '*/.octo/local-catalog') {
         $laneRoot = Split-Path -Parent (Split-Path -Parent ([IO.Path]::GetFullPath($localCatalogRoot).TrimEnd('/', '\')))
     }
+    # Without -branch the lane is the checkout that holds the repository (a profile loaded from another lane must not
+    # redirect the sync into its own catalog).
+    if (-not $laneRoot -and [string]::IsNullOrWhiteSpace($branch) -and $repositoryPath.Count -gt 0) {
+        $laneRoot = Split-Path -Parent ([IO.Path]::GetFullPath($repositoryPath[0]).TrimEnd('/', '\'))
+    }
     if (-not $laneRoot -and ([string]::IsNullOrWhiteSpace($localCatalogRoot) -or [string]::IsNullOrWhiteSpace($ckc))) {
         $root = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue
-        if (-not $root -and $repositoryPath.Count -gt 0) { $root = Split-Path -Parent ([IO.Path]::GetFullPath($repositoryPath[0]).TrimEnd('/', '\')) }
         if ($root) {
             $laneRoot = if (Get-Command Resolve-OctoBranchRootPath -ErrorAction SilentlyContinue) {
                 (Resolve-OctoBranchRootPath -branch $branch -root $root).BranchRootPath
@@ -100,7 +104,8 @@ function Sync-OctoCkIntermediateVersions {
     }
 
     if ([string]::IsNullOrWhiteSpace($ckc)) {
-        $laneCkc = if ($laneRoot) { Join-Path $laneRoot 'octo-construction-kit-engine/bin/DebugL/net10.0/publish/octo-ckc' } else { $null }
+        $exeName = if ($IsWindows) { 'octo-ckc.exe' } else { 'octo-ckc' }
+        $laneCkc = if ($laneRoot) { Join-Path $laneRoot "octo-construction-kit-engine/bin/DebugL/net10.0/publish/$exeName" } else { $null }
         if ($laneCkc -and (Test-Path -LiteralPath $laneCkc)) { $ckc = $laneCkc }
         elseif (Get-Command octo-ckc -ErrorAction SilentlyContinue) { $ckc = (Get-Command octo-ckc).Source }
         else { $ckc = 'octo-ckc' }
@@ -108,6 +113,9 @@ function Sync-OctoCkIntermediateVersions {
 
     $script = Join-Path $PSScriptRoot 'scripts/Sync-CkIntermediateVersions.ps1'
     $dryRun = [bool]$WhatIfPreference
+    if (-not $dryRun -and -not $PSCmdlet.ShouldProcess($localCatalogRoot, "Publish missing intermediate versions of $($paths.Count) CK model(s)")) {
+        return [pscustomobject]@{ Success = $true; Skipped = $true; CkPaths = $paths; LocalCatalogRoot = $localCatalogRoot; ExitCode = 0 }
+    }
     $workDir = Join-Path ([IO.Path]::GetTempPath()) ("octo-ck-sync-local-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $workDir -WhatIf:$false | Out-Null
     $environment = [ordered]@{
@@ -139,13 +147,18 @@ function Sync-OctoCkIntermediateVersions {
         Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
     }
     $lines = @($output | ForEach-Object { "$_" })
-    if (-not $Quiet) { $lines | ForEach-Object { Write-Host $_ } }
+    foreach ($line in $lines) {
+        # The script's WARNING:/ERROR: lines reach the warning stream also with -Quiet (-Json builds, -WarningVariable).
+        if ($line -match '^(WARNING|ERROR): (.*)$') { Write-Warning $Matches[2] }
+        elseif (-not $Quiet -or $exit -ne 0) { Write-Host $line }
+    }
 
-    $repoArg = if ($repositoryPath.Count -gt 0) { "-repositoryPath $($repositoryPath -join ',')" } else { "-ckPath $($paths -join ',')" }
-    $fix = "Sync-OctoCkIntermediateVersions $repoArg -localCatalogRoot $localCatalogRoot   (per version: octo-ckc -c Publish -f <ck-<name>-<version>.json from the private catalog> -c LocalFileSystemCatalog -lcr $localCatalogRoot)"
+    $quote = { param([string]$v) "'" + ($v -replace "'", "''") + "'" }
+    $repoArg = if ($repositoryPath.Count -gt 0) { "-repositoryPath " + (($repositoryPath | ForEach-Object { & $quote $_ }) -join ',') } else { "-ckPath " + (($paths | ForEach-Object { & $quote $_ }) -join ',') }
+    $fix = "Sync-OctoCkIntermediateVersions $repoArg -localCatalogRoot $(& $quote $localCatalogRoot) -privateCatalogLocation $(& $quote $privateCatalogLocation) -ckc $(& $quote $ckc)"
+    $manual = "per missing version, ascending: octo-ckc -c Publish -f <ck-<name>-<version>.json taken byte for byte from the private catalog> -c LocalFileSystemCatalog -lcr $localCatalogRoot"
     if ($exit -ne 0) {
-        if ($Quiet) { $lines | ForEach-Object { Write-Host $_ } }
-        Write-Warning "CK intermediate-version sync failed (exit $exit). A ckLanguage 2 build may now fail with OCTO-CK203. Fix: $fix"
+        Write-Warning "CK intermediate-version sync failed (exit $exit). A ckLanguage 2 build may now fail with OCTO-CK203. Fix: $fix   # or by hand, $manual"
     }
     return [pscustomobject]@{
         Success          = ($exit -eq 0)
@@ -155,6 +168,7 @@ function Sync-OctoCkIntermediateVersions {
         ExitCode         = $exit
         Output           = $lines
         FixCommand       = $fix
+        ManualFix        = $manual
     }
 }
 

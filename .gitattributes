@@ -1,0 +1,2 @@
+# Compiled CK model fixtures are compared by SHA-256: keep their bytes (no EOL conversion).
+tests/fixtures/ck-sync/*.json -text

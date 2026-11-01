@@ -124,12 +124,15 @@ function Read-CkSyncJson {
 # Every version of one major of a model in a catalog, both roots: Version, FilePath (catalog-relative), Root.
 # A root without catalog.json or without the model contributes nothing; a model index the root lists but the
 # location does not answer is an error (a lagging or broken catalog must not look like "nothing published").
+# -RequireCatalog (the source): no root index at all is an error too, never "nothing to sync".
 function Get-CkSyncVersions {
-  param([string]$Location, [string]$ModelName, [int]$Major)
+  param([string]$Location, [string]$ModelName, [int]$Major, [switch]$RequireCatalog)
   $result = @()
+  $rootsFound = 0
   foreach ($root in $script:CkSyncRoots) {
     $rootIndex = Read-CkSyncJson $Location ($root + 'catalog.json')
     if ($null -eq $rootIndex) { continue }
+    $rootsFound++
     foreach ($model in @($rootIndex.models | Where-Object { [string]::Equals($_.modelName, $ModelName, [StringComparison]::OrdinalIgnoreCase) })) {
       $modelIndex = Read-CkSyncJson $Location $model.catalogPath
       if ($null -eq $modelIndex) { throw "[CK sync] '$Location' lists '$($model.catalogPath)' but does not serve it" }
@@ -143,6 +146,9 @@ function Get-CkSyncVersions {
         }
       }
     }
+  }
+  if ($RequireCatalog -and $rootsFound -eq 0) {
+    throw "[CK sync] '$Location' serves no catalog index ($($script:CkSyncRoots -join 'catalog.json, ')catalog.json)"
   }
   return @($result | Sort-Object Version)
 }
@@ -176,7 +182,10 @@ function Invoke-CkSyncMain {
   $ckPaths = @(Split-CkSyncList $env:OCTO_CKSYNC_CK_PATHS)
   $catalogs = @(Split-CkSyncList $env:OCTO_CKSYNC_CATALOGS)
   $dryRun = Test-CkSyncTrue $env:OCTO_CKSYNC_DRYRUN
-  $mode = if (-not [string]::IsNullOrWhiteSpace($env:OCTO_CKSYNC_MODE)) { $env:OCTO_CKSYNC_MODE.Trim().ToLowerInvariant() }
+  # OCTO_CKSYNC_MODE is for octo-tools only: on a build agent the mode always follows the build (a pipeline variable
+  # of that name must not switch the release sync off or down to a report).
+  $modeOverride = if (Test-CkSyncTrue $env:TF_BUILD) { '' } else { "$env:OCTO_CKSYNC_MODE" }
+  $mode = if (-not [string]::IsNullOrWhiteSpace($modeOverride)) { $modeOverride.Trim().ToLowerInvariant() }
           elseif (Test-CkSyncTrue $env:OCTO_CKSYNC_IS_RELEASE) { 'apply' }
           elseif (Test-CkSyncTrue $env:OCTO_CKSYNC_IS_MAIN) { 'report' }
           else { 'off' }
@@ -204,12 +213,13 @@ function Invoke-CkSyncMain {
   $failed = 0; $published = 0; $missingTotal = 0
   try {
     foreach ($ckPath in $ckPaths) {
+     try {
       $model = Get-CkSyncDeclaredModel $ckPath
       if ($onlyCkLanguage2 -and $model.CkLanguage -lt 2) {
         Write-Host "[CK sync] $($model.Name)-$($model.Version): ckLanguage $($model.CkLanguage), skipped (only ckLanguage 2 models are gated hard)."
         continue
       }
-      try { $sourceVersions = Get-CkSyncVersions $locations[$source] $model.Name $model.Version.Major }
+      try { $sourceVersions = Get-CkSyncVersions $locations[$source] $model.Name $model.Version.Major -RequireCatalog }
       catch {
         Write-CkSyncIssue warning "[CK sync] $($model.Name)-$($model.Version): source catalog '$source' unreadable: $($_.Exception.Message). Nothing synced for this model; the publish gate decides."
         continue
@@ -265,22 +275,38 @@ function Invoke-CkSyncMain {
             $failed++
             break
           }
+          # Read back what the target holds now; a version that cannot be read back or differs stops the line.
           $check = Join-Path $script:CkSyncTemp ('check-' + [IO.Path]::GetFileName($m.FilePath))
           $relTarget = $m.FilePath
-          if ((Save-CkSyncFile $targetLocation $relTarget $check)) {
-            $targetSha = (Get-FileHash -LiteralPath $check -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($targetSha -ne $sha) {
-              Write-CkSyncIssue error "[CK sync] $($m.Name)-$($m.Version) in '$target' differs from '$source' (sha256 $targetSha vs. $sha)."
-              $failed++
-              break
-            }
-            Write-Host "[CK sync] $($m.Name)-$($m.Version) is in $target, byte-identical (sha256 $sha)."
-          } else {
-            Write-Host "[CK sync] $($m.Name)-$($m.Version) published to $target (read-back not available yet at '$relTarget')."
+          $readBack = $false
+          for ($attempt = 1; $attempt -le 3 -and -not $readBack; $attempt++) {
+            $readBack = Save-CkSyncFile $targetLocation $relTarget $check
+            if (-not $readBack -and $targetLocation -notlike 'dir:*' -and $attempt -lt 3) { Start-Sleep -Seconds 5 }
           }
+          if (-not $readBack) {
+            Write-CkSyncIssue error "[CK sync] $($m.Name)-$($m.Version): '$target' does not serve '$relTarget' after the publish; the version is not verified. Later versions of the line were not published. Next step: check the catalog, then re-run the job."
+            $failed++
+            break
+          }
+          $targetSha = (Get-FileHash -LiteralPath $check -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($targetSha -ne $sha) {
+            Write-CkSyncIssue error "[CK sync] $($m.Name)-$($m.Version) in '$target' differs from '$source' (sha256 $targetSha vs. $sha)."
+            $failed++
+            break
+          }
+          Write-Host "[CK sync] $($m.Name)-$($m.Version) is in $target, byte-identical (sha256 $sha)."
           $published++
         }
       }
+     } catch {
+      # report (main) never fails the build; apply (r* tag) stops on anything unexpected.
+      if ($mode -eq 'report' -or $dryRun) {
+        Write-CkSyncIssue warning "[CK sync] '$ckPath': $($_.Exception.Message). Nothing reported for this model."
+      } else {
+        Write-CkSyncIssue error "[CK sync] '$ckPath': $($_.Exception.Message). Nothing further published for this model."
+        $failed++
+      }
+     }
     }
   } finally {
     Remove-Item -LiteralPath $script:CkSyncTemp -Recurse -Force -ErrorAction SilentlyContinue

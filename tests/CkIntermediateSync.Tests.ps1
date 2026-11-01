@@ -79,7 +79,8 @@ Describe 'Vendored script' {
         $lines = Get-Content -LiteralPath $template
         $start = ($lines | Select-String -Pattern '^\s+script: \|\s*$' | Select-Object -First 1).LineNumber
         $body = foreach ($l in $lines[$start..($lines.Count - 1)]) { if ($l -match '^\s*$') { ''; continue }; if ($l -notmatch '^ {8}') { break }; $l.Substring(8) }
-        (Get-Content -Raw -LiteralPath $script:Vendored).TrimEnd() | Should -Be (($body -join "`n").TrimEnd())
+        # Compare lines, not bytes: a CRLF checkout of either repository must not look like drift.
+        ((Get-Content -Raw -LiteralPath $script:Vendored) -replace "`r`n", "`n").TrimEnd() | Should -Be ((($body -join "`n") -replace "`r", '').TrimEnd())
     }
 }
 
@@ -120,13 +121,26 @@ Describe 'Sync-OctoCkIntermediateVersions: System.Identity 2.26 -> 2.29 in a loc
         $r.Success | Should -BeFalse
         ($w -join "`n") | Should -Match 'OCTO-CK203'
         ($w -join "`n") | Should -Match ([regex]::Escape("-c LocalFileSystemCatalog -lcr $($case.Local)"))
+        $r.FixCommand | Should -Match ([regex]::Escape("-localCatalogRoot '$($case.Local)'"))
+        { [scriptblock]::Create($r.FixCommand) } | Should -Not -Throw
     }
 
-    It 'stays green and changes nothing when the private catalog is unreachable' {
+    It 'stays green, changes nothing and warns (also with -Quiet) when the private catalog is unreachable' {
         $case = New-Case (Join-Path $TestDrive 'offline')
-        $r = Sync-OctoCkIntermediateVersions -repositoryPath $case.Repo -localCatalogRoot $case.Local -privateCatalogLocation "dir:$(Join-Path $TestDrive 'offline/missing')" -ckc $script:Stub -Quiet
+        $r = Sync-OctoCkIntermediateVersions -repositoryPath $case.Repo -localCatalogRoot $case.Local -privateCatalogLocation "dir:$(Join-Path $TestDrive 'offline/missing')" -ckc $script:Stub -Quiet -WarningVariable w -WarningAction SilentlyContinue
         $r.Success | Should -BeTrue
+        ($w -join "`n") | Should -Match "source catalog 'PrivateGitHubCatalog' unreadable"
         (Get-LocalVersions $case.Local) | Should -Be @('2.26.0')
+    }
+
+    It 'targets the lane of the repository when neither -branch nor -localCatalogRoot is given' {
+        $case = New-Case (Join-Path $TestDrive 'lane-default')
+        $global:rootPath = Join-Path $TestDrive 'other-lane'
+        try {
+            $r = Sync-OctoCkIntermediateVersions -repositoryPath $case.Repo -privateCatalogLocation $case.Private -ckc $script:Stub -Quiet
+        } finally { Remove-Variable -Name rootPath -Scope Global -ErrorAction SilentlyContinue }
+        $r.LocalCatalogRoot | Should -Be ([IO.Path]::GetFullPath($case.Local))
+        (Get-LocalVersions $case.Local) | Should -Be @('2.26.0', '2.27.0', '2.28.0')
     }
 
     It 'skips a repository without ckLanguage 2 models without starting anything' {
