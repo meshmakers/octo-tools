@@ -203,6 +203,8 @@ function Invoke-BuildAll {
         # Print the computed plan (order, builder, lane environment, restore sources) and exit: no dotnet
         # process is killed, no package is deleted, nothing is built.
         [switch]$DryRun,
+        # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog (DebugL).
+        [switch]$skipCkSync,
         [switch]$Json
     )
 
@@ -353,6 +355,11 @@ function Invoke-BuildAll {
     try {
         foreach ($entry in $plan) {
             $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            # AB#7974: the private catalog's intermediate versions of the repo's ckLanguage 2 models into the lane's
+            # local catalog before its CK compile gate runs (warning + fix command on failure, never a build stop).
+            if ($configuration -ieq "DebugL" -and -not $skipCkSync) {
+                [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
+            }
             [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name]
             $repoStopWatch.Stop()
             $allStatus.Add($entry.name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
