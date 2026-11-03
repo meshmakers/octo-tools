@@ -550,7 +550,7 @@ Describe 'explain' {
         $json.data.PSObject.Properties.Name | Should -Not -Contain 'findings'
         $out = Get-Output { Test-OctoAgentDocs -Path $r -Explain -All }
         $out[0] | Should -Match '^Agent docs rules for .* - effective severity, in the order to fix them'
-        ($out | Where-Object { $_ -match '\(non-relaxable\)' }).Count | Should -Be 1
+        ($out | Where-Object { $_ -match '\(non-relaxable\)' }).Count | Should -Be 2
     }
     It 'takes rule ids <how>' -ForEach @(
         @{ how = 'positionally after -Explain'; params = @{ Explain = $true }; positional = 'line-length' }
@@ -597,6 +597,114 @@ Describe 'enforce mode' {
         $f = Get-RuleFinding (Get-Result $r) 'migration-pending'
         $f[0].severity | Should -Be 'warn'
         $f[0].file | Should -Be 'AGENTS-MIGRATION.md'
+    }
+}
+
+Describe 'no-eager-import' {
+    It 'reports <what> with file and line' -ForEach @(
+        @{ what = '@AGENTS.md'; text = 'See @AGENTS.md for details.' }
+        @{ what = '@docs/x.md'; text = '@docs/x.md' }
+        @{ what = '@./a/b.md'; text = 'Read @./a/b.md first' }
+        @{ what = '@../up/b.md'; text = 'Read @../up/b.md first' }
+        @{ what = '@~/x.md'; text = 'Mine: @~/x.md.' }
+        @{ what = '@/abs/x.md'; text = '- @/abs/x.md' }
+        @{ what = 'an import without extension behind an explicit path'; text = 'Load @./notes' }
+        @{ what = 'an import after a blockquote marker'; text = '> @docs/x.md' }
+        @{ what = 'an import with a heading fragment'; text = 'See @docs/x.md#setup' }
+        @{ what = 'a source file in a folder'; text = 'Read @src/Foo.cs' }
+        @{ what = 'a path with an escaped space'; text = 'See @Design\ Docs/api-conventions.md now' }
+        @{ what = 'a bare name with an escaped space'; text = 'See @My\ Notes.md now' }
+    ) {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' $text
+        $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
+        $f.Count | Should -Be 1
+        $f[0].severity | Should -Be 'error'
+        $f[0].tier | Should -Be 2
+        $f[0].file | Should -Be "AGENTS.md:$((Get-Content -LiteralPath (Join-Path $r 'AGENTS.md')).Count)"
+    }
+    It 'reports an import in a routed doc, with the line inside that doc' {
+        $r = New-Fixture
+        Add-Line $r 'docs/one.md' @('', 'Also @docs/two.md here')
+        $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -Be 'docs/one.md:9'
+    }
+    It 'reports every import on a line' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' '@a.md and @b.md'
+        (Get-RuleFinding (Get-Result $r) 'no-eager-import').Count | Should -Be 2
+    }
+    It 'does not report <what>' -ForEach @(
+        @{ what = 'an e-mail address'; text = 'Mail dev@example.com or me@docs.md' }
+        @{ what = 'an npm scope'; text = 'Install @angular/core and @types/node' }
+        @{ what = 'a decorator'; text = 'Use @Input() and @Component({ selector: "x" })' }
+        @{ what = 'an attribute'; text = '[Fact] with @Override' }
+        @{ what = 'a mention'; text = 'Ask @someone, or @john.doe.' }
+        @{ what = 'a lone at sign'; text = 'a @ b, @/ and @./' }
+        @{ what = 'a scoped package with a dot-less name'; text = 'Import @scope/pkg and @scope/pkg/sub' }
+        @{ what = 'an inline code span'; text = 'Write `@AGENTS.md` in the shim' }
+        @{ what = 'a double-backtick span'; text = 'Write ``@docs/x.md`` here' }
+        @{ what = 'a link target'; text = 'See [x](docs/x.md) and (@docs/x.md)' }
+        @{ what = 'an HTML comment'; text = '<!-- @docs/x.md -->' }
+        @{ what = 'a fenced block'; text = @('```markdown', '@AGENTS.md', '```') }
+        @{ what = 'a tilde fence'; text = @('~~~', '@./a/b.md', '~~~') }
+    ) {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' $text
+        (Get-RuleFinding (Get-Result $r) 'no-eager-import').Count | Should -Be 0
+    }
+    It 'reports an import right after a fenced block closes, on the right line' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' @('```', '@AGENTS.md', '```', '@AGENTS.md')
+        $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -Be "AGENTS.md:$((Get-Content -LiteralPath (Join-Path $r 'AGENTS.md')).Count)"
+    }
+    It 'keeps line numbers across a multi-line HTML comment, a BOM and CRLF' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' @('<!--', '@docs/x.md', '-->', '@docs/y.md')
+        $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -Be "AGENTS.md:$((Get-Content -LiteralPath (Join-Path $r 'AGENTS.md')).Count)"
+        $c = New-Fixture -Crlf
+        Add-Line $c 'AGENTS.md' '@docs/one.md'
+        (Get-RuleFinding (Get-Result $c) 'no-eager-import').Count | Should -Be 1
+        $b = New-Fixture
+        Write-File (Join-Path $b 'docs/one.md') "$([char]0xFEFF)@docs/two.md`n"
+        (Get-RuleFinding (Get-Result $b) 'no-eager-import').file | Should -Be 'docs/one.md:1'
+    }
+    It 'does not report the valid shim, and the shim is not scanned' {
+        $r = New-Fixture
+        Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw | Should -Match '^<!--.*-->\s+@AGENTS\.md\s*$'
+        (Get-RuleFinding (Get-Result $r) 'no-eager-import').Count | Should -Be 0
+    }
+    It 'checks a CLAUDE.md that is still the entry point like AGENTS.md' {
+        $r = New-Fixture -Legacy
+        Add-Line $r 'CLAUDE.md' '@docs/one.md'
+        $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -Match '^CLAUDE\.md:\d+$'
+    }
+    It 'is not relaxed by a repository .agent-docs.json, and says so' {
+        $r = New-Fixture
+        Set-Override $r '{"schemaVersion":1,"rules":{"no-eager-import":["off"]}}'
+        Add-Line $r 'AGENTS.md' '@docs/one.md'
+        ($(Get-Output { Test-OctoAgentDocs -Path $r }) -join "`n") | Should -Match "'no-eager-import' is non-relaxable"
+        (Get-RuleFinding (Get-Result $r) 'no-eager-import').Count | Should -Be 1
+    }
+    It 'is explained as a reference and listed as non-relaxable' {
+        $json = (Test-OctoAgentDocs -Explain no-eager-import -Json 6>$null) | ConvertFrom-Json
+        $row = $json.data.rules[0]
+        $row.nonRelaxable | Should -BeTrue
+        $row.why | Should -Match 'other agent'
+        $row.fix | Should -Not -BeNullOrEmpty
+    }
+    It 'is part of the migration brief' {
+        $r = New-Fixture -Empty
+        Write-File (Join-Path $r 'CLAUDE.md') "# Old`n"
+        Initialize-OctoAgentDocs -Path $r 6>$null 3>$null | Out-Null
+        Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw | Should -Match '`no-eager-import` \[error\]'
     }
 }
 

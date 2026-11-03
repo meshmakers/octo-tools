@@ -2,7 +2,8 @@
   "schemaVersion": 1,
   "mode": "logOnly",
   "nonRelaxable": [
-    "no-invisible-characters"
+    "no-invisible-characters",
+    "no-eager-import"
   ],
   "scan": {
     "ignore": [
@@ -100,6 +101,10 @@
       "error",
       {}
     ],
+    "no-eager-import": [
+      "error",
+      {}
+    ],
     "migration-pending": [
       "warn",
       {}
@@ -188,6 +193,11 @@
       "tier": 1,
       "why": "Unicode tag, zero-width and bidirectional override characters carry text a reviewer cannot see but a model reads.",
       "fix": "Delete the characters; if the file is generated, fix the generator."
+    },
+    "no-eager-import": {
+      "tier": 2,
+      "why": "An '@path' import is Claude Code syntax: every other agent ignores the line, so the imported content is invisible to it and the instructions stop being one portable source. Only the CLAUDE.md shim may import.",
+      "fix": "Replace '@path' with a plain link [text](path) or a path in prose, and keep any real content in AGENTS.md or docs/. Inside backticks or a fenced block the text is not an import."
     },
     "migration-pending": {
       "tier": 2,

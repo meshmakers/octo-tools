@@ -145,7 +145,7 @@ function Test-OctoAgentDocs {
 
     .DESCRIPTION
     Checks the entry point (AGENTS.md, or CLAUDE.md before a migration), the README and
-    docs/*.md: sections, budgets, frontmatter, links, the CLAUDE.md shim, invisible
+    docs/*.md: sections, budgets, frontmatter, links, the CLAUDE.md shim, Claude-only @imports, invisible
     characters and the generated routing table. -Fix regenerates only the routing table and
     the shim; hand-written text is never changed. 'Test-OctoAgentDocs -Explain -All' lists
     every rule with its reason.
@@ -238,6 +238,7 @@ function Test-OctoAgentDocs {
     }
     $routes = Test-DocsFolder -Rules $rules -Repo $repo -Findings $findings
     Test-InvisibleCharacter -Rules $rules -Repo $repo -Findings $findings
+    Test-EagerImport -Rules $rules -Repo $repo -Findings $findings
     Test-ReferenceSet -Rules $rules -Repo $repo -Findings $findings
     if ($repo.EntryPath) {
         Test-RequiredSection -Rules $rules -Repo $repo -Findings $findings
@@ -387,6 +388,36 @@ function Test-InvisibleCharacter {
             if ($hits.Count -eq 0) { continue }
             $line = ($content.Substring(0, $hits[0].Index) -split "`n").Count
             $Findings.Add('no-invisible-characters', "$($Repo.Relative($f.FullName)):$line", "$($hits.Count) $kind(s) - invisible to a reviewer, not to a model. Remove them")
+        }
+    }
+}
+
+function Test-EagerImport {
+    # '@path' is Claude Code import syntax: other agents ignore the line, so the imported text is
+    # invisible to them. Only the CLAUDE.md shim may import. Checked in the entry point (CLAUDE.md
+    # itself before a migration) and every docs/*.md. Claude Code expands '@path' after start of
+    # line or whitespace, not inside code spans, fenced blocks or HTML comments; so does this.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    if (-not $Rules.IsOn('no-eager-import')) { return }
+    # An explicit path ('./', '../', '~/', '/') is always an import. Otherwise the target needs a
+    # file extension - any extension after a slash, a text-file one for a bare name - which keeps
+    # '@angular/core', '@Input()' and '@someone' out. A '#fragment' is not part of the path.
+    $textFile = '\.(md|mdc|mdx|markdown|txt|rst|json|ya?ml|toml)$'
+    $nestedFile = '^[^/\s]+/(?:[^/\s]+/)*[^/\s]*\.[A-Za-z0-9]{1,8}$'
+    foreach ($f in @($Repo.EntryPath) + @($Repo.Docs.FullName) | Where-Object { $_ }) {
+        $text = ConvertTo-OctoAgentDocsProse -Text $Repo.ReadText($f).TrimStart([char]0xFEFF) -KeepLineNumbers
+        $text = [regex]::Replace($text, '(?s)<!--.*?-->', { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) })
+        $lines = $text -split "`n"
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -notmatch '@') { continue }
+            $line = [regex]::Replace($lines[$i], '(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)', '')
+            foreach ($m in [regex]::Matches($line, '(?<!\S)@((?:[^\s\\]|\\ )+)')) {
+                # '\ ' is an escaped space inside the path, as Claude Code reads it.
+                $target = ($m.Groups[1].Value.Replace('\ ', '_') -replace '#.*$', '').TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '"', "'")
+                if ($target -match '^(\.{1,2}/|~/|/)[^/\s]' -or $target -match $textFile -or $target -match $nestedFile) {
+                    $Findings.Add('no-eager-import', "$($Repo.Relative($f)):$($i + 1)", "'@$target' is a Claude-only import: other agents ignore it and never see that content. Link it as [text]($target) or state the path in prose")
+                }
+            }
         }
     }
 }
