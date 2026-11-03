@@ -227,7 +227,7 @@ Describe 'docs and frontmatter' {
     }
     It 'reads <shape> in applies_to' -ForEach @(
         @{ shape = 'a quoted value'; value = "'*.cs, tests/**'"; globs = @('*.cs', 'tests/**') }
-        @{ shape = 'a flow sequence'; value = '[src/**, "tests/**"]'; globs = @('src/**', '"tests/**"') }
+        @{ shape = 'a flow sequence'; value = '[src/**, "tests/**"]'; globs = @('src/**', 'tests/**') }
         @{ shape = 'a brace expansion without splitting it'; value = 'src/**/*.{cs,csproj}, tests/**'; globs = @('src/**/*.{cs,csproj}', 'tests/**') }
     ) {
         $r = New-Fixture -NoFix
@@ -597,6 +597,109 @@ Describe 'enforce mode' {
         $f = Get-RuleFinding (Get-Result $r) 'migration-pending'
         $f[0].severity | Should -Be 'warn'
         $f[0].file | Should -Be 'AGENTS-MIGRATION.md'
+    }
+}
+
+Describe 'globs-match' {
+    BeforeAll {
+        function Set-Doc { param([string]$Root, [string]$Applies, [string]$Extra = '') Write-File (Join-Path $Root 'docs/one.md') "---`ndescription: One.`napplies_to: $Applies`n$Extra---`n# One`n" }
+    }
+    It 'is silent when every glob matches a file' {
+        (Get-RuleFinding (Get-Result (New-Fixture)) 'globs-match').Count | Should -Be 0
+    }
+    It 'reports a glob that matches nothing with doc, glob and line' {
+        $r = New-Fixture
+        Set-Doc $r 'moved/**'
+        $f = Get-RuleFinding (Get-Result $r) 'globs-match'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -Be 'docs/one.md:3'
+        $f[0].message | Should -Match "'moved/\*\*'"
+        $f[0].severity | Should -Be 'error'
+        $f[0].tier | Should -Be 3
+    }
+    It 'reports only the globs that do not match' {
+        $r = New-Fixture
+        Set-Doc $r 'src/**, gone/**, {src,lib}/*.cs, old/{a,b}.cs'
+        @((Get-RuleFinding (Get-Result $r) 'globs-match').message) | Should -Be @(
+            "applies_to glob 'gone/**' matches no file - the doc is routed to code that is not there"
+            "applies_to glob 'old/{a,b}.cs' matches no file - the doc is routed to code that is not there")
+    }
+    It 'reads <glob> as <expect>' -ForEach @(
+        @{ glob = 'src/*.cs'; expect = 'matching src/app.cs'; hit = $true }
+        @{ glob = 'src/**/*.cs'; expect = 'matching a file straight under src (zero folders)'; hit = $true }
+        @{ glob = '**/deep/*.cs'; expect = 'matching at any depth'; hit = $true }
+        @{ glob = './src/**'; expect = 'matching with a leading ./'; hit = $true }
+        @{ glob = 'src/'; expect = 'everything below a folder'; hit = $true }
+        @{ glob = '*.cs'; expect = 'matching a bare pattern at any depth'; hit = $true }
+        @{ glob = 'src/app.c?'; expect = 'matching one character'; hit = $true }
+        @{ glob = 'src/*.md'; expect = 'a different extension'; hit = $false }
+        @{ glob = 'src/deep/*'; expect = '* not crossing into the next folder'; hit = $false }
+        @{ glob = 'SRC/**'; expect = 'case-sensitive'; hit = $false }
+    ) {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'src/deep/x/y.cs') 'x'
+        Write-File (Join-Path $r 'lib/deep/z.cs') 'x'
+        Set-Doc $r $glob
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be $(if ($hit) { 0 } else { 1 })
+    }
+    It 'does not count files under scan.ignore folders' {
+        $r = New-Fixture
+        foreach ($f in 'out/bin/a.cs', 'web/node_modules/pkg/index.js') { Write-File (Join-Path $r $f) 'x' }
+        Set-Doc $r 'out/**, web/**, **/*.js'
+        @((Get-RuleFinding (Get-Result $r) 'globs-match').message).Count | Should -Be 3
+    }
+    It 'does not check a background doc, with or without leftover globs' {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'docs/one.md') "---`ndescription: One.`nbackground: true`n---`n"
+        Set-Doc $r 'moved/**' "background: true`n"
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
+    }
+    It 'asks git in a checkout: ignored files do not count, untracked ones do' {
+        $r = New-Fixture
+        Write-File (Join-Path $r '.gitignore') "gen/`n"
+        Write-File (Join-Path $r 'gen/out.cs') 'x'
+        Write-File (Join-Path $r 'fresh/new.cs') 'x'
+        git -C $r init -q 2>$null
+        Set-Doc $r 'gen/**, fresh/**'
+        $f = Get-RuleFinding (Get-Result $r) 'globs-match'
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'gen/\*\*'"
+    }
+    It 'reads quoted globs in a flow list' {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'tests/t.cs') 'x'
+        Set-Doc $r '[src/**, "tests/**", ''src/*.cs'']'
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
+    }
+    It 'does not count a tracked file that was deleted from the working tree' {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'old/gone.cs') 'x'
+        git -C $r init -q 2>$null
+        git -C $r add -A 2>$null
+        Remove-Item -LiteralPath (Join-Path $r 'old/gone.cs')
+        Set-Doc $r 'old/**'
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 1
+    }
+    It 'reports an unclosed brace instead of failing the run' {
+        $r = New-Fixture
+        Set-Doc $r 'src/{a,b'
+        @((Get-RuleFinding (Get-Result $r) 'globs-match').message | Where-Object { $_ -match "unclosed '\{'" }).Count | Should -Be 1
+    }
+    It 'fails enforce mode on a stale glob' {
+        $r = New-Fixture
+        Set-Doc $r 'moved/**'
+        { Test-OctoAgentDocs -Path $r -Mode enforce 6>$null 3>$null } | Should -Throw '*error-severity finding*'
+    }
+    It 'can be switched off by the repository and is explained' {
+        $r = New-Fixture
+        Set-Doc $r 'moved/**'
+        Set-Override $r '{"schemaVersion":1,"rules":{"globs-match":["off"]}}'
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
+        $row = ((Test-OctoAgentDocs -Explain globs-match -Json 6>$null) | ConvertFrom-Json).data.rules[0]
+        $row.tier | Should -Be 3
+        $row.nonRelaxable | Should -BeFalse
+        $row.why | Should -Not -BeNullOrEmpty
+        $row.fix | Should -Not -BeNullOrEmpty
     }
 }
 
