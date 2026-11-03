@@ -198,7 +198,8 @@ Describe 'entry point' {
     }
     It 'limits line length with the table allowance, exempts code and unbreakable lines, and caps the list' {
         $r = New-Fixture
-        Set-Override $r '{"schemaVersion":1,"rules":{"line-length":["warn",{"max":40,"tables":60,"maxReported":2}]}}'
+        Set-Override $r '{"schemaVersion":1,"rules":{"line-length":["warn",{"max":40,"tables":60,"maxReported":2}],"required-sections":["off"]}}'
+        Write-File (Join-Path $r 'AGENTS.md') $script:Entry.Replace($script:Opening, 'Opening.')
         Add-Line $r 'AGENTS.md' @(
             ('word ' * 12), ('| ' + ('cell ' * 14) + '|'), ('x' * 80), '```', ('code ' * 20), '```', ('more words ' * 6), ('and more ' * 8)
         )
@@ -274,7 +275,7 @@ Describe 'routing table and -Fix' {
     It 'ignores a marker pair quoted in a fenced example' {
         $r = New-Fixture -NoFix
         $p = Join-Path $r 'AGENTS.md'
-        Write-File $p ("``````markdown`n<!-- >>> generated: routing -->`n<!-- <<< end generated: routing -->`n```````n`n" + (Get-Content -LiteralPath $p -Raw))
+        Write-File $p ((Get-Content -LiteralPath $p -Raw).Replace("## What this repo is`n", "## What this repo is`n`n``````markdown`n<!-- >>> generated: routing -->`n<!-- <<< end generated: routing -->`n```````n"))
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         $text = Get-Content -LiteralPath $p -Raw
         $text | Should -Match "``````markdown`n<!-- >>> generated: routing -->`n<!-- <<< end generated: routing -->`n``````"
@@ -611,5 +612,104 @@ Describe 'the shipped ruleset' {
             $rules.ruleDocs[$id].why | Should -Not -BeNullOrEmpty
             $rules.ruleDocs[$id].fix | Should -Not -BeNullOrEmpty
         }
+    }
+}
+
+Describe 'opening sentence and closed set of headings' {
+    BeforeAll {
+        function Set-Entry { param([string]$Root, [string]$Text) Write-File (Join-Path $Root 'AGENTS.md') $Text }
+        function Get-Entry { param([string]$Root) Get-Content -LiteralPath (Join-Path $Root 'AGENTS.md') -Raw }
+        function Get-SectionMessage { param([string]$Root) @((Get-RuleFinding (Get-Result $Root) 'required-sections') | ForEach-Object { "$($_.severity): $($_.message)" }) }
+    }
+    It 'reports an extra level-2 heading as an error and says where its content goes' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("## Rules`n", "## Rules`n`n## Repository Overview`n`nText.`n"))
+        Get-SectionMessage $r | Should -Be @("error: Section '## Repository Overview' is not a required section - move this content to docs/ or under one of the required sections")
+    }
+    It 'reports headings out of order as an error' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("## Before you commit`n`n## Rules`n", "## Rules`n`n## Before you commit`n"))
+        $m = @(Get-SectionMessage $r)
+        $m.Count | Should -Be 1
+        $m[0] | Should -BeLike "error: Sections out of order or repeated: *'## Rules', '## Before you commit' - the order is '## What this repo is', *"
+    }
+    It 'reports a missing overview heading as an error' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("## What this repo is`n`n", ''))
+        Get-SectionMessage $r | Should -Be @("error: Missing section '## What this repo is' - every repo's entry point carries it")
+    }
+    It 'allows level-3 and lower headings inside a section' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace('Run the build.', "### Tests`n`nRun them.`n`n#### Fast loop`n`nText."))
+        (Get-Result $r).data.findings.Count | Should -Be 0
+    }
+    It 'reports <case> as an error' -ForEach @(
+        @{ case = 'a missing opening sentence'; replace = ''; expect = 'Opening sentence is missing below the title (run with -Fix)' }
+        @{ case = 'a changed opening sentence'; replace = 'Design rationale lives in `docs/`; read the matching file before changing the code it covers.'; expect = 'First paragraph below the title is not the opening sentence (run with -Fix)' }
+    ) {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", $(if ($replace) { "$replace`n`n" } else { '' })))
+        Get-SectionMessage $r | Should -Be @("error: $expect")
+    }
+    It 'accepts the sentence wrapped at any point' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace($script:Opening, $script:Opening.Replace("`n", ' ').Replace('; read', ";`nread")))
+        (Get-Result $r).data.findings.Count | Should -Be 0
+    }
+    It 'reports an entry point that does not start with a title' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("# Entry`n`n", ''))
+        Get-SectionMessage $r | Should -Be @("error: Does not start with a '# ' title - add one; the opening sentence goes directly below it")
+    }
+    It 'with -Fix <case>, and a second run is clean and writes nothing' -ForEach @(
+        @{ case = 'inserts a missing sentence below the title'; replace = '' }
+        @{ case = 'replaces a different first paragraph'; replace = "Design rationale lives in docs/.`nSecond line.`n`n" }
+    ) {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", $replace))
+        (Get-Result $r @{ Fix = $true }).data.filesWritten | Should -Be @('AGENTS.md')
+        Get-Entry $r | Should -Be $script:Entry.Replace("<!-- <<< end", "| When you change | Read first |`n|---|---|`n| ``src/**`` | ``docs/one.md`` |`n<!-- <<< end")
+        $again = Get-Result $r @{ Fix = $true }
+        $again.data.findings.Count | Should -Be 0
+        $again.data.filesWritten.Count | Should -Be 0
+    }
+    It 'with -Fix replaces the whole paragraph and stops at a heading that follows without a blank line' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", "Old opening, see`n#123 for why.`n  ## What this repo is`n").Replace("## What this repo is`n`n## Read", "## Read"))
+        Test-OctoAgentDocs -Path $r -Fix 6>$null 3>$null | Out-Null
+        (Get-Entry $r).StartsWith("# Entry`n`n$script:Opening`n`n  ## What this repo is`n## Read") | Should -BeTrue
+    }
+    It 'compares headings with exact case' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace('## Build & test', '## Build & Test'))
+        $m = @(Get-SectionMessage $r)
+        $m | Should -Contain "error: Missing section '## Build & test' - every repo's entry point carries it"
+        $m | Should -Contain "error: Section '## Build & Test' is not a required section - move this content to docs/ or under one of the required sections"
+    }
+    It 'with -Fix -WhatIf names the write and changes nothing' {
+        $r = New-Fixture
+        $broken = (Get-Entry $r).Replace("$script:Opening`n`n", '')
+        Set-Entry $r $broken
+        $res = Get-Result $r @{ Fix = $true; WhatIf = $true }
+        (Get-RuleFinding $res 'required-sections')[0].message | Should -Match 'would be written \(run without -WhatIf\)'
+        Get-Entry $r | Should -Be $broken
+    }
+    It 'with -Fix keeps CRLF line endings and leaves the headings alone' {
+        $r = New-Fixture
+        $text = (Get-Entry $r).Replace("$script:Opening`n`n", '').Replace("## Rules`n", "## Rules`n`n## Extra`n")
+        Set-Entry $r $text.Replace("`n", "`r`n")
+        Test-OctoAgentDocs -Path $r -Fix 6>$null 3>$null | Out-Null
+        $after = [System.IO.File]::ReadAllText((Join-Path $r 'AGENTS.md'))
+        $after | Should -Be ("# Entry`n`n$script:Opening`n`n" + $text.Substring("# Entry`n`n".Length)).Replace("`n", "`r`n")
+        Get-SectionMessage $r | Should -Be @("error: Section '## Extra' is not a required section - move this content to docs/ or under one of the required sections")
+    }
+    It 'checks a CLAUDE.md entry point only for missing sections, and never writes into it' {
+        $r = New-Fixture -Legacy
+        $p = Join-Path $r 'CLAUDE.md'
+        $text = (Get-Content -LiteralPath $p -Raw).Replace("$script:Opening`n`n", '').Replace("## Rules`n", "## Rules`n`n## Extra`n")
+        Write-File $p $text
+        (Get-Result $r @{ Fix = $true }).data.filesWritten.Count | Should -Be 0
+        (Get-RuleFinding (Get-Result $r) 'required-sections').Count | Should -Be 0
+        Get-Content -LiteralPath $p -Raw | Should -Be $text
     }
 }

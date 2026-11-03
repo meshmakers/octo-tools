@@ -20,7 +20,9 @@ Describe 'created: a repository without agent files' {
         $init.data.state | Should -Be 'created'
         @($init.data.filesWritten) | Should -Be @('AGENTS.md', 'CLAUDE.md')
         $agents = Get-Content -LiteralPath (Join-Path $r 'AGENTS.md') -Raw
-        foreach ($s in 'Read before you change', 'Build & test', 'Before you commit', 'Rules') { $agents | Should -Match "## $([regex]::Escape($s))" }
+        $start = "# $(Split-Path -Leaf $r)`n`n$script:Opening`n`n## What this repo is`n`n## Read before you change`n`n<!-- >>> generated: routing -->"
+        $agents.Substring(0, $start.Length) | Should -Be $start
+        @([regex]::Matches($agents, '(?m)^## (.*)$').ForEach({ $_.Groups[1].Value })) | Should -Be @('What this repo is', 'Read before you change', 'Build & test', 'Before you commit', 'Rules')
         $agents | Should -Match ([regex]::Escape("<!-- >>> generated: routing -->`n| When you change | Read first |`n|---|---|`n<!-- <<< end generated: routing -->"))
         Get-Content -LiteralPath (Join-Path $r 'CLAUDE.md') -Raw | Should -Be $script:Shim
         @(Get-ChildItem -LiteralPath $r -Force).Name | Sort-Object | Should -Be @('AGENTS.md', 'CLAUDE.md')
@@ -74,7 +76,10 @@ Describe 'migration: a repository with a hand-written CLAUDE.md' {
         $brief = Get-Content -LiteralPath (Join-Path $r 'AGENTS-MIGRATION.md') -Raw
         $brief | Should -Not -Match '\{\{'
         $brief | Should -Match '\| AGENTS.md lines \| 200 \| warn \| `entry-point-lines` \|'
-        $brief | Should -Match '- `## Read before you change`'
+        $brief | Should -Match ([regex]::Escape("``````markdown`n# $(Split-Path -Leaf $r)`n`n$script:Opening`n`n## What this repo is`n## Read before you change`n## Build & test`n## Before you commit`n## Rules`n``````"))
+        $brief | Should -Match 'No other `## ` heading is allowed'
+        $brief | Should -Match 'markers go under `## Read before you change`'
+        $brief | Should -Match '1\. \*\*Create `AGENTS.md` with exactly the start above\*\*'
         $brief | Should -Match '@AGENTS.md'
         $brief | Should -Match '\*\*1\. Integrity\*\*'
         $brief | Should -Match 'Never pass `-Force`'
