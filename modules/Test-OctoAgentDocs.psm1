@@ -475,16 +475,17 @@ function Test-RequiredSection {
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [switch]$Fix)
     $sections = @($Rules.Option('required-sections', 'sections'))
     $headings = @([regex]::Matches((ConvertTo-OctoAgentDocsProse $Repo.ReadText($Repo.EntryPath)), '(?m)^##[ \t]+(.*?)[ \t]*$') | ForEach-Object { $_.Groups[1].Value })
-    $missing = @(foreach ($want in $sections) { if ($headings -notcontains $want) { "'## $want'" } })
+    # Exact case: the closed set is exact text, and a heading's case is what readers see.
+    $missing = @(foreach ($want in $sections) { if ($headings -cnotcontains $want) { "'## $want'" } })
     if ($missing.Count -eq 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing section $($missing[0]) - every repo's entry point carries it") }
     elseif ($missing.Count -gt 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing sections $($missing -join ', ') - every repo's entry point carries them") }
     if ($Repo.EntryPath -ne $Repo.AgentsPath) { return }
-    foreach ($h in @($headings | Where-Object { $sections -notcontains $_ })) {
+    foreach ($h in @($headings | Where-Object { $sections -cnotcontains $_ })) {
         $Findings.Add('required-sections', $Repo.EntryName, "Section '## $h' is not a required section - move this content to docs/ or under one of the required sections")
     }
-    $present = @($headings | Where-Object { $sections -contains $_ })
-    $expected = @($sections | Where-Object { $present -contains $_ })
-    if (($present -join "`n") -ne ($expected -join "`n")) {
+    $present = @($headings | Where-Object { $sections -ccontains $_ })
+    $expected = @($sections | Where-Object { $present -ccontains $_ })
+    if (($present -join "`n") -cne ($expected -join "`n")) {
         $Findings.Add('required-sections', $Repo.EntryName, "Sections out of order or repeated: $(@($present | ForEach-Object { "'## $_'" }) -join ', ') - the order is $(@($sections | ForEach-Object { "'## $_'" }) -join ', ')")
     }
     Test-OpeningSentence -Rules $Rules -Repo $Repo -Findings $Findings -Fix:$Fix
@@ -504,7 +505,8 @@ function Test-OpeningSentence {
     $p = $t + 1
     while ($p -lt $lines.Count -and -not $lines[$p].Trim()) { $p++ }
     $e = $p
-    if ($p -lt $lines.Count -and $lines[$p] -notmatch '^#') { while ($e -lt $lines.Count -and $lines[$e].Trim()) { $e++ } }
+    # The paragraph ends at a blank line or a heading, so -Fix never takes a heading with it.
+    while ($e -lt $lines.Count -and $lines[$e].Trim() -and $lines[$e] -notmatch '^#') { $e++ }
     $paragraph = if ($e -gt $p) { (($lines[$p..($e - 1)] -join ' ') -replace '\s+', ' ').Trim() } else { '' }
     if ($paragraph -ceq $sentence) { return }
     $what = if ($paragraph) { 'First paragraph below the title is not the opening sentence' } else { 'Opening sentence is missing below the title' }

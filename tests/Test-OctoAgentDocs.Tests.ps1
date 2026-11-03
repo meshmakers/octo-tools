@@ -673,6 +673,20 @@ Describe 'opening sentence and closed set of headings' {
         $again.data.findings.Count | Should -Be 0
         $again.data.filesWritten.Count | Should -Be 0
     }
+    It 'with -Fix replaces only the paragraph when a heading follows it without a blank line' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", "Old opening.`n"))
+        Test-OctoAgentDocs -Path $r -Fix 6>$null 3>$null | Out-Null
+        (Get-Entry $r).StartsWith("# Entry`n`n$script:Opening`n`n## What this repo is`n") | Should -BeTrue
+        (Get-Result $r).data.findings.Count | Should -Be 0
+    }
+    It 'compares headings with exact case' {
+        $r = New-Fixture
+        Set-Entry $r ((Get-Entry $r).Replace('## Build & test', '## Build & Test'))
+        $m = @(Get-SectionMessage $r)
+        $m | Should -Contain "error: Missing section '## Build & test' - every repo's entry point carries it"
+        $m | Should -Contain "error: Section '## Build & Test' is not a required section - move this content to docs/ or under one of the required sections"
+    }
     It 'with -Fix -WhatIf names the write and changes nothing' {
         $r = New-Fixture
         $broken = (Get-Entry $r).Replace("$script:Opening`n`n", '')
