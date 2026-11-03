@@ -146,9 +146,9 @@ function Test-OctoAgentDocs {
     .DESCRIPTION
     Checks the entry point (AGENTS.md, or CLAUDE.md before a migration), the README and
     docs/*.md: sections, budgets, frontmatter, links, the CLAUDE.md shim, invisible
-    characters and the generated routing table. -Fix regenerates only the routing table and
-    the shim; hand-written text is never changed. 'Test-OctoAgentDocs -Explain -All' lists
-    every rule with its reason.
+    characters and the generated routing table. -Fix regenerates only the routing table,
+    the shim and the opening sentence of AGENTS.md; other hand-written text is never
+    changed. 'Test-OctoAgentDocs -Explain -All' lists every rule with its reason.
 
     Rules are [severity, options] with severity off | warn | error, and cascade, later wins:
     agent-docs.rules.json beside this module, the repository's .agent-docs.json, -ConfigPath,
@@ -159,7 +159,7 @@ function Test-OctoAgentDocs {
     Repository to check: a path, or a repository name under $Global:ROOTPATH. Default: '.'.
 
     .PARAMETER Fix
-    Rewrite the generated regions instead of only reporting them stale. Supports -WhatIf.
+    Rewrite the generated regions and the opening sentence instead of only reporting them. Supports -WhatIf.
 
     .PARAMETER Force
     With -Fix, let the shim replace a CLAUDE.md that still has real content.
@@ -240,7 +240,7 @@ function Test-OctoAgentDocs {
     Test-InvisibleCharacter -Rules $rules -Repo $repo -Findings $findings
     Test-ReferenceSet -Rules $rules -Repo $repo -Findings $findings
     if ($repo.EntryPath) {
-        Test-RequiredSection -Rules $rules -Repo $repo -Findings $findings
+        Test-RequiredSection -Rules $rules -Repo $repo -Findings $findings -Fix:$Fix
         Test-RoutingTable -Rules $rules -Repo $repo -Findings $findings -Route $routes -Fix:$Fix
         Test-EntryBudget -Rules $rules -Repo $repo -Findings $findings
     }
@@ -469,12 +469,62 @@ function Get-HeadingAnchor {
 }
 
 function Test-RequiredSection {
-    # A missing section is reported, never written.
-    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    # Headings are reported, never written. In AGENTS.md the level-2 headings are a closed,
+    # ordered set and the opening sentence is checked too; a CLAUDE.md entry point is only
+    # checked for missing sections, the rest is the migration's job.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [switch]$Fix)
+    $sections = @($Rules.Option('required-sections', 'sections'))
     $headings = @([regex]::Matches((ConvertTo-OctoAgentDocsProse $Repo.ReadText($Repo.EntryPath)), '(?m)^##[ \t]+(.*?)[ \t]*$') | ForEach-Object { $_.Groups[1].Value })
-    $missing = @(foreach ($want in @($Rules.Option('required-sections', 'sections'))) { if ($headings -notcontains $want) { "'## $want'" } })
+    $missing = @(foreach ($want in $sections) { if ($headings -notcontains $want) { "'## $want'" } })
     if ($missing.Count -eq 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing section $($missing[0]) - every repo's entry point carries it") }
     elseif ($missing.Count -gt 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing sections $($missing -join ', ') - every repo's entry point carries them") }
+    if ($Repo.EntryPath -ne $Repo.AgentsPath) { return }
+    foreach ($h in @($headings | Where-Object { $sections -notcontains $_ })) {
+        $Findings.Add('required-sections', $Repo.EntryName, "Section '## $h' is not a required section - move this content to docs/ or under one of the required sections")
+    }
+    $present = @($headings | Where-Object { $sections -contains $_ })
+    $expected = @($sections | Where-Object { $present -contains $_ })
+    if (($present -join "`n") -ne ($expected -join "`n")) {
+        $Findings.Add('required-sections', $Repo.EntryName, "Sections out of order or repeated: $(@($present | ForEach-Object { "'## $_'" }) -join ', ') - the order is $(@($sections | ForEach-Object { "'## $_'" }) -join ', ')")
+    }
+    Test-OpeningSentence -Rules $Rules -Repo $Repo -Findings $Findings -Fix:$Fix
+}
+
+function Test-OpeningSentence {
+    # The first paragraph below the '# ' title must be the opening sentence; whitespace is
+    # collapsed, so a wrapped sentence matches. -Fix inserts it, or replaces a different first
+    # paragraph. Anything before the title (frontmatter, comments) is not supported.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [switch]$Fix)
+    $sentence = [string]$Rules.Option('required-sections', 'opening')
+    if (-not $Rules.IsOn('required-sections') -or -not $sentence) { return }
+    $lines = @($Repo.ReadText($Repo.EntryPath) -split "`n")
+    $t = 0
+    while ($t -lt $lines.Count -and -not $lines[$t].Trim()) { $t++ }
+    if ($t -ge $lines.Count -or $lines[$t] -notmatch '^#[ \t]') { $Findings.Add('required-sections', $Repo.EntryName, "Does not start with a '# ' title - add one; the opening sentence goes directly below it"); return }
+    $p = $t + 1
+    while ($p -lt $lines.Count -and -not $lines[$p].Trim()) { $p++ }
+    $e = $p
+    if ($p -lt $lines.Count -and $lines[$p] -notmatch '^#') { while ($e -lt $lines.Count -and $lines[$e].Trim()) { $e++ } }
+    $paragraph = if ($e -gt $p) { (($lines[$p..($e - 1)] -join ' ') -replace '\s+', ' ').Trim() } else { '' }
+    if ($paragraph -ceq $sentence) { return }
+    $what = if ($paragraph) { 'First paragraph below the title is not the opening sentence' } else { 'Opening sentence is missing below the title' }
+    if (-not $Fix) { $Findings.Add('required-sections', $Repo.EntryName, "$what (run with -Fix)"); return }
+    $r = $e
+    while ($r -lt $lines.Count -and -not $lines[$r].Trim()) { $r++ }
+    $opening = Format-OctoAgentDocsOpening -Sentence $sentence -Width $Rules.Option('line-length', 'max')
+    $text = (@($lines[0..$t]) + '' + $opening + '' + @(if ($r -lt $lines.Count) { $lines[$r..($lines.Count - 1)] } else { '' })) -join "`n"
+    if (-not (Update-OpeningSentence -Repo $Repo -Content $text)) { $Findings.Add('required-sections', $Repo.EntryName, "$what - the opening sentence would be written (run without -WhatIf)") }
+}
+
+function Update-OpeningSentence {
+    # Keeps the file's own line endings. False under -WhatIf or when declined.
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    [OutputType([bool])]
+    param([AgentDocsRepository]$Repo, [string]$Content)
+    if (-not $PSCmdlet.ShouldProcess($Repo.EntryName, 'Write the opening sentence below the title')) { return $false }
+    $eol = if ([System.IO.File]::ReadAllText($Repo.EntryPath).Contains("`r`n")) { "`r`n" } else { "`n" }
+    $Repo.Write($Repo.EntryPath, $Content.Replace("`n", $eol))
+    return $true
 }
 
 function Test-RoutingTable {

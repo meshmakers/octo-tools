@@ -88,12 +88,15 @@
     "required-sections": [
       "error",
       {
+        "opening": "Instructions for coding agents in this repository. Detail lives in `docs/`; read the matching file before changing the code it covers.",
         "sections": [
+          "What this repo is",
           "Read before you change",
           "Build & test",
           "Before you commit",
           "Rules"
-        ]
+        ],
+        "routingSection": "Read before you change"
       }
     ],
     "no-invisible-characters": [
@@ -181,8 +184,8 @@
     },
     "required-sections": {
       "tier": 2,
-      "why": "Every repository's entry point carries the same level-2 headings, so an agent finds build, commit and rules in the same place everywhere.",
-      "fix": "Add the missing '## ' heading and write its content; the checker never fills text in."
+      "why": "Every repository's AGENTS.md opens with the same sentence and carries exactly the same level-2 headings in the same order, so an agent finds build, commit and rules in the same place everywhere.",
+      "fix": "Run Test-OctoAgentDocs -Fix to write the opening sentence below the title. Add, rename or reorder '## ' headings by hand, and move any other level-2 section to docs/ or under one of the required sections; the checker never writes headings or section text."
     },
     "no-invisible-characters": {
       "tier": 1,

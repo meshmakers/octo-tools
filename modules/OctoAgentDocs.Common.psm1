@@ -79,6 +79,23 @@ function ConvertTo-OctoAgentDocsProse {
     return [regex]::Replace($Text, $script:FencePattern, { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) })
 }
 
+function Format-OctoAgentDocsOpening {
+    <#
+    .SYNOPSIS
+    The opening sentence wrapped at word boundaries to the line-length limit, LF-joined: the
+    form Initialize-OctoAgentDocs and Test-OctoAgentDocs -Fix both write.
+    #>
+    param([Parameter(Mandatory)][string]$Sentence, [Parameter(Mandatory)][int]$Width)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $line = ''
+    foreach ($word in ($Sentence -split '\s+' | Where-Object { $_ })) {
+        if ($line -and ($line.Length + 1 + $word.Length) -gt $Width) { $lines.Add($line); $line = $word }
+        else { $line = if ($line) { "$line $word" } else { $word } }
+    }
+    if ($line) { $lines.Add($line) }
+    return $lines -join "`n"
+}
+
 function Find-OctoAgentDocsMarker {
     <#
     .SYNOPSIS
@@ -185,7 +202,7 @@ function Get-OctoAgentDocsTierHeading {
 
 Export-ModuleMember -Function @(
     'Get-OctoAgentDocsConstant', 'Get-OctoAgentDocsRuleIdList', 'Resolve-OctoAgentDocsRepository',
-    'Format-OctoAgentDocsArgument', 'ConvertTo-OctoAgentDocsProse', 'Find-OctoAgentDocsMarker',
+    'Format-OctoAgentDocsArgument', 'Format-OctoAgentDocsOpening', 'ConvertTo-OctoAgentDocsProse', 'Find-OctoAgentDocsMarker',
     'Test-OctoAgentDocsShimLike', 'Read-OctoAgentDocsText', 'Write-OctoAgentDocsText',
     'Read-OctoAgentDocsBuiltInRuleset', 'ConvertTo-OctoAgentDocsRuleEntry',
     'Get-OctoAgentDocsRuleTier', 'Get-OctoAgentDocsTierHeading'
