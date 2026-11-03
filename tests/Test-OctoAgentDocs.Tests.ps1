@@ -673,12 +673,11 @@ Describe 'opening sentence and closed set of headings' {
         $again.data.findings.Count | Should -Be 0
         $again.data.filesWritten.Count | Should -Be 0
     }
-    It 'with -Fix replaces only the paragraph when a heading follows it without a blank line' {
+    It 'with -Fix replaces the whole paragraph and stops at a heading that follows without a blank line' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", "Old opening.`n"))
+        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", "Old opening, see`n#123 for why.`n  ## What this repo is`n").Replace("## What this repo is`n`n## Read", "## Read"))
         Test-OctoAgentDocs -Path $r -Fix 6>$null 3>$null | Out-Null
-        (Get-Entry $r).StartsWith("# Entry`n`n$script:Opening`n`n## What this repo is`n") | Should -BeTrue
-        (Get-Result $r).data.findings.Count | Should -Be 0
+        (Get-Entry $r).StartsWith("# Entry`n`n$script:Opening`n`n  ## What this repo is`n## Read") | Should -BeTrue
     }
     It 'compares headings with exact case' {
         $r = New-Fixture

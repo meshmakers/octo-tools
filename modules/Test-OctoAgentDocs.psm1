@@ -505,8 +505,9 @@ function Test-OpeningSentence {
     $p = $t + 1
     while ($p -lt $lines.Count -and -not $lines[$p].Trim()) { $p++ }
     $e = $p
-    # The paragraph ends at a blank line or a heading, so -Fix never takes a heading with it.
-    while ($e -lt $lines.Count -and $lines[$e].Trim() -and $lines[$e] -notmatch '^#') { $e++ }
+    # The paragraph ends at a blank line or an ATX heading (up to three spaces of indent), so
+    # -Fix never takes a heading with it; '#123' inside the paragraph is text.
+    while ($e -lt $lines.Count -and $lines[$e].Trim() -and $lines[$e] -notmatch '^ {0,3}#{1,6}([ \t]|$)') { $e++ }
     $paragraph = if ($e -gt $p) { (($lines[$p..($e - 1)] -join ' ') -replace '\s+', ' ').Trim() } else { '' }
     if ($paragraph -ceq $sentence) { return }
     $what = if ($paragraph) { 'First paragraph below the title is not the opening sentence' } else { 'Opening sentence is missing below the title' }
