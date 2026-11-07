@@ -63,6 +63,10 @@ services:
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
+    # AB#7338: vhost, guest and the restricted adapter user come from the definitions (see rabbitmq/README.md)
+    volumes:
+      - "./rabbitmq/20-octo-definitions.conf:/etc/rabbitmq/conf.d/20-octo-definitions.conf:ro"
+      - "./rabbitmq/definitions.json:/etc/rabbitmq/octo-definitions.json:ro"
     ports:
       - "5672:5672"
       - "15672:15672"

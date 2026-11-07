@@ -19,6 +19,11 @@ spec:
           ports:
             - { containerPort: 5672,  name: amqp }
             - { containerPort: 15672, name: management }
+          # AB#7338: vhost, guest and the restricted adapter user come from the definitions (infrastructure/rabbitmq/README.md);
+          # the ConfigMap is created by Install-OctoKubernetes from infrastructure/rabbitmq/.
+          volumeMounts:
+            - { name: definitions, mountPath: /etc/rabbitmq/conf.d/20-octo-definitions.conf, subPath: 20-octo-definitions.conf, readOnly: true }
+            - { name: definitions, mountPath: /etc/rabbitmq/octo-definitions.json, subPath: definitions.json, readOnly: true }
           readinessProbe:
             exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
             initialDelaySeconds: 15
@@ -27,6 +32,9 @@ spec:
             # Measured ~0.3 s idle, so a loaded host cuts off a healthy broker and takes it out of
             # the Service endpoints.
             timeoutSeconds: 5
+      volumes:
+        - name: definitions
+          configMap: { name: rabbitmq-definitions }
 ---
 apiVersion: v1
 kind: Service

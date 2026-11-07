@@ -1,0 +1,40 @@
+{
+  "rabbit_version": "4.0.6",
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "users": [
+    {
+      "name": "guest",
+      "password_hash": "Wx6Qw9UK5k+VMlNzWvm9rBndnMpTaXbCouGExF9JwH205/rL",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": [
+        "administrator"
+      ]
+    },
+    {
+      "name": "octo-adapter-mq-user",
+      "password_hash": "DHpeIaUESFfGCSRIJ9fdITpPJf3YorAgfryuWfmiwqayfKxg",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": []
+    }
+  ],
+  "permissions": [
+    {
+      "user": "guest",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "octo-adapter-mq-user",
+      "vhost": "/",
+      "configure": "^(?!.*octo::method::).*$",
+      "write": "^(?!amq[.]default$)(?!.*octo::method::).*$",
+      "read": "^(?!.*octo::method::).*$"
+    }
+  ]
+}
