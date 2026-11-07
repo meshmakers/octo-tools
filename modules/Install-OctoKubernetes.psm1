@@ -272,6 +272,11 @@ server = "https://$DevRegistry"
         & kubectl --context $ctx -n $InfraNamespace create configmap mongodb-init "--from-file=$(Join-Path $infraDir "mongo-init")"
         if ($LASTEXITCODE -ne 0) { Write-Error "create mongodb-init configmap failed"; return }
 
+        # 2b) RabbitMQ definitions configmap (vhost, guest and the restricted adapter user, AB#7338)
+        & kubectl --context $ctx -n $InfraNamespace delete configmap rabbitmq-definitions --ignore-not-found | Out-Null
+        & kubectl --context $ctx -n $InfraNamespace create configmap rabbitmq-definitions "--from-file=$(Join-Path $infrastructurePath "rabbitmq/definitions.json")" "--from-file=$(Join-Path $infrastructurePath "rabbitmq/20-octo-definitions.conf")"
+        if ($LASTEXITCODE -ne 0) { Write-Error "create rabbitmq-definitions configmap failed"; return }
+
         # 3) Apply infra workloads
         foreach ($m in @("rabbitmq.yaml", "cratedb.yaml", "mongodb.yaml")) {
             if ($m -eq "cratedb.yaml") {

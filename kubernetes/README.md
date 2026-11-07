@@ -83,6 +83,12 @@ octo-cli                                       CRDs + communication-operator (ce
 | CrateDB | `cratedb.octo-infra.svc.cluster.local` (psql 5432 / http 4200) | `localhost:5432` (psql) / `4301` (http UI) |
 | S3 store (SeaweedFS) | `seaweedfs.octo-infra:8333` (plain http) | `localhost:8333` |
 
+RabbitMQ users (AB#7338): the broker loads `infrastructure/rabbitmq/definitions.json` (ConfigMap `rabbitmq-definitions`, created
+by `Install-OctoKubernetes`). `guest`/`guest` is unchanged; `octo-adapter-mq-user`/`adapter` is the restricted adapter user of the
+clusters (no access to the CK method queues `octo::method::`), so an adapter started with it behaves as on a cluster. The broker
+reads the definitions at start: an already running local broker gets them after `kubectl -n octo-infra rollout restart
+deploy/rabbitmq` (its queues are not persisted anyway). Check with `infrastructure/scripts/verify-adapter-broker-user.sh kind`.
+
 There is exactly **one** CrateDB — host-run services and in-cluster adapters share it. The host
 services connect as the built-in superuser `crate` (their compiled-in default), while deployed
 adapters connect as the application user **`octo-system`** (injected by the operator from
