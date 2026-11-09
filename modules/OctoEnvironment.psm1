@@ -1,5 +1,7 @@
 <#
-    Feature environments (AB#8700): small, isolated lane folders at <rootPath>/envs/<env>/.
+    Feature environments (AB#8700): small, isolated lane folders at <rootPath>/wt-<env>/. An environment IS an
+    octo-claude-pm lane: <env> is the lane name, wt-<env> its lane folder (agent-operating-rules §4, the worktree sweep
+    knows <lane-root>/wt-*/ folders), and environments are discovered by <rootPath>/wt-*/.octo/environment.json.
 
     An environment holds git worktrees of the repositories a feature changes (role feature, on the feature branch)
     and of the repositories that must be rebuilt against them (role consumer, detached at the base checkout's
@@ -23,7 +25,7 @@ $script:IgnoredSyncFiles = @('.catalog-index.lock', '.DS_Store')
 # ---------------------------------------------------------------------------------------------------------------
 
 function Get-OctoEnvironmentRootPath {
-    # The workspace root ($rootPath of profile.ps1). Environments live in <root>/envs/<env>.
+    # The workspace root ($rootPath of profile.ps1). Environments live in <root>/wt-<env>.
     $root = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue
     if ([string]::IsNullOrWhiteSpace([string]$root)) {
         throw "`$rootPath is not set - load modules/profile.ps1 first."
@@ -40,9 +42,9 @@ function Get-OctoEnvironmentPath {
     # Absolute folder of an environment; throws for an invalid name.
     param([Parameter(Mandatory = $true)] [string]$env)
     if (-not (Test-OctoEnvironmentName -env $env)) {
-        throw "Invalid environment name '$env': use a lower-case slug (a-z, 0-9, '-'), 2-63 characters, e.g. ab8625-enum-null."
+        throw "Invalid environment name '$env': use a lower-case slug or octo-claude-pm lane name (a-z, 0-9, '-'), 2-63 characters, e.g. ab8625-enum-null or odysseus-kind."
     }
-    return Join-Path (Join-Path (Get-OctoEnvironmentRootPath) 'envs') $env
+    return Join-Path (Get-OctoEnvironmentRootPath) "wt-$env"
 }
 
 function Get-OctoEnvironmentBasePath {
@@ -225,6 +227,111 @@ function Add-OctoEnvironmentWorktree {
     }
     if ($add.ExitCode -ne 0) { throw "git worktree add failed for ${repo}: $($add.Output -join ' ')" }
     return [ordered]@{ name = $repo; role = $role; path = [IO.Path]::GetFullPath($target); branch = $branch; baseCommit = $baseCommit }
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Existing worktrees (octo-claude-pm flat wt-<lane>-<repo>, Claude Code <repo>/.claude/worktrees/<name>)
+# ---------------------------------------------------------------------------------------------------------------
+
+function Test-OctoEnvironmentRepoInPlace {
+    # An adopted worktree recorded with -inPlace: its folder is not <env>/<repo>.
+    param([Parameter(Mandatory = $true)] [System.Collections.IDictionary]$repo, [Parameter(Mandatory = $true)] [string]$environmentPath)
+    $expected = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Join-Path $environmentPath $repo['name'])))
+    $actual = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([string]$repo['path']))
+    return -not ($expected -ieq $actual)
+}
+
+function Get-OctoWorktreeInfo {
+    <#
+        Facts about a linked git worktree: repository name (folder of the main checkout that owns it), common git dir,
+        main checkout, branch (null when detached), HEAD and whether git has it locked. Throws for a folder that is no
+        linked worktree (a main checkout or a plain folder is never adopted).
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $full = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path))
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw "$full does not exist." }
+    if (-not (Test-Path -LiteralPath (Join-Path $full '.git') -PathType Leaf)) {
+        throw "$full is no linked git worktree (.git is not a file) - only worktrees are adopted, never a main checkout."
+    }
+    $common = Invoke-OctoEnvironmentGit -path $full -arguments @('rev-parse', '--path-format=absolute', '--git-common-dir')
+    if ($common.ExitCode -ne 0) { throw "git rev-parse --git-common-dir failed in ${full}: $($common.Output -join ' ')" }
+    $commonDir = [IO.Path]::TrimEndingDirectorySeparator([string]($common.Output | Select-Object -Last 1))
+    if ((Split-Path -Leaf $commonDir) -ne '.git') { throw "$full belongs to the bare repository $commonDir - not supported." }
+    $mainCheckout = Split-Path -Parent $commonDir
+    $branch = Invoke-OctoEnvironmentGit -path $full -arguments @('symbolic-ref', '--quiet', '--short', 'HEAD')
+    $head = Invoke-OctoEnvironmentGit -path $full -arguments @('rev-parse', 'HEAD')
+    # git lists worktrees in its own path form (symlinks resolved, e.g. /private/tmp); compare against that form.
+    $topLevel = Invoke-OctoEnvironmentGit -path $full -arguments @('rev-parse', '--show-toplevel')
+    $gitForm = ([string]($topLevel.Output | Select-Object -Last 1)) -replace '\\', '/'
+    $list = Invoke-OctoEnvironmentGit -path $mainCheckout -arguments @('worktree', 'list', '--porcelain')
+    $locked = $false
+    $current = $null
+    foreach ($line in $list.Output) {
+        if ($line -like 'worktree *') { $current = $line.Substring(9).TrimEnd('/') -replace '\\', '/' }
+        elseif (($line -eq 'locked' -or $line -like 'locked *') -and $current -and ($current -ieq $gitForm -or $current -ieq ($full -replace '\\', '/'))) { $locked = $true }
+    }
+    return [pscustomobject]@{
+        Path         = $full
+        Repo         = Split-Path -Leaf $mainCheckout
+        CommonDir    = $commonDir
+        MainCheckout = $mainCheckout
+        Branch       = if ($branch.ExitCode -eq 0) { [string]($branch.Output | Select-Object -Last 1) } else { $null }
+        Head         = [string]($head.Output | Select-Object -Last 1)
+        Locked       = $locked
+    }
+}
+
+function Get-OctoProcessRecords {
+    # Every process as { Pid; Command; Cwd }. Cwd from lsof on macOS/Linux (null on Windows, where the working
+    # directory is not readable). A wrapper so tests never look at real processes.
+    $records = @{}
+    if ($IsWindows) {
+        foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+            $records[[int]$process.ProcessId] = [pscustomobject]@{ Pid = [int]$process.ProcessId; Command = [string]$process.CommandLine; Cwd = $null }
+        }
+        return @($records.Values)
+    }
+    foreach ($line in @(& ps -axo 'pid=,command=' 2>$null)) {
+        if ($line -match '^\s*(\d+)\s+(.*)$') { $records[[int]$Matches[1]] = [pscustomobject]@{ Pid = [int]$Matches[1]; Command = $Matches[2]; Cwd = $null } }
+    }
+    if (Get-Command lsof -ErrorAction SilentlyContinue) {
+        $currentPid = $null
+        foreach ($line in @(& lsof -d cwd -Fpn 2>$null)) {
+            if ($line -like 'p*') { $currentPid = [int]$line.Substring(1) }
+            elseif ($line -like 'n*' -and $null -ne $currentPid -and $records.ContainsKey($currentPid)) { $records[$currentPid].Cwd = $line.Substring(1) }
+        }
+    }
+    return @($records.Values)
+}
+
+function Get-OctoProcessesUnderPath {
+    # Processes whose working directory lies in $path or whose command line names a path in it (shells, IDEs,
+    # Claude Code sessions, services started from its bin/). Moving the folder under them would break them.
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $prefix = ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path)) -replace '\\', '/') + '/'
+    $found = @()
+    foreach ($record in @(Get-OctoProcessRecords)) {
+        $cwd = if ($record.Cwd) { ([IO.Path]::TrimEndingDirectorySeparator([string]$record.Cwd) -replace '\\', '/') + '/' } else { $null }
+        $command = ([string]$record.Command) -replace '\\', '/'
+        if (($cwd -and $cwd.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) -or
+            ($command -and ($command + '/').IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $found += [pscustomobject]@{ pid = $record.Pid; command = $record.Command; cwd = $record.Cwd }
+        }
+    }
+    return $found
+}
+
+function Get-OctoAdoptedWorktreeEntry {
+    # Manifest entry of an adopted worktree at $path (after the move, or in place).
+    param([Parameter(Mandatory = $true)] $info, [Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string]$role)
+    # baseCommit: where the work in this worktree started relative to its main checkout's HEAD.
+    $mainHead = Invoke-OctoEnvironmentGit -path $info.MainCheckout -arguments @('rev-parse', 'HEAD')
+    $baseCommit = $info.Head
+    if ($mainHead.ExitCode -eq 0) {
+        $mergeBase = Invoke-OctoEnvironmentGit -path $path -arguments @('merge-base', 'HEAD', [string]($mainHead.Output | Select-Object -Last 1))
+        if ($mergeBase.ExitCode -eq 0) { $baseCommit = [string]($mergeBase.Output | Select-Object -Last 1) }
+    }
+    return [ordered]@{ name = $info.Repo; role = $role; path = [IO.Path]::GetFullPath($path); branch = $info.Branch; baseCommit = $baseCommit }
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -588,7 +695,8 @@ function Get-OctoEnvironmentAffected {
 
 <#
 .SYNOPSIS
-    Creates a feature environment at <rootPath>/envs/<env>: feature worktrees, Octo.User.props, manifest, and a
+    Creates a feature environment at <rootPath>/wt-<env> (the octo-claude-pm lane folder of lane <env>): feature
+    worktrees, Octo.User.props, manifest, and a
     snapshot of the base lane's feed and catalogs.
 
 .DESCRIPTION
@@ -599,8 +707,10 @@ function Get-OctoEnvironmentAffected {
     RestorePackagesPath=<env>/.nuget-packages plus OctoEnvironment/OctoEnvironmentBase (the base lane's own
     Octo.User.props is imported for its other settings), and .octo/environment.json (schemaVersion 1).
 
-    Refuses an existing environment, an invalid name, a base lane that does not exist and an environment folder
-    inside the base lane (the kill scope and cache logic of the base would match it). -addAffected adds every
+    An existing lane folder without a manifest (octo-claude-pm lane) becomes the environment; its other content is
+    left alone. Refuses an existing environment, an invalid name, a base lane that does not exist, an existing
+    Octo.User.props or <repo> folder in the lane folder, and an environment folder inside the base lane (the kill
+    scope and cache logic of the base would match it). Existing worktrees are adopted with Add-OctoEnvironmentRepo -path. -addAffected adds every
     transitive consumer of the feature repositories as a consumer worktree (Get-OctoAffectedRepos); for a single
     service use Add-OctoEnvironmentRepo -role consumer -addAffected instead.
 
@@ -638,7 +748,10 @@ function New-OctoEnvironment {
         & $fail "Environment folder $environmentPath lies inside the base lane $basePath (`$rootPath points into the lane - load the profile from the octo-tools next to the lanes). Refused: the base lane's kill scope and package caches would include it."
         return
     }
-    if (Test-Path -LiteralPath $environmentPath) { & $fail "Environment $env already exists ($environmentPath). Use Add-OctoEnvironmentRepo, or Remove-OctoEnvironment first."; return }
+    if (Test-Path -LiteralPath (Get-OctoEnvironmentManifestPath -environmentPath $environmentPath) -PathType Leaf) { & $fail "Environment $env already exists ($environmentPath). Use Add-OctoEnvironmentRepo, or Remove-OctoEnvironment first."; return }
+    # An existing octo-claude-pm lane folder (wt-<lane>, no manifest) becomes the environment; its other content
+    # (claims, worktrees of the sweep layout) stays untouched. A repo folder that is already there is refused.
+    $existingLaneFolder = Test-Path -LiteralPath $environmentPath -PathType Container
     try { $repoNames = @($repos | ForEach-Object { $_ -split ',' } | Where-Object { $_ } | ForEach-Object { Resolve-OctoEnvironmentRepoName -repo $_.Trim() -basePath $basePath } | Select-Object -Unique) }
     catch { & $fail $_.Exception.Message; return }
     if ($repoNames.Count -eq 0) { & $fail "-repos names no repository."; return }
@@ -655,8 +768,12 @@ function New-OctoEnvironment {
         slot     = $env
     }
 
+    if (Test-Path -LiteralPath (Join-Path $environmentPath 'Octo.User.props')) { & $fail "$(Join-Path $environmentPath 'Octo.User.props') already exists without an environment manifest - not overwritten. Move it away first."; return }
+    foreach ($repo in $repoNames) {
+        if (Test-Path -LiteralPath (Join-Path $environmentPath $repo)) { & $fail "$(Join-Path $environmentPath $repo) already exists - adopt it with Add-OctoEnvironmentRepo -path after creating the environment with other repositories, or move it away."; return }
+    }
     if (-not $PSCmdlet.ShouldProcess($environmentPath, "Create environment with feature worktree(s) $($repoNames -join ', ') on $branchName")) {
-        $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames }
+        $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames; existingLaneFolder = $existingLaneFolder }
         if ($Json) { Write-OctoJson -Command 'New-OctoEnvironment' -Data $plan }
         return
     }
@@ -695,7 +812,7 @@ function New-OctoEnvironment {
     if ($Json) {
         Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{
                 environment = $env; path = $environmentPath; branch = $branchName; manifest = $manifest
-                consumersAdded = $addedConsumers; sync = $sync; errors = $errors
+                consumersAdded = $addedConsumers; sync = $sync; errors = $errors; existingLaneFolder = $existingLaneFolder
             })
         return
     }
@@ -720,8 +837,13 @@ function Get-OctoEnvironment {
         [switch]$Json
     )
 
-    $environmentsRoot = Join-Path (Get-OctoEnvironmentRootPath) 'envs'
-    $names = if ($env) { @($env) } elseif (Test-Path -LiteralPath $environmentsRoot) { @(Get-ChildItem -LiteralPath $environmentsRoot -Directory | ForEach-Object Name | Sort-Object) } else { @() }
+    # Discovery: <rootPath>/wt-*/.octo/environment.json (flat octo-claude-pm worktrees wt-<lane>-<repo> have none).
+    $environmentsRoot = Get-OctoEnvironmentRootPath
+    $names = if ($env) { @($env) } else {
+        @(Get-ChildItem -LiteralPath $environmentsRoot -Directory -Filter 'wt-*' -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Get-OctoEnvironmentManifestPath -environmentPath $_.FullName) -PathType Leaf } |
+            ForEach-Object { $_.Name.Substring(3) } | Where-Object { Test-OctoEnvironmentName -env $_ } | Sort-Object)
+    }
     $rows = @()
     $missing = $null
     foreach ($name in $names) {
@@ -739,12 +861,12 @@ function Get-OctoEnvironment {
             owner    = $manifest['owner']
             created  = $manifest['created']
             slot     = $manifest['slot']
-            repos    = @($manifest['repos'] | ForEach-Object { [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit'] } })
+            repos    = @($manifest['repos'] | ForEach-Object { [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; inPlace = (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath (Get-OctoEnvironmentPath -env $name)) } })
         }
         if ($env) {
             $row['repos'] = @($manifest['repos'] | ForEach-Object {
                     $state = Get-OctoEnvironmentRepoState -repo $_
-                    [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; exists = $state.exists; dirty = $state.dirty; unpushed = $state.unpushed }
+                    [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; inPlace = (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath (Get-OctoEnvironmentPath -env $name)); exists = $state.exists; dirty = $state.dirty; unpushed = $state.unpushed }
                 })
         }
         $rows += [pscustomobject]$row
@@ -765,6 +887,7 @@ function Get-OctoEnvironment {
         Write-Host ("{0}  {1}  base {2}  {3}" -f $row.name, $(if ($row.workItem) { $row.workItem } else { '-' }), $row.base, $row.path) -ForegroundColor Cyan
         foreach ($repo in $row.repos) {
             $flags = @()
+            if ($repo['inPlace']) { $flags += "in place: $($repo['path']) (not isolated outside octo-tools builds)" }
             if ($repo.Contains('exists') -and -not $repo['exists']) { $flags += 'MISSING' }
             if ($repo.Contains('dirty') -and $repo['dirty']) { $flags += 'dirty' }
             if ($repo.Contains('unpushed') -and $repo['unpushed'] -gt 0) { $flags += "$($repo['unpushed']) unpushed" }
@@ -775,43 +898,70 @@ function Get-OctoEnvironment {
 
 <#
 .SYNOPSIS
-    Adds a repository to an environment: a feature worktree on the environment's branch, or a consumer worktree
-    detached at the base checkout's commit.
+    Adds a repository to an environment: a new feature or consumer worktree, or an existing worktree (-path).
 .DESCRIPTION
-    -role feature (default) uses the branch of the environment's existing feature repositories (or the default
-    <user>/AB#<id>_<desc>). -role consumer adds a clean, detached worktree that is rebuilt against the
-    environment's packages (read-only by convention). -addAffected also adds, as consumers, every affected
-    repository on the path from a feature repository to -repo (Get-OctoAffectedRepos -target), so a service gets
-    every intermediate library rebuilt.
+    -repo <name>: -role feature (default) creates <env>/<repo> on the branch of the environment's feature repositories
+    (or the default <user>/AB#<id>_<desc>); -role consumer creates a clean worktree detached at the base checkout's
+    commit, rebuilt against the environment's packages (read-only by convention). -addAffected also adds, as
+    consumers, every affected repository on the path from a feature repository to -repo (Get-OctoAffectedRepos -target).
+
+    -path <worktree>: adopts an existing linked worktree - an octo-claude-pm flat worktree <checkout>/wt-<lane>-<repo>
+    or a Claude Code worktree <repo>/.claude/worktrees/<name>. The repository is the main checkout that owns it, the
+    branch its current branch, baseCommit the merge base with the main checkout's HEAD. By default it is moved with
+    `git worktree move` to <env>/<repo>, so plain dotnet builds and Rider there are isolated like any environment repo;
+    the move is refused when git has the worktree locked or a process runs from it (working directory or command
+    line, e.g. a shell, an IDE or a Claude Code session - Windows cannot see working directories, stop them there
+    first). Uncommitted changes move with it. The old and the new path are reported.
+    -inPlace only records the worktree in the manifest. Invoke-BuildEnvironment then builds it from where it is and
+    passes the environment's feed, package cache and CK catalog as global properties (RestoreSources,
+    RestorePackagesPath, OctoLocalCatalogRootPath); a plain dotnet build or Rider in that folder is NOT isolated (it
+    restores from the ../nuget next to it). Remove-OctoEnvironment never deletes an in-place worktree.
 .EXAMPLE
     Add-OctoEnvironmentRepo -env ab8625-enum-null -repo octo-asset-repo-services -role consumer -addAffected
+.EXAMPLE
+    Add-OctoEnvironmentRepo -env odysseus-kind -path ~/dev/meshmakers/wt-odysseus-kind-octo-helm-core
+.EXAMPLE
+    Add-OctoEnvironmentRepo -env ab8700-envs -path ~/dev/meshmakers/octo-tools/.claude/worktrees/feature-environments -inPlace
 #>
 function Add-OctoEnvironmentRepo {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)] [string]$env,
-        [Parameter(Mandatory = $true)] [string]$repo,
+        [string]$repo = '',
+        [string]$path = '',
+        [switch]$inPlace,
         [ValidateSet('feature', 'consumer')] [string]$role = 'feature',
         [switch]$addAffected,
         [switch]$Json
     )
 
     $fail = {
-        param([string]$message)
+        param([string]$message, $extra = $null)
         $global:LASTEXITCODE = 1
-        if ($Json) { Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ environment = $env; error = $message }) }
+        $data = @{ environment = $env; error = $message }
+        if ($extra) { foreach ($key in $extra.Keys) { $data[$key] = $extra[$key] } }
+        if ($Json) { Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra $data) }
         else { Write-Error $message }
     }
+    if ([string]::IsNullOrWhiteSpace($repo) -eq [string]::IsNullOrWhiteSpace($path)) { & $fail "Pass either -repo (new worktree) or -path (adopt an existing worktree)."; return }
+    if ($inPlace -and [string]::IsNullOrWhiteSpace($path)) { & $fail "-inPlace needs -path."; return }
+    if ($addAffected -and -not [string]::IsNullOrWhiteSpace($path)) { & $fail "-addAffected works with -repo only; run it for the adopted repository afterwards."; return }
     try {
         $manifest = Read-OctoEnvironmentManifest -env $env
         if ($null -eq $manifest) { throw "Environment $env does not exist." }
         $environmentPath = Get-OctoEnvironmentPath -env $env
         $basePath = Get-OctoEnvironmentBasePath -base ([string]$manifest['base'])
-        $name = Resolve-OctoEnvironmentRepoName -repo $repo -basePath $basePath
     }
     catch { & $fail $_.Exception.Message; return }
-
     $present = @($manifest['repos'] | ForEach-Object { $_['name'] })
+
+    if (-not [string]::IsNullOrWhiteSpace($path)) {
+        Add-OctoEnvironmentExistingWorktree -env $env -manifest $manifest -environmentPath $environmentPath -path $path -inPlace:$inPlace -role $role -present $present -fail $fail -Json:$Json -WhatIf:$WhatIfPreference
+        return
+    }
+
+    try { $name = Resolve-OctoEnvironmentRepoName -repo $repo -basePath $basePath }
+    catch { & $fail $_.Exception.Message; return }
     $toAdd = [System.Collections.Generic.List[object]]::new()
     if ($present -notcontains $name) { $toAdd.Add([pscustomobject]@{ Name = $name; Role = $role }) }
     if ($addAffected) {
@@ -853,6 +1003,70 @@ function Add-OctoEnvironmentRepo {
     }
     foreach ($item in $added) { Write-Host ("Added {0} {1} to {2}" -f $item.role, $item.name, $env) -ForegroundColor Green }
     foreach ($message in $errors) { Write-Warning $message }
+}
+
+function Add-OctoEnvironmentExistingWorktree {
+    # Add-OctoEnvironmentRepo -path: adopt an existing linked worktree (move it into the environment, or record it in place).
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$env, [System.Collections.IDictionary]$manifest, [string]$environmentPath, [string]$path,
+        [switch]$inPlace, [string]$role, [string[]]$present, [scriptblock]$fail, [switch]$Json
+    )
+    try { $info = Get-OctoWorktreeInfo -path $path }
+    catch { & $fail $_.Exception.Message; return }
+    if ($present -contains $info.Repo) { & $fail "$($info.Repo) is already in $env."; return }
+    if (Test-OctoPathInside -path $info.Path -parent $environmentPath) { & $fail "$($info.Path) already lies inside the environment folder $environmentPath."; return }
+    if ($info.Repo -in @('octo-tools', 'octo-devstack')) {
+        Write-Warning "$($info.Repo) is a developer tool, not built by Invoke-BuildEnvironment - it is only recorded."
+    }
+    $target = Join-Path $environmentPath $info.Repo
+    $oldPath = $info.Path
+
+    if ($inPlace) {
+        if (-not $PSCmdlet.ShouldProcess($oldPath, "Record in environment $env (in place)")) {
+            if ($Json) { Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; repo = $info.Repo; oldPath = $oldPath; newPath = $oldPath; inPlace = $true }) }
+            return
+        }
+        $entry = Get-OctoAdoptedWorktreeEntry -info $info -path $oldPath -role $role
+    }
+    else {
+        if (Test-Path -LiteralPath $target) { & $fail "$target already exists."; return }
+        if ($info.Locked) { & $fail "git has the worktree $oldPath locked - unlock it (git worktree unlock) or use -inPlace." @{ oldPath = $oldPath }; return }
+        $processes = @(Get-OctoProcessesUnderPath -path $oldPath)
+        if ($processes.Count -gt 0) {
+            $list = @($processes | ForEach-Object { "pid $($_.pid) ($(if ($_.cwd) { "cwd $($_.cwd)" } else { $_.command }))" })
+            & $fail "Processes run from $oldPath - stop them (or leave the folder) before moving it, or use -inPlace: $($list -join '; ')." @{ oldPath = $oldPath; processes = $processes }
+            return
+        }
+        if (-not $PSCmdlet.ShouldProcess($oldPath, "git worktree move to $target")) {
+            if ($Json) { Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; repo = $info.Repo; oldPath = $oldPath; newPath = $target; inPlace = $false }) }
+            return
+        }
+        if (-not (Test-Path -LiteralPath $environmentPath)) { New-Item -ItemType Directory -Force -Path $environmentPath | Out-Null }
+        $move = Invoke-OctoEnvironmentGit -path $info.MainCheckout -arguments @('worktree', 'move', $oldPath, $target)
+        if ($move.ExitCode -ne 0) { & $fail "git worktree move $oldPath $target failed: $($move.Output -join ' ')" @{ oldPath = $oldPath }; return }
+        $entry = Get-OctoAdoptedWorktreeEntry -info $info -path $target -role $role
+    }
+    $manifest['repos'] = @($manifest['repos']) + @($entry)
+    Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
+    $global:LASTEXITCODE = 0
+    $newPath = [string]$entry['path']
+    if ($Json) {
+        Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
+                environment = $env; added = @([ordered]@{ name = $info.Repo; role = $role }); repo = $info.Repo
+                oldPath = $oldPath; newPath = $newPath; inPlace = [bool]$inPlace; branch = $entry['branch']; errors = @()
+            })
+        return
+    }
+    if ($inPlace) {
+        Write-Host "Recorded $($info.Repo) in $env in place: $oldPath" -ForegroundColor Green
+        Write-Warning "Invoke-BuildEnvironment builds it with the environment's feed and cache; a plain dotnet build or Rider in $oldPath is not isolated."
+    }
+    else {
+        Write-Host "Moved $($info.Repo) into $env" -ForegroundColor Green
+        Write-Host "  old path: $oldPath"
+        Write-Host "  new path: $newPath"
+    }
 }
 
 <#
@@ -962,10 +1176,12 @@ function Get-OctoAffectedRepos {
 .SYNOPSIS
     Removes a feature environment: its worktrees and its folder (feed, cache, catalogs, logs).
 .DESCRIPTION
-    Refuses - and removes nothing - when a worktree has uncommitted or untracked changes, or commits that are on no
-    remote (feature branch) / on no remote or local branch (consumer). There is no -force: commit and push, or
-    discard, first. Feature branches are kept. Stop the environment's services first (octo-devstack env_remove does
-    that and releases the lease).
+    Refuses - and removes nothing - when a worktree has uncommitted or untracked changes, or commits on top of its base
+    commit that no remote has. There is no -force: commit and push, or discard, first. Feature branches are kept.
+    In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are neither checked nor removed. Only what the environment
+    owns is deleted (worktrees, nuget/, .nuget-packages/, logFiles/, Octo.User.props, the catalogs, .octo/sync and the
+    manifest); an octo-claude-pm lane folder with other content (e.g. .octo/claims) is kept. Stop the environment's
+    services first (octo-devstack env_remove does that and releases the lease).
 .EXAMPLE
     Remove-OctoEnvironment -env ab8625-enum-null -WhatIf
 #>
@@ -989,7 +1205,10 @@ function Remove-OctoEnvironment {
     }
     catch { & $fail $_.Exception.Message @(); return }
 
-    $states = @($manifest['repos'] | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ })
+    # In-place worktrees (Add-OctoEnvironmentRepo -path -inPlace) are not the environment's: never checked, never removed.
+    $owned = @($manifest['repos'] | Where-Object { -not (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath) })
+    $keptInPlace = @($manifest['repos'] | Where-Object { Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath } | ForEach-Object { [string]$_['path'] })
+    $states = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ })
     $blocking = @($states | Where-Object { $_.dirty -or $_.unpushed -gt 0 -or $_.problem })
     if ($blocking.Count -gt 0) {
         $reasons = @($blocking | ForEach-Object {
@@ -1003,30 +1222,44 @@ function Remove-OctoEnvironment {
         return
     }
 
-    if (-not $PSCmdlet.ShouldProcess($environmentPath, "Remove $(@($manifest['repos']).Count) worktree(s) and the environment folder")) {
-        if ($Json) { Write-OctoJson -Command 'Remove-OctoEnvironment' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; repos = $states }) }
+    if (-not $PSCmdlet.ShouldProcess($environmentPath, "Remove $($owned.Count) worktree(s) and the environment's files")) {
+        if ($Json) { Write-OctoJson -Command 'Remove-OctoEnvironment' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; repos = $states; keptInPlace = $keptInPlace }) }
         return
     }
     $errors = @()
-    foreach ($repo in $manifest['repos']) {
-        $source = Join-Path $basePath $repo['name']
+    foreach ($repo in $owned) {
+        # The main checkout that owns the worktree (adopted worktrees may come from another checkout than the base lane).
+        $owner = Join-Path $basePath $repo['name']
         if (Test-Path -LiteralPath $repo['path']) {
+            try { $owner = (Get-OctoWorktreeInfo -path $repo['path']).MainCheckout } catch { }
             # Clean by the check above; --force only lets git remove a worktree with submodules or ignored build output.
-            $remove = Invoke-OctoEnvironmentGit -path $source -arguments @('worktree', 'remove', '--force', $repo['path'])
+            $remove = Invoke-OctoEnvironmentGit -path $owner -arguments @('worktree', 'remove', '--force', $repo['path'])
             if ($remove.ExitCode -ne 0) { $errors += "git worktree remove failed for $($repo['name']): $($remove.Output -join ' ')"; continue }
         }
-        [void](Invoke-OctoEnvironmentGit -path $source -arguments @('worktree', 'prune'))
+        if (Test-Path -LiteralPath $owner) { [void](Invoke-OctoEnvironmentGit -path $owner -arguments @('worktree', 'prune')) }
     }
+    $leftOver = @()
     if ($errors.Count -eq 0) {
-        Remove-Item -LiteralPath $environmentPath -Recurse -Force
+        # Only what the environment owns. An octo-claude-pm lane folder keeps its other content (claims, worktrees of
+        # the sweep layout); the folder goes only when it is empty afterwards.
+        foreach ($item in @('nuget', '.nuget-packages', 'logFiles', 'Octo.User.props', '.octo/sync', '.octo/local-catalog', '.octo/local-blueprint-catalog', '.octo/environment.json')) {
+            $itemPath = Join-Path $environmentPath $item
+            if (Test-Path -LiteralPath $itemPath) { Remove-Item -LiteralPath $itemPath -Recurse -Force }
+        }
+        foreach ($folder in @((Join-Path $environmentPath '.octo'), $environmentPath)) {
+            if ((Test-Path -LiteralPath $folder) -and @(Get-ChildItem -LiteralPath $folder -Force).Count -eq 0) { Remove-Item -LiteralPath $folder -Force }
+        }
+        if (Test-Path -LiteralPath $environmentPath) { $leftOver = @(Get-ChildItem -LiteralPath $environmentPath -Force | ForEach-Object Name) }
     }
     $success = $errors.Count -eq 0
     $global:LASTEXITCODE = if ($success) { 0 } else { 1 }
     if ($Json) {
-        Write-OctoJson -Command 'Remove-OctoEnvironment' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{ environment = $env; path = $environmentPath; repos = $states; errors = $errors })
+        Write-OctoJson -Command 'Remove-OctoEnvironment' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{ environment = $env; path = $environmentPath; repos = $states; keptInPlace = $keptInPlace; leftOver = $leftOver; errors = $errors })
         return
     }
     if ($success) { Write-Host "Removed environment $env ($environmentPath); feature branches are kept." -ForegroundColor Green }
+    foreach ($kept in $keptInPlace) { Write-Host "  kept in-place worktree $kept" }
+    if ($leftOver.Count -gt 0) { Write-Host "  lane folder kept, it still holds: $($leftOver -join ', ')" }
     foreach ($message in $errors) { Write-Error $message }
 }
 
@@ -1035,9 +1268,15 @@ function Remove-OctoEnvironment {
     Builds a feature environment incrementally: optional sync with the base lane, then Invoke-BuildRange over the
     environment's repositories.
 .DESCRIPTION
-    Runs Invoke-BuildRange -branch envs/<env> from the first to the last repository of the environment in the
+    Runs Invoke-BuildRange -branch wt-<env> from the first to the last repository of the environment in the
     shared build order (OctoBuildOrder.psm1; frontends included when the environment holds one). Packages go to
     <env>/nuget, the per-package purge hits only <env>/.nuget-packages (the environment is an isolated lane).
+    In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are built from their own folder at their build-order
+    position (Invoke-BuildRange -externalRepoPaths) with the environment's feed, cache and CK catalog as global
+    properties: RestoreSources=<env>/nuget;nuget.org, RestorePackagesPath=<env>/.nuget-packages,
+    OctoLocalCatalogRootPath=<env>/.octo/local-catalog (like octo-devstack's private feeds). The global
+    RestoreSources replaces a repository's own default feeds (e.g. Telerik in octo-report-services) - move such a
+    worktree into the environment instead.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
     -DryRun prints the plan (Invoke-BuildRange -WhatIf) and changes nothing, also no sync. -EventsFile writes the
     build events with command "Invoke-BuildEnvironment".
@@ -1070,7 +1309,20 @@ function Invoke-BuildEnvironment {
         $basePath = Get-OctoEnvironmentBasePath -base ([string]$manifest['base'])
     }
     catch { & $fail $_.Exception.Message; return }
-    $order = @(Get-OctoBuildOrder -branchRootPath $environmentPath -excludeFrontend $false -excludeAdditional $false)
+    $external = @{}
+    $perRepo = @{}
+    $environmentFeed = Join-Path $environmentPath 'nuget'
+    foreach ($repo in @($manifest['repos'] | Where-Object { Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath })) {
+        if (-not (Test-Path -LiteralPath $repo['path'] -PathType Container)) { & $fail "In-place worktree $($repo['path']) of $($repo['name']) does not exist."; return }
+        $external[[string]$repo['name']] = [string]$repo['path']
+        $perRepo[[string]$repo['name']] = @{
+            RestoreSources           = "$environmentFeed;https://api.nuget.org/v3/index.json"
+            RestorePackagesPath      = (Join-Path $environmentPath '.nuget-packages')
+            OctoLocalCatalogRootPath = (Join-Path $environmentPath '.octo/local-catalog')
+        }
+    }
+    try { $order = @(Get-OctoBuildOrder -branchRootPath $environmentPath -excludeFrontend $false -excludeAdditional $false -additionalRepos $external) }
+    catch { & $fail $_.Exception.Message; return }
     if ($order.Count -eq 0) { & $fail "Environment $env holds no repository."; return }
 
     $sync = $null
@@ -1081,11 +1333,15 @@ function Invoke-BuildEnvironment {
     }
 
     $range = @{
-        branch          = "envs/$env"
+        branch          = "wt-$env"
         from            = $order[0].Name
         to              = $order[-1].Name
         excludeFrontend = $false
         EventsCommand   = 'Invoke-BuildEnvironment'
+    }
+    if ($external.Count -gt 0) {
+        $range['externalRepoPaths'] = $external
+        $range['msbuildPropertiesPerRepo'] = $perRepo
     }
     if ($verifyTests) { $range['verifyTests'] = $true }
     if ($includeTests) { $range['includeTests'] = $true }
@@ -1108,7 +1364,7 @@ function Invoke-BuildEnvironment {
         $data['error'] = "Invoke-BuildRange returned no JSON document: $($_.Exception.Message)"
         $exitCode = 1
     }
-    $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name) }
+    $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external }
     $data['synced'] = $null -ne $sync
     if ($null -ne $sync) { $data['sync'] = $sync }
     $global:LASTEXITCODE = $exitCode

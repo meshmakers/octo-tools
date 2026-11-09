@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Computes how a build in a given lane checkout (branches/main, branches/dev, envs/<env>, ...) must be
+    Computes how a build in a given lane checkout (branches/main, branches/dev, wt-<env>, ...) must be
     isolated from the other lanes.
 
 .DESCRIPTION

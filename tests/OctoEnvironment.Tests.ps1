@@ -94,7 +94,7 @@ BeforeAll {
         Set-Content -Path $path -Value (ConvertTo-Json -InputObject $doc -Depth 5)
     }
 
-    # Workspace: <ws>/octo-tools (where the profile lives), <ws>/branches/main (base lane), <ws>/envs (environments).
+    # Workspace: <ws>/branches/main (base lane), environments in <ws>/wt-<env> (octo-claude-pm lane folders).
     function New-FakeWorkspace {
         $ws = Join-Path $TestDrive 'ws'
         foreach ($folder in @($ws, (Join-Path $TestDrive 'origins'))) { if (Test-Path $folder) { Remove-Item $folder -Recurse -Force } }
@@ -123,7 +123,7 @@ BeforeAll {
         Set-Content -Path (Join-Path $main '.octo/local-blueprint-catalog/blueprints/v1/App/1.0.0/blueprint.yaml') -Value 'name: App'
 
         $global:rootPath = $ws
-        return [pscustomobject]@{ Root = $ws; Main = $main; Envs = (Join-Path $ws 'envs') }
+        return [pscustomobject]@{ Root = $ws; Main = $main }
     }
 
     function Get-Doc([object[]]$output) { return (($output -join "`n") | ConvertFrom-Json) }
@@ -143,7 +143,7 @@ Describe 'New-OctoEnvironment' {
         $doc.command | Should -Be 'New-OctoEnvironment'
         $doc.data.success | Should -BeTrue
 
-        $envPath = Join-Path $ws.Envs 'ab8625-enum-null'
+        $envPath = Join-Path $ws.Root 'wt-ab8625-enum-null'
         $user = ([Environment]::UserName).ToLowerInvariant() -replace '[^a-z0-9._-]', ''
         $branch = "$user/AB#8625_enum-null"
         (Invoke-TestGit (Join-Path $envPath 'octo-construction-kit-engine') rev-parse --abbrev-ref HEAD) | Should -Be $branch
@@ -182,15 +182,15 @@ Describe 'New-OctoEnvironment' {
         $doc = Get-Doc (New-OctoEnvironment -env feat-x -repos 'octo-sdk,octo-construction-kit-engine' -branchName 'feature/existing' -Json)
         $doc.data.success | Should -BeTrue
         @($doc.data.manifest.repos.name) | Should -Be @('octo-sdk', 'octo-construction-kit-engine')
-        (Invoke-TestGit (Join-Path $ws.Envs 'feat-x/octo-sdk') rev-parse --abbrev-ref HEAD) | Should -Be 'feature/existing'
-        (Invoke-TestGit (Join-Path $ws.Envs 'feat-x/octo-construction-kit-engine') rev-parse --abbrev-ref HEAD) | Should -Be 'feature/existing'
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-feat-x/octo-sdk') rev-parse --abbrev-ref HEAD) | Should -Be 'feature/existing'
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-feat-x/octo-construction-kit-engine') rev-parse --abbrev-ref HEAD) | Should -Be 'feature/existing'
     }
 
     It 'refuses an invalid name, an existing environment, an unknown repository and a missing base' {
         (Get-Doc (New-OctoEnvironment -env 'Bad_Name' -repos octo-sdk -Json)).data.error | Should -Match 'Invalid environment name'
         (Get-Doc (New-OctoEnvironment -env 'ok-env' -repos octo-nope -Json)).data.error | Should -Match 'not a git checkout'
         (Get-Doc (New-OctoEnvironment -env 'ok-env' -repos octo-sdk -base 'branches/none' -Json)).data.error | Should -Match 'does not exist'
-        Test-Path (Join-Path $ws.Envs 'ok-env') | Should -BeFalse
+        Test-Path (Join-Path $ws.Root 'wt-ok-env') | Should -BeFalse
         (Get-Doc (New-OctoEnvironment -env 'ok-env' -repos octo-sdk -Json)).data.success | Should -BeTrue
         $again = Get-Doc (New-OctoEnvironment -env 'ok-env' -repos octo-sdk -Json)
         $again.data.success | Should -BeFalse
@@ -203,13 +203,13 @@ Describe 'New-OctoEnvironment' {
         $doc = Get-Doc (New-OctoEnvironment -env 'inside' -repos octo-sdk -base $ws.Main -Json)
         $doc.data.success | Should -BeFalse
         $doc.data.error | Should -Match 'inside the base lane'
-        Test-Path (Join-Path $ws.Main 'envs') | Should -BeFalse
+        Test-Path (Join-Path $ws.Main 'wt-inside') | Should -BeFalse
     }
 
     It '-WhatIf creates nothing' {
         $doc = Get-Doc (New-OctoEnvironment -env 'dry' -repos octo-sdk -WhatIf -Json)
         $doc.data.dryRun | Should -BeTrue
-        Test-Path (Join-Path $ws.Envs 'dry') | Should -BeFalse
+        Test-Path (Join-Path $ws.Root 'wt-dry') | Should -BeFalse
         @(Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree list).Count | Should -Be 1
     }
 }
@@ -223,7 +223,7 @@ Describe 'Get-OctoEnvironment' {
         New-OctoEnvironment -env 'env-b' -repos mm-common -Json | Out-Null
         @((Get-Doc (Get-OctoEnvironment -Json)).data.environments.name) | Should -Be @('env-a', 'env-b')
 
-        Set-Content -Path (Join-Path $ws.Envs 'env-a/octo-sdk/new.txt') -Value 'x'
+        Set-Content -Path (Join-Path $ws.Root 'wt-env-a/octo-sdk/new.txt') -Value 'x'
         $one = (Get-Doc (Get-OctoEnvironment -env 'env-a' -Json)).data
         $one.repos[0].dirty | Should -BeTrue
         $one.repos[0].exists | Should -BeTrue
@@ -235,7 +235,7 @@ Describe 'Remove-OctoEnvironment' {
     BeforeEach {
         $script:ws = New-FakeWorkspace
         New-OctoEnvironment -env 'env-r' -repos octo-sdk -branchName 'feature/r' -Json | Out-Null
-        $script:wt = Join-Path $ws.Envs 'env-r/octo-sdk'
+        $script:wt = Join-Path $ws.Root 'wt-env-r/octo-sdk'
     }
 
     It 'refuses a dirty worktree and removes nothing' {
@@ -257,7 +257,7 @@ Describe 'Remove-OctoEnvironment' {
         Invoke-TestGit $wt push -q -u origin 'feature/r' | Out-Null
         $doc = Get-Doc (Remove-OctoEnvironment -env 'env-r' -Json)
         $doc.data.success | Should -BeTrue
-        Test-Path (Join-Path $ws.Envs 'env-r') | Should -BeFalse
+        Test-Path (Join-Path $ws.Root 'wt-env-r') | Should -BeFalse
         @(Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree list).Count | Should -Be 1
         Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') rev-parse --verify --quiet 'refs/heads/feature/r' | Should -Not -BeNullOrEmpty
     }
@@ -266,7 +266,7 @@ Describe 'Remove-OctoEnvironment' {
         New-Item -ItemType Directory -Force -Path (Join-Path $wt 'bin/DebugL') | Out-Null
         Set-Content -Path (Join-Path $wt 'bin/DebugL/x.dll') -Value 'x'
         (Get-Doc (Remove-OctoEnvironment -env 'env-r' -Json)).data.success | Should -BeTrue
-        Test-Path (Join-Path $ws.Envs 'env-r') | Should -BeFalse
+        Test-Path (Join-Path $ws.Root 'wt-env-r') | Should -BeFalse
     }
 
     It '-WhatIf removes nothing; an unknown environment fails' {
@@ -284,7 +284,7 @@ Describe 'Sync-OctoEnvironment (PrivateFeed rules)' {
     BeforeEach {
         $script:ws = New-FakeWorkspace
         New-OctoEnvironment -env 'env-s' -repos octo-sdk -Json | Out-Null
-        $script:envPath = Join-Path $ws.Envs 'env-s'
+        $script:envPath = Join-Path $ws.Root 'wt-env-s'
         $script:feed = Join-Path $envPath 'nuget'
         $script:cache = Join-Path $envPath '.nuget-packages'
     }
@@ -395,7 +395,7 @@ Describe 'Get-OctoAffectedRepos (package graph)' {
 
     It 'uses the environment worktree, not the base folder, for a repository in the environment' {
         # the env's engine starts consuming the sdk's package: no cycle into the result, sdk still affected
-        New-Csproj (Join-Path $ws.Envs 'env-g/octo-construction-kit-engine') 'Extra' -packageId 'Meshmakers.Octo.Extra'
+        New-Csproj (Join-Path $ws.Root 'wt-env-g/octo-construction-kit-engine') 'Extra' -packageId 'Meshmakers.Octo.Extra'
         New-Csproj (Join-Path $ws.Main 'octo-identity-services') 'UsesExtra' -references 'Meshmakers.Octo.Extra' -notPackable
         @((Get-Doc (Get-OctoAffectedRepos -env 'env-g' -Json)).data.affected.repo) | Should -Contain 'octo-identity-services'
     }
@@ -405,7 +405,7 @@ Describe 'Add-OctoEnvironmentRepo' {
     BeforeEach {
         $script:ws = New-FakeWorkspace
         New-OctoEnvironment -env 'env-c' -repos octo-construction-kit-engine -branchName 'feature/c' -Json | Out-Null
-        $script:envPath = Join-Path $ws.Envs 'env-c'
+        $script:envPath = Join-Path $ws.Root 'wt-env-c'
     }
 
     It 'adds a consumer detached at the base checkout''s commit' {
@@ -452,7 +452,7 @@ Describe 'Invoke-BuildEnvironment' {
         New-OctoEnvironment -env 'env-b' -repos octo-sdk -branchName 'feature/b' -Json | Out-Null
         Add-OctoEnvironmentRepo -env 'env-b' -repo octo-cli -role consumer -Json | Out-Null
         New-OctoEnvironment -env 'env-other' -repos octo-construction-kit-engine -branchName 'feature/o' -Json | Out-Null
-        $script:envPath = Join-Path $ws.Envs 'env-b'
+        $script:envPath = Join-Path $ws.Root 'wt-env-b'
         Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
         $script:built = [System.Collections.Generic.List[object]]::new()
         Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
@@ -480,7 +480,7 @@ Describe 'Invoke-BuildEnvironment' {
         Get-Content (Join-Path $envPath 'nuget/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') -Raw | Should -Be 'sdk-env'
         Test-Path (Join-Path $envPath '.nuget-packages/meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse    # per-package purge, env cache
         Get-Content (Join-Path $ws.Main 'nuget/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') -Raw | Should -Be 'sdk-v1' # main feed untouched
-        Get-Content (Join-Path $ws.Envs 'env-other/nuget/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') -Raw | Should -Be 'sdk-v1'
+        Get-Content (Join-Path $ws.Root 'wt-env-other/nuget/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') -Raw | Should -Be 'sdk-v1'
     }
 
     It '-syncMain syncs first and keeps the environment-built package' {
@@ -525,7 +525,7 @@ Describe 'Kill scope and CK sync in environments' {
     BeforeEach { $script:ws = New-FakeWorkspace }
 
     It 'the main lane''s kill scope never matches environment processes, the environment''s scope does' {
-        $envRepo = Join-Path $ws.Envs 'env-k/octo-sdk/bin/DebugL/net10.0'
+        $envRepo = Join-Path $ws.Root 'wt-env-k/octo-sdk/bin/DebugL/net10.0'
         $mainRepo = Join-Path $ws.Main 'octo-sdk/bin/DebugL/net10.0'
         InModuleScope Invoke-KillDotnet -Parameters @{ ws = $ws; envRepo = $envRepo; mainRepo = $mainRepo } {
             $candidates = @(
@@ -534,14 +534,14 @@ Describe 'Kill scope and CK sync in environments' {
                 [pscustomobject]@{ Pid = 3; Name = 'dotnet'; Command = 'dotnet Sdk.dll'; Cwd = $mainRepo; Modules = @() }
             )
             @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $ws.Main).pid | Should -Be @(3)
-            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath (Join-Path $ws.Envs 'env-k')).pid | Should -Be @(1, 2)
-            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath (Join-Path $ws.Envs 'env')).pid | Should -BeNullOrEmpty
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath (Join-Path $ws.Root 'wt-env-k')).pid | Should -Be @(1, 2)
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath (Join-Path $ws.Root 'wt-env')).pid | Should -BeNullOrEmpty   # wt-env is no prefix of wt-env-k
         }
     }
 
     It 'the CK sync of an environment without the engine uses the base lane''s octo-ckc' {
         New-OctoEnvironment -env 'env-ck' -repos octo-sdk -Json | Out-Null
-        $envPath = Join-Path $ws.Envs 'env-ck'
+        $envPath = Join-Path $ws.Root 'wt-env-ck'
         $ckDir = Join-Path $envPath 'octo-sdk/src/CkModel'
         New-Item -ItemType Directory -Force -Path $ckDir | Out-Null
         Set-Content -Path (Join-Path $ckDir 'ckModel.yaml') -Value "ckLanguage: 2`nmodelId: Test"
@@ -554,5 +554,180 @@ Describe 'Kill scope and CK sync in environments' {
         $result = Sync-OctoCkIntermediateVersions -repositoryPath (Join-Path $envPath 'octo-sdk') -localCatalogRoot (Join-Path $envPath '.octo/local-catalog') -Quiet
         $result.LocalCatalogRoot | Should -Be (Join-Path $envPath '.octo/local-catalog')
         $result.Output | Should -Be "ckc=$baseCkc"
+    }
+}
+
+Describe 'Environments are octo-claude-pm lanes (wt-<env>)' {
+    BeforeEach { $script:ws = New-FakeWorkspace }
+
+    It 'accepts lane names and turns an existing lane folder into an environment; Remove keeps the lane''s own content' {
+        $lane = Join-Path $ws.Root 'wt-odysseus-kind'
+        New-Item -ItemType Directory -Force -Path (Join-Path $lane '.octo/claims') | Out-Null
+        Set-Content -Path (Join-Path $lane '.octo/claims/octo-sdk.md') -Value 'claim'
+
+        $doc = Get-Doc (New-OctoEnvironment -env odysseus-kind -repos octo-sdk -branchName 'reimar/AB#1_x' -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.existingLaneFolder | Should -BeTrue
+        Test-Path (Join-Path $lane 'octo-sdk/.git') -PathType Leaf | Should -BeTrue
+        Test-Path (Join-Path $lane '.octo/claims/octo-sdk.md') | Should -BeTrue
+
+        $removed = Get-Doc (Remove-OctoEnvironment -env odysseus-kind -Json)
+        $removed.data.success | Should -BeTrue
+        @($removed.data.leftOver) | Should -Be @('.octo')
+        Test-Path (Join-Path $lane '.octo/claims/octo-sdk.md') | Should -BeTrue
+        foreach ($item in @('octo-sdk', 'nuget', '.nuget-packages', 'Octo.User.props', '.octo/environment.json', '.octo/local-catalog')) {
+            Test-Path (Join-Path $lane $item) | Should -BeFalse
+        }
+    }
+
+    It 'refuses a lane folder that already holds the repository or an Octo.User.props' {
+        $lane = Join-Path $ws.Root 'wt-busy'
+        New-Item -ItemType Directory -Force -Path (Join-Path $lane 'octo-sdk') | Out-Null
+        (Get-Doc (New-OctoEnvironment -env busy -repos octo-sdk -Json)).data.error | Should -Match 'already exists'
+        Remove-Item (Join-Path $lane 'octo-sdk') -Recurse -Force
+        Set-Content -Path (Join-Path $lane 'Octo.User.props') -Value '<Project />'
+        (Get-Doc (New-OctoEnvironment -env busy -repos octo-sdk -Json)).data.error | Should -Match 'Octo.User.props already exists'
+    }
+
+    It 'discovers environments by wt-*/.octo/environment.json and ignores flat worktrees and plain lane folders' {
+        New-OctoEnvironment -env env-d -repos octo-sdk -Json | Out-Null
+        Invoke-TestGit (Join-Path $ws.Main 'mm-common') worktree add -q -b 'lane/x' (Join-Path $ws.Root 'wt-odysseus-kind-mm-common') | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $ws.Root 'wt-plain-lane/.octo/claims') | Out-Null
+        @((Get-Doc (Get-OctoEnvironment -Json)).data.environments.name) | Should -Be @('env-d')
+    }
+}
+
+Describe 'Add-OctoEnvironmentRepo -path (adopting existing worktrees)' {
+    BeforeEach {
+        $script:ws = New-FakeWorkspace
+        New-OctoEnvironment -env env-a -repos mm-common -branchName 'feature/a' -Json | Out-Null
+        $script:envPath = Join-Path $ws.Root 'wt-env-a'
+        # octo-claude-pm flat worktree next to the checkouts, with uncommitted work
+        $script:flat = Join-Path $ws.Root 'wt-odysseus-kind-octo-sdk'
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree add -q -b 'reimar/AB#5_flat' $flat | Out-Null
+        Set-Content -Path (Join-Path $flat 'wip.txt') -Value 'work in progress'
+        # Claude Code worktree inside a repository
+        $script:claude = Join-Path $ws.Main 'octo-identity-services/.claude/worktrees/feature-x'
+        Invoke-TestGit (Join-Path $ws.Main 'octo-identity-services') worktree add -q -b 'reimar/feature-x' $claude | Out-Null
+        Mock -ModuleName OctoEnvironment Get-OctoProcessRecords { @() }
+    }
+
+    It 'moves a flat octo-claude-pm worktree into the environment, uncommitted work included, and reports both paths' {
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.repo | Should -Be 'octo-sdk'
+        $doc.data.oldPath | Should -Be $flat
+        $doc.data.newPath | Should -Be (Join-Path $envPath 'octo-sdk')
+        $doc.data.inPlace | Should -BeFalse
+        Test-Path $flat | Should -BeFalse
+        Get-Content (Join-Path $envPath 'octo-sdk/wip.txt') -Raw | Should -Match 'work in progress'
+        (Invoke-TestGit (Join-Path $envPath 'octo-sdk') rev-parse --abbrev-ref HEAD) | Should -Be 'reimar/AB#5_flat'
+        $manifest = Get-Content (Join-Path $envPath '.octo/environment.json') -Raw | ConvertFrom-Json
+        $entry = $manifest.repos | Where-Object name -eq 'octo-sdk'
+        $entry.path | Should -Be (Join-Path $envPath 'octo-sdk')
+        $entry.branch | Should -Be 'reimar/AB#5_flat'
+        $entry.baseCommit | Should -Be (Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') rev-parse HEAD)
+    }
+
+    It 'moves a Claude Code worktree from <repo>/.claude/worktrees' {
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $claude -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.repo | Should -Be 'octo-identity-services'
+        Test-Path $claude | Should -BeFalse
+        (Invoke-TestGit (Join-Path $envPath 'octo-identity-services') rev-parse --abbrev-ref HEAD) | Should -Be 'reimar/feature-x'
+    }
+
+    It 'refuses to move a locked worktree or one a process runs from; -WhatIf moves nothing' {
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree lock $flat | Out-Null
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'locked'
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree unlock $flat | Out-Null
+
+        Mock -ModuleName OctoEnvironment Get-OctoProcessRecords { @([pscustomobject]@{ Pid = 4711; Command = '-zsh'; Cwd = (Join-Path $flat 'src') }) }
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'pid 4711'
+        Test-Path $flat | Should -BeTrue
+
+        Mock -ModuleName OctoEnvironment Get-OctoProcessRecords { @([pscustomobject]@{ Pid = 1; Command = 'dotnet build'; Cwd = "$flat-other" }) }
+        (Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -WhatIf -Json)).data.dryRun | Should -BeTrue
+        Test-Path $flat | Should -BeTrue
+    }
+
+    It 'refuses a main checkout, a repository already in the environment and -inPlace without -path' {
+        (Get-Doc (Add-OctoEnvironmentRepo -env env-a -path (Join-Path $ws.Main 'octo-sdk') -Json)).data.error | Should -Match 'no linked git worktree'
+        $other = Join-Path $ws.Root 'wt-other-mm-common'
+        Invoke-TestGit (Join-Path $ws.Main 'mm-common') worktree add -q -b 'other' $other | Out-Null
+        (Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $other -Json)).data.error | Should -Match 'already in env-a'
+        (Get-Doc (Add-OctoEnvironmentRepo -env env-a -repo octo-sdk -inPlace -Json)).data.error | Should -Match '-inPlace needs -path'
+    }
+
+    It '-inPlace records the worktree where it is; Remove keeps it' {
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $claude -inPlace -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.newPath | Should -Be $claude
+        Test-Path $claude | Should -BeTrue
+        $one = (Get-Doc (Get-OctoEnvironment -env env-a -Json)).data
+        ($one.repos | Where-Object name -eq 'octo-identity-services').inPlace | Should -BeTrue
+        ($one.repos | Where-Object name -eq 'mm-common').inPlace | Should -BeFalse
+
+        Set-Content -Path (Join-Path $claude 'dirty.txt') -Value 'x'    # not the environment's: no refusal
+        $removed = Get-Doc (Remove-OctoEnvironment -env env-a -Json)
+        $removed.data.success | Should -BeTrue
+        @($removed.data.keptInPlace) | Should -Be @($claude)
+        Test-Path (Join-Path $claude 'dirty.txt') | Should -BeTrue
+        Test-Path $envPath | Should -BeFalse
+    }
+}
+
+Describe 'Invoke-BuildEnvironment with in-place worktrees' {
+    BeforeEach {
+        $script:ws = New-FakeWorkspace
+        New-OctoEnvironment -env env-p -repos octo-construction-kit-engine -branchName 'feature/p' -Json | Out-Null
+        $script:envPath = Join-Path $ws.Root 'wt-env-p'
+        $script:inPlace = Join-Path $ws.Root 'wt-odysseus-kind-octo-sdk'
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree add -q -b 'reimar/AB#6_p' $inPlace | Out-Null
+        Add-OctoEnvironmentRepo -env env-p -path $inPlace -inPlace -Json | Out-Null
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        $script:built = [System.Collections.Generic.List[object]]::new()
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            $script:built.Add([pscustomobject]@{ Repo = $entry.Name; Path = $entry.Path; Properties = $msbuildProperties })
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+    }
+
+    It 'builds the in-place worktree from its folder at its build-order position with the environment''s feed, cache and catalog' {
+        $doc = Get-Doc (Invoke-BuildEnvironment -env env-p -Json)
+        $doc.data.success | Should -BeTrue
+        @($script:built.Repo) | Should -Be @('octo-construction-kit-engine', 'octo-sdk')
+        $script:built[0].Path | Should -Be (Join-Path $envPath 'octo-construction-kit-engine')
+        $script:built[0].Properties.Count | Should -Be 0
+        $sdk = $script:built[1]
+        $sdk.Path | Should -Be $inPlace
+        $sdk.Properties.RestoreSources | Should -Be "$(Join-Path $envPath 'nuget');https://api.nuget.org/v3/index.json"
+        $sdk.Properties.RestorePackagesPath | Should -Be (Join-Path $envPath '.nuget-packages')
+        $sdk.Properties.OctoLocalCatalogRootPath | Should -Be (Join-Path $envPath '.octo/local-catalog')
+        $doc.data.environment.inPlace.'octo-sdk' | Should -Be $inPlace
+    }
+
+    It 'fails when the in-place worktree is gone' {
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree remove --force $inPlace | Out-Null
+        (Get-Doc (Invoke-BuildEnvironment -env env-p -Json)).data.error | Should -Match 'does not exist'
+    }
+}
+
+Describe 'Get-OctoBuildOrder -additionalRepos' {
+    BeforeEach { $script:ws = New-FakeWorkspace }
+
+    It 'orders a repository from another folder like a lane folder of that name; a lane folder wins' {
+        $lane = Join-Path $TestDrive 'lane-order'
+        if (Test-Path $lane) { Remove-Item $lane -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Join-Path $lane 'octo-construction-kit-engine'), (Join-Path $lane 'octo-cli') | Out-Null
+        $order = @(Get-OctoBuildOrder -branchRootPath $lane -additionalRepos @{ 'octo-sdk' = (Join-Path $ws.Main 'octo-sdk'); 'octo-cli' = (Join-Path $ws.Main 'octo-cli') })
+        @($order.Name) | Should -Be @('octo-construction-kit-engine', 'octo-sdk', 'octo-cli')
+        ($order | Where-Object Name -eq 'octo-sdk').Path | Should -Be (Join-Path $ws.Main 'octo-sdk')
+        ($order | Where-Object Name -eq 'octo-cli').Path | Should -Be (Join-Path $lane 'octo-cli')
+        { Get-OctoBuildOrder -branchRootPath $lane -additionalRepos @{ 'something' = $lane } } | Should -Throw '*not an mm-* or octo-*'
     }
 }

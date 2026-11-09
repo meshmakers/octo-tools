@@ -109,14 +109,14 @@ function Sync-OctoCkIntermediateVersions {
         $relativeCkc = "octo-construction-kit-engine/bin/DebugL/net10.0/publish/$exeName"
         $laneCkc = if ($laneRoot) { Join-Path $laneRoot $relativeCkc } else { $null }
         # A feature environment without the engine uses its base lane's octo-ckc (manifest "base", relative to
-        # the root two levels above <root>/envs/<env>) before falling back to PATH.
+        # the workspace root that holds <root>/wt-<env>) before falling back to PATH.
         $baseCkc = $null
         $manifestPath = if ($laneRoot) { Join-Path $laneRoot '.octo/environment.json' } else { $null }
         if ($manifestPath -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             try {
                 $base = [string](Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).base
                 if ($base) {
-                    $workspaceRoot = Split-Path -Parent (Split-Path -Parent ([IO.Path]::GetFullPath($laneRoot).TrimEnd('/', '\')))
+                    $workspaceRoot = Split-Path -Parent ([IO.Path]::GetFullPath($laneRoot).TrimEnd('/', '\'))
                     $baseCkc = Join-Path (Join-Path $workspaceRoot $base) $relativeCkc
                 }
             }
