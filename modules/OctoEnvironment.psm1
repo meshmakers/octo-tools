@@ -281,15 +281,43 @@ function Get-OctoWorktreeInfo {
     }
 }
 
+function Get-OctoUserPropsProperties {
+    # Unconditional properties of Octo.User.props files, in order (a later file wins): the base lane's, then the
+    # environment's. $(MSBuildThisFileDirectory) and properties defined earlier are expanded.
+    param([string[]]$paths = @())
+    $properties = @{}
+    foreach ($path in $paths) {
+        if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        try { [xml]$xml = Get-Content -LiteralPath $path -Raw } catch { Write-Warning "Cannot parse $path - its properties are not used for in-place RestoreSources: $($_.Exception.Message)"; continue }
+        $directory = (Split-Path -Parent ([IO.Path]::GetFullPath($path))) + [IO.Path]::DirectorySeparatorChar
+        foreach ($group in @($xml.SelectNodes("//*[local-name()='PropertyGroup']"))) {
+            if ($group.GetAttribute('Condition')) { continue }
+            foreach ($node in @($group.ChildNodes | Where-Object { $_.NodeType -eq 'Element' })) {
+                if ($node.GetAttribute('Condition')) { continue }
+                $value = ([string]$node.InnerText).Trim().Replace('$(MSBuildThisFileDirectory)', $directory)
+                $value = [regex]::Replace($value, '\$\((\w+)\)', { param($m) if ($properties.ContainsKey($m.Groups[1].Value)) { $properties[$m.Groups[1].Value] } else { $m.Value } })
+                $properties[$node.LocalName] = $value
+            }
+        }
+    }
+    return $properties
+}
+
 function Get-OctoInPlaceRestoreSources {
     <#
-        RestoreSources for an in-place worktree: the environment feed plus the repository's own non-local sources, as
-        its Directory.Build.props would resolve them in DebugL without OctoNugetPrivateServer. Its default
-        (Condition '$(RestoreSources)'=='') is taken as $(RestoreSources); in the DebugL value the entry
-        $(OctoRepoRootPath)../nuget (or ...nuget) is replaced by the environment feed, so e.g. octo-report-services keeps
-        the Telerik feed. Entries with other MSBuild macros are dropped. Without own sources: feed + nuget.org.
+        RestoreSources for an in-place worktree, evaluated like MSBuild would for its Directory.Build.props in DebugL: the
+        RestoreSources elements in order, with the simple conditions '$(X)'=='..' / '$(X)'!='..' ($(RestoreSources) =
+        the value so far, $(Configuration) = DebugL, other properties from the base lane's and the environment's
+        Octo.User.props). $(OctoRepoRootPath)../nuget is replaced by the environment feed. Macros are substituted (a
+        global property is not macro-expanded), e.g. $(OctoNugetPrivateServer); an entry with a macro that cannot be
+        resolved is dropped with a warning that names the macro. So octo-report-services keeps Telerik and a private
+        feed stays. Without own sources: environment feed + nuget.org. Credentials in feed URLs are never printed.
     #>
-    param([Parameter(Mandatory = $true)] [string]$repositoryPath, [Parameter(Mandatory = $true)] [string]$environmentFeed)
+    param(
+        [Parameter(Mandatory = $true)] [string]$repositoryPath,
+        [Parameter(Mandatory = $true)] [string]$environmentFeed,
+        [string[]]$userPropsPaths = @()
+    )
     $nugetOrg = 'https://api.nuget.org/v3/index.json'
     $props = Join-Path $repositoryPath 'Directory.Build.props'
     $elements = @()
@@ -298,32 +326,44 @@ function Get-OctoInPlaceRestoreSources {
             [xml]$xml = Get-Content -LiteralPath $props -Raw
             $elements = @($xml.SelectNodes("//*[local-name()='RestoreSources']"))
         }
-        catch { Write-Warning "Cannot parse $props - in-place RestoreSources fall back to the environment feed and nuget.org: $_" }
+        catch { Write-Warning "Cannot parse $props - in-place RestoreSources fall back to the environment feed and nuget.org: $($_.Exception.Message)" }
     }
     if ($elements.Count -eq 0) { return "$environmentFeed;$nugetOrg" }
 
-    $default = ''
-    $debugTemplate = $null
+    $properties = Get-OctoUserPropsProperties -paths $userPropsPaths
+    $properties['Configuration'] = 'DebugL'
+    $current = [System.Collections.Generic.List[string]]::new()
+    $propertyValue = { param([string]$name) if ($name -eq 'RestoreSources') { $current -join ';' } elseif ($properties.ContainsKey($name)) { [string]$properties[$name] } else { '' } }
     foreach ($element in $elements) {
-        $condition = [string]$element.GetAttribute('Condition') -replace '\s', ''
-        $value = ([string]$element.InnerText).Trim()
-        if ($condition -eq '' -or $condition -match "^'\`$\(RestoreSources\)'==''$") { $default = $value }
-        elseif ($condition -match "Configuration\)'=='DebugL'") { $debugTemplate = $value }
-    }
-    if ($null -eq $debugTemplate) { $debugTemplate = '$(OctoRepoRootPath)../nuget;$(RestoreSources)' }
-    $sources = [System.Collections.Generic.List[string]]::new()
-    foreach ($entry in ($debugTemplate -split ';')) {
-        $entry = $entry.Trim()
-        if ($entry -eq '') { continue }
-        if ($entry -eq '$(RestoreSources)') {
-            foreach ($own in ($default -split ';')) { $own = $own.Trim(); if ($own -and $own -notmatch '\$\(') { $sources.Add($own) } }
+        $condition = ([string]$element.GetAttribute('Condition')).Trim()
+        if ($condition) {
+            if ($condition -notmatch "^'\`$\((\w+)\)'\s*(==|!=)\s*'([^']*)'$") {
+                Write-Warning "In-place RestoreSources of ${props}: condition $condition is not evaluated - element skipped."
+                continue
+            }
+            $equal = (& $propertyValue $Matches[1]) -ieq $Matches[3]
+            if (($Matches[2] -eq '==') -ne $equal) { continue }
         }
-        elseif ($entry -match '^\$\(OctoRepoRootPath\)(\.\./)?nuget/?$') { $sources.Add($environmentFeed) }
-        elseif ($entry -notmatch '\$\(') { $sources.Add($entry) }
+        $next = [System.Collections.Generic.List[string]]::new()
+        foreach ($entry in (([string]$element.InnerText).Trim() -split ';')) {
+            $entry = $entry.Trim()
+            if ($entry -eq '') { continue }
+            if ($entry -eq '$(RestoreSources)') { foreach ($own in $current) { $next.Add($own) }; continue }
+            if ($entry -match '^\$\(OctoRepoRootPath\)(\.\./)?nuget/?$') { $next.Add($environmentFeed); continue }
+            $expanded = [regex]::Replace($entry, '\$\((\w+)\)', { param($m) if ($properties.ContainsKey($m.Groups[1].Value)) { $properties[$m.Groups[1].Value] } else { $m.Value } })
+            $unresolved = @([regex]::Matches($expanded, '\$\((\w+)\)') | ForEach-Object { $_.Value } | Select-Object -Unique)
+            if ($unresolved.Count -gt 0) {
+                Write-Warning "In-place RestoreSources of ${props}: $($unresolved -join ', ') is defined neither in Octo.User.props nor the environment - the source '$(Hide-OctoUrlCredentials $entry)' is dropped."
+                continue
+            }
+            foreach ($part in ($expanded -split ';')) { if ($part.Trim()) { $next.Add($part.Trim()) } }
+        }
+        $current = $next
     }
+    $sources = [System.Collections.Generic.List[string]]::new([string[]]@($current | Select-Object -Unique))
     if (-not $sources.Contains($environmentFeed)) { $sources.Insert(0, $environmentFeed) }
     if ($sources.Count -eq 1) { $sources.Add($nugetOrg) }
-    return (@($sources | Select-Object -Unique) -join ';')
+    return ($sources -join ';')
 }
 
 function Get-OctoAdoptedWorktreeEntry {
@@ -1324,7 +1364,7 @@ function Invoke-BuildEnvironment {
         if (-not (Test-Path -LiteralPath $repo['path'] -PathType Container)) { & $fail "In-place worktree $($repo['path']) of $($repo['name']) does not exist."; return }
         $external[[string]$repo['name']] = [string]$repo['path']
         $perRepo[[string]$repo['name']] = @{
-            RestoreSources           = (Get-OctoInPlaceRestoreSources -repositoryPath ([string]$repo['path']) -environmentFeed $environmentFeed)
+            RestoreSources           = (Get-OctoInPlaceRestoreSources -repositoryPath ([string]$repo['path']) -environmentFeed $environmentFeed -userPropsPaths @((Join-Path $basePath 'Octo.User.props'), (Join-Path $environmentPath 'Octo.User.props')))
             RestorePackagesPath      = (Join-Path $environmentPath '.nuget-packages')
             OctoLocalCatalogRootPath = (Join-Path $environmentPath '.octo/local-catalog')
         }

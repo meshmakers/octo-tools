@@ -800,3 +800,82 @@ Describe 'Get-OctoInPlaceRestoreSources' {
     }
 }
 
+
+Describe 'In-place RestoreSources with private feeds (macros from Octo.User.props)' {
+    BeforeAll {
+        $script:reportProps = @'
+<Project>
+    <PropertyGroup>
+        <RestoreSources Condition="'$(RestoreSources)'==''">https://api.nuget.org/v3/index.json;https://nuget.telerik.com/v3/index.json</RestoreSources>
+        <RestoreSources Condition="'$(OctoNugetPrivateServer)'!=''">$(OctoNugetPrivateServer);https://nuget.telerik.com/v3/index.json</RestoreSources>
+        <RestoreSources Condition="'$(Configuration)'=='DebugL'">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources>
+    </PropertyGroup>
+</Project>
+'@
+        $script:privateFeed = 'https://builder:topsecret@nuget.example.invalid/v3/index.json'
+    }
+
+    It 'substitutes OctoNugetPrivateServer from the base lane''s Octo.User.props (the environment''s wins) and keeps it' {
+        InModuleScope OctoEnvironment -Parameters @{ root = (Join-Path $TestDrive 'private-feed'); props = $reportProps; privateFeed = $privateFeed } {
+            $repo = Join-Path $root 'octo-report-services'
+            New-Item -ItemType Directory -Force -Path $repo | Out-Null
+            Set-Content -Path (Join-Path $repo 'Directory.Build.props') -Value $props
+            $base = Join-Path $root 'base.props'
+            Set-Content -Path $base -Value "<Project><PropertyGroup><OctoNugetPrivateServer>https://old.example.invalid/v3/index.json</OctoNugetPrivateServer></PropertyGroup></Project>"
+            $envProps = Join-Path $root 'env.props'
+            Set-Content -Path $envProps -Value "<Project><PropertyGroup><OctoNugetPrivateServer>$privateFeed</OctoNugetPrivateServer></PropertyGroup></Project>"
+
+            Get-OctoInPlaceRestoreSources -repositoryPath $repo -environmentFeed '/env/nuget' -userPropsPaths @($base, $envProps) |
+                Should -Be "/env/nuget;$privateFeed;https://nuget.telerik.com/v3/index.json"
+            # without a private server the default applies
+            Get-OctoInPlaceRestoreSources -repositoryPath $repo -environmentFeed '/env/nuget' -userPropsPaths @() |
+                Should -Be '/env/nuget;https://api.nuget.org/v3/index.json;https://nuget.telerik.com/v3/index.json'
+        }
+    }
+
+    It 'drops a source with an unresolvable macro with a warning that names the macro and shows no credentials' {
+        InModuleScope OctoEnvironment -Parameters @{ root = (Join-Path $TestDrive 'unresolved') } {
+            $repo = Join-Path $root 'octo-x'
+            New-Item -ItemType Directory -Force -Path $repo | Out-Null
+            Set-Content -Path (Join-Path $repo 'Directory.Build.props') -Value '<Project><PropertyGroup><RestoreSources Condition="''$(RestoreSources)''==''''">https://api.nuget.org/v3/index.json;https://u:topsecret@feed.example.invalid/$(FeedPath)</RestoreSources><RestoreSources Condition="''$(Configuration)''==''DebugL''">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources></PropertyGroup></Project>'
+            $result = Get-OctoInPlaceRestoreSources -repositoryPath $repo -environmentFeed '/env/nuget' -WarningVariable warnings -WarningAction SilentlyContinue
+            $result | Should -Be '/env/nuget;https://api.nuget.org/v3/index.json'
+            "$warnings" | Should -Match '\$\(FeedPath\)'
+            "$warnings" | Should -Not -Match 'topsecret'
+        }
+    }
+
+    It 'Hide-OctoUrlCredentials masks user:password in URLs, also inside -p arguments' {
+        Hide-OctoUrlCredentials 'https://builder:topsecret@nuget.example.invalid/v3/index.json' | Should -Be 'https://***@nuget.example.invalid/v3/index.json'
+        Hide-OctoUrlCredentials '-p:RestoreSources=/env/nuget%3Bhttps://a:b@x.invalid/v3' | Should -Be '-p:RestoreSources=/env/nuget%3Bhttps://***@x.invalid/v3'
+        Hide-OctoUrlCredentials 'https://api.nuget.org/v3/index.json' | Should -Be 'https://api.nuget.org/v3/index.json'
+    }
+}
+
+Describe 'Invoke-BuildEnvironment never prints private feed credentials' {
+    BeforeEach {
+        $script:ws = New-FakeWorkspace
+        New-OctoEnvironment -env env-c2 -repos octo-construction-kit-engine -branchName 'feature/c2' -Json | Out-Null
+        $script:inPlace = Join-Path $ws.Root 'wt-lane-octo-sdk'
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree add -q -b 'reimar/AB#7_c' $inPlace | Out-Null
+        Set-Content -Path (Join-Path $inPlace 'Directory.Build.props') -Value '<Project><PropertyGroup><RestoreSources Condition="''$(OctoNugetPrivateServer)''!=''''">$(OctoNugetPrivateServer)</RestoreSources><RestoreSources Condition="''$(Configuration)''==''DebugL''">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources></PropertyGroup></Project>'
+        Set-Content -Path (Join-Path $ws.Main 'Octo.User.props') -Value '<Project><PropertyGroup><OctoNugetPrivateServer>https://builder:topsecret@nuget.example.invalid/v3/index.json</OctoNugetPrivateServer></PropertyGroup></Project>'
+        Add-OctoEnvironmentRepo -env env-c2 -path $inPlace -inPlace -Json | Out-Null
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName OctoEnvironment Invoke-KillDotnet { Write-OctoJson -Command 'Invoke-KillDotnet' -Data ([ordered]@{ success = $true; exitCode = 0; killedCount = 0; processes = @() }) }
+        $script:received = $null
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            if ($entry.Name -eq 'octo-sdk') { $script:received = $msbuildProperties.RestoreSources }
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+    }
+
+    It 'passes the full private feed to the build but masks it in JSON, plan and host output' {
+        $json = (Invoke-BuildEnvironment -env env-c2 -Json) -join "`n"
+        $script:received | Should -Be "$(Join-Path $ws.Root 'wt-env-c2/nuget');https://builder:topsecret@nuget.example.invalid/v3/index.json"
+        $json | Should -Not -Match 'topsecret'
+        $json | Should -Match 'https://\*\*\*@nuget.example.invalid'
+        ((Invoke-BuildEnvironment -env env-c2 -DryRun -Json) -join "`n") | Should -Not -Match 'topsecret'
+        (Invoke-BuildEnvironment -env env-c2 -DryRun *>&1 | Out-String) | Should -Not -Match 'topsecret'
+    }
+}

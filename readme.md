@@ -233,7 +233,8 @@ Remove-OctoEnvironment -env ab8625-enum-null
   (`git worktree move`, uncommitted work included) to `wt-<env>/<repo>`; refused while git has it locked or a process
   runs from it (a shell, an IDE or a Claude Code session in that folder; same matching as `Invoke-KillDotnet`,
   list-only). `-inPlace` leaves it where it is: `Invoke-BuildEnvironment` builds it with the environment's feed
-  (plus the repo's own feeds, e.g. Telerik), cache and CK catalog as global properties and includes it in the kill
+  (plus the repo's own feeds, e.g. Telerik, and a private feed from `OctoNugetPrivateServer` in `Octo.User.props`;
+  credentials in feed URLs are never printed), cache and CK catalog as global properties and includes it in the kill
   scope, but a plain `dotnet build` or Rider in that folder is **not** isolated, and `Remove-OctoEnvironment` only
   unregisters it (it belongs to its original owner).
 - **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/wt-<env> -additionalRoots <in-place

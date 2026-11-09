@@ -431,9 +431,9 @@ function Invoke-OctoBuildRangeRepo {
         $buildTarget = New-OctoSolutionFilter -solutionPath $entry.Solution -projects $entry.Projects -name $entry.Name
     }
     if (-not $Json) {
-        Write-Host "[$configuration] dotnet build $buildTarget $($propertyArgs -join ' ')" -ForegroundColor Green
+        Write-Host "[$configuration] dotnet build $buildTarget $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" -ForegroundColor Green
     }
-    "Invoke-BuildRange: dotnet build $buildTarget -c $configuration -nodeReuse:false $($propertyArgs -join ' ')" | Set-Content -Path $logFile
+    "Invoke-BuildRange: dotnet build $buildTarget -c $configuration -nodeReuse:false $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" | Set-Content -Path $logFile
     & dotnet build $buildTarget -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
     $exitCode = $LASTEXITCODE
     return [pscustomobject]@{ Success = ($exitCode -eq 0); LogFile = $logFile; ExitCode = $exitCode }
@@ -459,7 +459,7 @@ function Invoke-OctoBuildRangeTests {
     if (-not $Json) {
         Write-Host "[$configuration] verify tests compile: dotnet build $filter" -ForegroundColor Green
     }
-    "Invoke-BuildRange -verifyTests: dotnet build $filter -c $configuration -nodeReuse:false $($propertyArgs -join ' ')" | Add-Content -Path $logFile
+    "Invoke-BuildRange -verifyTests: dotnet build $filter -c $configuration -nodeReuse:false $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" | Add-Content -Path $logFile
     & dotnet build $filter -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
     $exitCode = $LASTEXITCODE
     return [pscustomobject]@{ Success = ($exitCode -eq 0); Skipped = $false; LogFile = $logFile; ExitCode = $exitCode }
@@ -513,7 +513,7 @@ function Write-OctoBuildRangePlan {
         Write-Host "  Package cache(s) purged per package / checked for stale 999.0.0 folders: $($packageCaches -join ', ')" -ForegroundColor DarkGray
     }
     if ($propertyArgs.Count -gt 0) {
-        Write-Host "  MSBuild properties (all repositories): $($propertyArgs -join ' ')" -ForegroundColor DarkGray
+        Write-Host "  MSBuild properties (all repositories): $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" -ForegroundColor DarkGray
     }
     if ($staleCache.Count -gt 0) {
         $action = if ($purgeStaleCache) { 'will be purged before the first build (-purgeStaleCache)' } else { 'restores would use them silently - pass -purgeStaleCache to purge them' }
@@ -1043,7 +1043,8 @@ function Invoke-OctoBuildRangeCore {
     foreach ($entry in $plan) {
         $properties = Merge-OctoRepoMsBuildProperties -repoName $entry.Name -msbuildProperties $msbuildProperties -msbuildPropertiesPerRepo $perRepo
         $entry | Add-Member -NotePropertyName MsBuildProperties -NotePropertyValue $properties -Force
-        $entry | Add-Member -NotePropertyName PropertyArgs -NotePropertyValue @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties) -Force
+        # Display only (plan, -Json): credentials in feed URLs are masked; the build converts MsBuildProperties itself.
+        $entry | Add-Member -NotePropertyName PropertyArgs -NotePropertyValue @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties | ForEach-Object { Hide-OctoUrlCredentials $_ }) -Force
     }
     $publishWarning = Get-OctoCkPublishDisabledWarning -repoNames @($plan | Where-Object { $_.Mode -eq 'dotnet' -and (Test-OctoCkPublishDisabled -properties $_.MsBuildProperties) } | ForEach-Object { $_.Name })
     if ($publishWarning) { Write-Warning $publishWarning }
@@ -1072,7 +1073,7 @@ function Invoke-OctoBuildRangeCore {
                             [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes) }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
-                    msbuildProperties = @($propertyArgs)
+                    msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
                     staleGlobalCache = @($staleCache | ForEach-Object { [ordered]@{ packageId = $_.PackageId; cachePath = $_.CachePath; reason = $_.Reason } })
                     purgeStaleCache  = [bool]$purgeStaleCache
                 })

@@ -181,6 +181,17 @@ function Get-OctoBuildOrder {
     return $result.ToArray()
 }
 
+function Hide-OctoUrlCredentials {
+    <#
+    .SYNOPSIS
+        Masks credentials in URLs (scheme://user:password@host -> scheme://***@host) before a value is printed, logged
+        or written to JSON, e.g. a private NuGet feed in RestoreSources. The value passed to dotnet stays unmasked.
+    #>
+    param([AllowNull()] [AllowEmptyString()] [string]$text)
+    if ([string]::IsNullOrEmpty($text)) { return $text }
+    return [regex]::Replace($text, '(?<=://)[^/@\s;"]+@', '***@')
+}
+
 function ConvertTo-OctoMsBuildPropertyArgs {
     <#
     .SYNOPSIS
@@ -287,5 +298,5 @@ function Get-OctoCkPublishDisabledWarning {
     return "OctoPublishCkModel=false applies to $($repoNames.Count) repositories ($($repoNames -join ', ')). Their CK models are not published into the local catalog, so downstream CK compiles see stale models. Prefer -msbuildPropertiesPerRepo @{ '<repo>' = @{ OctoPublishCkModel = 'false' } } for the one repository that must not publish."
 }
 
-Export-ModuleMember -Function @('Get-OctoBuildOrder', 'Get-OctoPinnedBuildOrder', 'Get-OctoAdditionalOrderedBuildOrder', 'Resolve-OctoBranchRootPath', 'ConvertTo-OctoMsBuildPropertyArgs',
+Export-ModuleMember -Function @('Hide-OctoUrlCredentials', 'Get-OctoBuildOrder', 'Get-OctoPinnedBuildOrder', 'Get-OctoAdditionalOrderedBuildOrder', 'Resolve-OctoBranchRootPath', 'ConvertTo-OctoMsBuildPropertyArgs',
     'Merge-OctoRepoMsBuildProperties', 'Test-OctoCkPublishDisabled', 'Assert-OctoMsBuildPropertiesPerRepo', 'Get-OctoCkPublishDisabledWarning')
