@@ -117,6 +117,17 @@ Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
         }
     }
 
+    It 'never selects the octo-devstack daemon, also when its checkout lies in the lane folder' {
+        InModuleScope Invoke-KillDotnet -Parameters @{ lane = $script:Lane } {
+            $dll = Join-Path $lane 'octo-devstack/bin/Release/net10.0/octo-devstack.dll'
+            $candidates = @(
+                [pscustomobject]@{ Pid = 7; Name = 'dotnet'; Command = "dotnet $dll --url http://127.0.0.1:5090"; Cwd = (Join-Path $lane 'octo-devstack'); Modules = @($dll) },
+                [pscustomobject]@{ Pid = 8; Name = 'dotnet'; Command = ''; Cwd = (Join-Path $lane 'octo-sdk'); Modules = @() }
+            )
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $lane).pid | Should -Be @(8)
+        }
+    }
+
     It 'takes the entry assembly, not other arguments, from the command line' {
         InModuleScope Invoke-KillDotnet {
             Get-OctoEntryAssemblyPath -command 'dotnet /a/b/App.dll --events /lane/x.jsonl --plugin /lane/p.dll' | Should -Be '/a/b/App.dll'

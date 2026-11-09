@@ -237,6 +237,10 @@ function Select-OctoLaneProcesses {
 
     $found = @()
     foreach ($candidate in $candidates) {
+        # The octo-devstack daemon is never a lane process, also when its checkout lies in the folder used as the
+        # lane (Invoke-BuildAll without -branch): it manages the stack and stops its services itself.
+        $entry = Get-OctoEntryAssemblyPath -command ([string]$candidate.Command) -cwd ([string]$candidate.Cwd)
+        if ($entry -and (($entry -split '[\\/]')[-1] -eq 'octo-devstack.dll')) { continue }
         $reason = $null
         if (& $under ([string]$candidate.Cwd)) { $reason = 'cwd' }
         elseif (& $under (Get-OctoEntryAssemblyPath -command ([string]$candidate.Command) -cwd ([string]$candidate.Cwd))) { $reason = 'commandLine' }

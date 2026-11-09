@@ -10,14 +10,15 @@ OctoMesh from GitHub
  Invoke-CloneMainRepos -branch "branches/queries"
 .Example
  Invoke-CloneMainRepos -devTools
- Clones only the developer tools next to octo-tools (octo-devstack, the local MCP stack daemon), not into a
- lane: Invoke-BuildAll and the lane-scoped Invoke-KillDotnet must never pick them up.
+ Clones only the developer tools (octo-devstack, the local MCP stack daemon) into the folder that holds the
+ octo-tools checkout (for an octo-tools worktree: that of the main checkout), not into a lane. Invoke-BuildAll
+ skips octo-devstack and Invoke-KillDotnet never stops the daemon, also when that folder is used as a lane.
 #>
 function Global:Invoke-CloneMainRepos {
     param(
         [string]$branch = "",
-        # Clone the developer tools (octo-devstack) into $rootPath, next to octo-tools, instead of the
-        # OctoMesh repositories into the lane.
+        # Clone the developer tools (octo-devstack) next to the octo-tools checkout instead of the OctoMesh
+        # repositories into the lane.
         [switch]$devTools,
         [switch]$Json
     )
@@ -28,9 +29,24 @@ function Global:Invoke-CloneMainRepos {
         return;
     }
 
-    if ($devTools -and $branch) { Write-Error "-devTools clones next to octo-tools; it does not take -branch."; return }
-    if ($devTools) { $repoNames = @('octo-devstack') }
-    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    $basePath = ''
+    if ($devTools) {
+        if ($branch) {
+            $message = "-devTools clones next to octo-tools; it does not take -branch."
+            if ($Json) { Write-OctoJson -Command 'Invoke-CloneMainRepos' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ error = $message; repositories = @() }) }
+            Write-Error $message -ErrorAction Continue
+            $global:LASTEXITCODE = 1
+            return
+        }
+        $repoNames = @('octo-devstack')
+        # The folder that holds the octo-tools checkout - for an octo-tools worktree
+        # (<octo-tools>/.claude/worktrees/<name>) that of the main checkout, where Start-OctoDevStackDaemon looks.
+        $toolsRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+        $marker = [regex]::Match($toolsRoot, '[\\/]\.claude[\\/]worktrees[\\/]')
+        if ($marker.Success) { $toolsRoot = $toolsRoot.Substring(0, $marker.Index) }
+        $basePath = Split-Path -Parent ([IO.Path]::TrimEndingDirectorySeparator($toolsRoot))
+    }
+    $branchRootPath = if ($basePath) { $basePath } else { Join-Path -Path $rootPath -ChildPath $branch }
 
     # Ensure the branch directory exists
     if (!(Test-Path $branchRootPath)) {
@@ -76,7 +92,7 @@ function Global:Invoke-CloneMainRepos {
         # Reset so an already-exists early-return (no git run) counts as success
         # rather than inheriting a stale exit code from a previous clone.
         $global:LASTEXITCODE = 0
-        Clone-Repo -branch $branch $repoName
+        Clone-Repo -branch $branch -basePath $basePath $repoName
         $repoSuccess = ($LASTEXITCODE -eq 0)
         if (-not $repoSuccess) { $allOk = $false }
         if ($Json) {
@@ -95,11 +111,13 @@ function Clone-Repo
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
         [string]$branch = "",
+        # Clone into this folder instead of $rootPath/$branch (-devTools).
+        [string]$basePath = "",
         [Parameter(Mandatory=$true)]
         [string]$repositoryName
     )
 
-    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    $branchRootPath = if ($basePath) { $basePath } else { Join-Path -Path $rootPath -ChildPath $branch }
     $repositoryPath = Join-Path -Path $branchRootPath -ChildPath $repositoryName
     if (Test-Path $repositoryPath)
     {

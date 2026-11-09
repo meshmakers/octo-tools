@@ -190,6 +190,16 @@ Describe 'Start-OctoDevStackDaemon' {
         Get-Content (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.err.prev.log') | Should -Be 'previous stderr'
     }
 
+    It 'refuses -Foreground with -Json before building or starting anything' {
+        $path = New-FakeCheckout 'foregroundjson'
+
+        $json = Start-OctoDevStackDaemon -Path $path -Foreground -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*-Foreground*-Json*'
+        Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
+    }
+
     It 'fails when the daemon exits before it is healthy' {
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
         $path = New-FakeCheckout 'crash' -Built
@@ -303,26 +313,34 @@ Describe 'Stop-OctoDevStackDaemon' {
 Describe 'Invoke-CloneMainRepos -devTools' {
     BeforeAll {
         Import-Module (Join-Path $PSScriptRoot '../modules/Invoke-CloneMainRepos.psm1') -Force
+        $script:SavedRootPath = $global:rootPath
+        $global:rootPath = $TestDrive
     }
 
-    It 'clones only octo-devstack, next to octo-tools ($rootPath), not into a lane' {
-        $global:rootPath = Join-Path $TestDrive 'root'
-        New-Item -ItemType Directory -Force -Path $global:rootPath | Out-Null
-        $script:Cloned = [System.Collections.Generic.List[string]]::new()
-        Mock -ModuleName Invoke-CloneMainRepos git { $script:Cloned.Add("$((Get-Location).Path)|$($args -join ' ')"); $global:LASTEXITCODE = 0 }
+    AfterAll {
+        $global:rootPath = $script:SavedRootPath
+    }
+
+    It 'clones only octo-devstack, into the folder that holds the octo-tools main checkout (where the daemon looks)' {
+        Mock -ModuleName Invoke-CloneMainRepos Clone-Repo { $global:LASTEXITCODE = 0 }
 
         $json = Invoke-CloneMainRepos -devTools -Json | ConvertFrom-Json
 
         $json.data.success | Should -BeTrue
         $json.data.repositories.repo | Should -Be @('octo-devstack')
-        $script:Cloned | Should -HaveCount 1
-        $script:Cloned[0] | Should -BeLike "*root|clone --recurse-submodules git@github.com:meshmakers/octo-devstack.git"
+        $expected = InModuleScope OctoDevStack { Split-Path -Parent (Get-OctoDevStackDefaultPath) }
+        Should -Invoke -ModuleName Invoke-CloneMainRepos Clone-Repo -Times 1 -Exactly -ParameterFilter {
+            $repositoryName -eq 'octo-devstack' -and $basePath -eq $expected
+        }
     }
 
-    It 'refuses -devTools together with -branch' {
-        $global:rootPath = $TestDrive
-        Mock -ModuleName Invoke-CloneMainRepos git { }
-        Invoke-CloneMainRepos -devTools -branch main -ErrorAction SilentlyContinue
-        Should -Invoke -ModuleName Invoke-CloneMainRepos git -Times 0
+    It 'refuses -devTools together with -branch, also as a -Json result' {
+        Mock -ModuleName Invoke-CloneMainRepos Clone-Repo { }
+
+        $json = Invoke-CloneMainRepos -devTools -branch main -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*-devTools*-branch*'
+        Should -Invoke -ModuleName Invoke-CloneMainRepos Clone-Repo -Times 0
     }
 }

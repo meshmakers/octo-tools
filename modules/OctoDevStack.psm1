@@ -169,6 +169,11 @@ function Start-OctoDevStackDaemon {
     $logPath = Join-Path $statePath 'daemon.log'
     $data = @{ alreadyRunning = $false; started = $false; built = $false; pid = $null; port = $Port; mcpUrl = "$url/mcp"; statusPage = "$url/"; logPath = $logPath }
 
+    if ($Foreground -and $Json) {
+        Write-OctoDevStackResult $command $Json $false $data '-Foreground runs the daemon in this console and cannot be combined with -Json.'
+        return
+    }
+
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $ours = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
     if ($ours -or ($listeners.Count -eq 0 -and (Test-OctoDevStackHealth -Port $Port))) {

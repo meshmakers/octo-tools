@@ -216,8 +216,10 @@ OctoMesh stack for several Claude Code sessions and exposes it as an MCP server.
 Invoke-CloneMainRepos -devTools         # clone next to octo-tools (e.g. ~/dev/meshmakers/octo-devstack)
 Start-OctoDevStackDaemon                # builds it on first use (Invoke-Build), starts it in the background, waits for /health
 claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:5090/mcp
-Stop-OctoDevStackDaemon                 # stops the daemon only; the stack services keep running and are adopted
 ```
+
+`Stop-OctoDevStackDaemon` stops the daemon only; the stack services keep running and the next start adopts them.
+On macOS/Linux both cmdlets need `lsof` to find the process on the port.
 
 From then on OctoMesh is managed through the daemon: MCP `http://127.0.0.1:5090/mcp`, status page
 `http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log`, configuration

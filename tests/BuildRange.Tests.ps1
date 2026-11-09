@@ -163,6 +163,13 @@ Describe 'Get-OctoBuildOrder' {
         )
     }
 
+    It 'never builds the developer tools octo-tools and octo-devstack (a folder next to octo-tools used as the lane)' {
+        New-Item -ItemType Directory -Force -Path (Join-Path $fake.Checkout 'octo-devstack'), (Join-Path $fake.Checkout 'octo-tools') | Out-Null
+        $names = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout).Name
+        $names | Should -Not -Contain 'octo-devstack'
+        $names | Should -Not -Contain 'octo-tools'
+    }
+
     It 'honours -excludeFrontend and -excludeAdditional' {
         @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -excludeFrontend $true).Name | Should -Not -Contain 'octo-frontend-libraries'
         $core = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -excludeAdditional $true)
