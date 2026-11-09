@@ -595,10 +595,12 @@ Describe 'Get-OctoDevStackStatus' {
 
         $json.schemaVersion | Should -Be 1
         $json.command | Should -Be 'Get-OctoDevStackStatus'
-        $expected = @('installed', 'path', 'branch', 'commit', 'dirty', 'behind', 'dllBuilt', 'dll', 'running', 'pid', 'healthy',
+        $expected = @('installed', 'path', 'pathSource', 'defaultPath', 'branch', 'commit', 'dirty', 'behind', 'dllBuilt', 'dll', 'running', 'pid', 'healthy',
             'port', 'url', 'mcpUrl', 'statusPage', 'configPath', 'logPath', 'statePath', 'launchAgent')
         @($json.data.PSObject.Properties.Name) | Should -Be $expected
         $json.data.installed | Should -BeTrue
+        $json.data.path | Should -Be $path
+        $json.data.pathSource | Should -Be 'parameter'
         $json.data.branch | Should -Be 'main'
         $json.data.commit | Should -Be 'def5678'
         $json.data.dirty | Should -BeFalse
@@ -612,6 +614,47 @@ Describe 'Get-OctoDevStackStatus' {
         $json.data.logPath | Should -Be (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.log')
         $json.data.launchAgent | Should -BeNullOrEmpty
         Should -Invoke -ModuleName OctoDevStack git -Times 0 -ParameterFilter { ($args -join ' ') -match 'fetch|pull' }
+    }
+
+    It 'without -Path reports the checkout the running daemon runs from, and the default separately' {
+        Set-GitMock
+        Mock -ModuleName OctoDevStack Invoke-RestMethod { @{ status = 'ok' } }
+        $script:DaemonCheckout = New-FakeCheckout 'daemon-worktree' -Built
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '321' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { "dotnet $(Join-Path $script:DaemonCheckout 'bin/Release/net10.0/octo-devstack.dll') --url http://127.0.0.1:5090" }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackDefaultPath { Join-Path $TestDrive 'default-checkout' }
+
+        $json = Get-OctoDevStackStatus -Json | ConvertFrom-Json
+
+        $json.data.path | Should -Be $script:DaemonCheckout
+        $json.data.pathSource | Should -Be 'daemon'
+        $json.data.defaultPath | Should -Be (Join-Path $TestDrive 'default-checkout')
+        $json.data.installed | Should -BeTrue
+        $json.data.dllBuilt | Should -BeTrue
+        $json.data.dll | Should -Be (Join-Path $script:DaemonCheckout 'bin/Release/net10.0/octo-devstack.dll')
+    }
+
+    It 'without -Path and without a daemon reports the default checkout' {
+        Mock -ModuleName OctoDevStack Invoke-RestMethod { throw 'connection refused' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackDefaultPath { Join-Path $TestDrive 'default-checkout' }
+
+        $json = Get-OctoDevStackStatus -Json | ConvertFrom-Json
+
+        $json.data.path | Should -Be (Join-Path $TestDrive 'default-checkout')
+        $json.data.pathSource | Should -Be 'default'
+        $json.data.installed | Should -BeFalse
+    }
+
+    It 'takes the checkout from the dll path of the command line: <case>' -ForEach @(
+        @{ case = 'Unix'; line = 'dotnet /Users/x/dev/bin/octo-devstack/bin/Release/net10.0/octo-devstack.dll --url http://127.0.0.1:5090'; expected = '/Users/x/dev/bin/octo-devstack' }
+        @{ case = 'Windows, quoted with spaces'; line = '"C:\Program Files\dotnet\dotnet.exe" "C:\dev\my devstack\bin\Debug\net10.0\octo-devstack.dll" --url x'; expected = 'C:\dev\my devstack' }
+        @{ case = 'a relative dll path'; line = 'dotnet bin/Release/net10.0/octo-devstack.dll'; expected = $null }
+        @{ case = 'a dll outside a bin folder'; line = 'dotnet /opt/octo-devstack.dll'; expected = $null }
+    ) {
+        InModuleScope OctoDevStack -Parameters @{ line = $line; expected = $expected } {
+            Get-OctoDevStackCheckoutFromCommandLine $line | Should -Be $expected
+        }
     }
 
     It 'reports a missing checkout without calling git' {

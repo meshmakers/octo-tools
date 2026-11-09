@@ -158,6 +158,23 @@ function Test-OctoDevStackCommandLine([string]$CommandLine) {
     return $CommandLine -match '(^|[\\/\s"''])octo-devstack\.dll(["''\s]|$)'
 }
 
+function Get-OctoDevStackCheckoutFromCommandLine([string]$CommandLine) {
+    <#
+    .SYNOPSIS
+        The checkout a running daemon runs from: its absolute octo-devstack.dll path up to the last bin folder
+        (<checkout>/bin/<cfg>/<tfm>/octo-devstack.dll -> <checkout>). $null for a relative or missing dll path.
+    #>
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
+    $tokens = @([regex]::Matches($CommandLine, '"([^"]*)"|''([^'']*)''|(\S+)') | ForEach-Object {
+            if ($_.Groups[1].Success) { $_.Groups[1].Value } elseif ($_.Groups[2].Success) { $_.Groups[2].Value } else { $_.Groups[3].Value }
+        })
+    $dll = $tokens | Where-Object { ($_ -split '[\\/]')[-1] -eq 'octo-devstack.dll' } | Select-Object -First 1
+    if (-not $dll -or $dll -notmatch '^([A-Za-z]:)?[\\/]') { return $null }
+    $match = [regex]::Match($dll, '^(.+)[\\/]bin[\\/]', [Text.RegularExpressions.RegexOptions]::RightToLeft)
+    if (-not $match.Success) { return $null }
+    return $match.Groups[1].Value
+}
+
 function Start-OctoDevStackDetachedUnix {
     <#
     .SYNOPSIS
@@ -750,12 +767,17 @@ function Get-OctoDevStackStatus {
         Read-only: is octo-devstack installed, built, up to date and running?
 
     .DESCRIPTION
+        Without -Path the checkout reported (path, git info, dllBuilt, dll) is the one the running daemon runs
+        from, taken from its command line (<checkout>/bin/.../octo-devstack.dll); when no daemon runs, or its
+        dll path is relative, it is the default checkout. `pathSource` says which (parameter | daemon |
+        default), `defaultPath` is always the default checkout.
+
         `behind` is the number of commits the checkout is behind its upstream according to the local
         remote-tracking ref (no fetch; run Install-OctoDevStack -Update to fetch and update), $null without an
         upstream.
 
     .PARAMETER Json
-        data: { installed, path, branch, commit, dirty, behind, dllBuilt, dll, running, pid, healthy, port,
+        data: { installed, path, pathSource, defaultPath, branch, commit, dirty, behind, dllBuilt, dll, running, pid, healthy, port,
                 url, mcpUrl, statusPage, configPath, logPath, statePath, launchAgent }.
     #>
     [CmdletBinding()]
@@ -765,14 +787,18 @@ function Get-OctoDevStackStatus {
         [switch]$Json
     )
 
-    $repoPath = Resolve-OctoDevStackPath $Path
-    $dll = Join-Path $repoPath $script:DllRelativePath
     $urls = Get-OctoDevStackUrls $Port
     $statePath = Get-OctoDevStackStatePath
-    $installed = Test-Path -LiteralPath (Join-Path $repoPath '.git')
-    $git = if ($installed) { Get-OctoDevStackGitInfo -Path $repoPath } else { [pscustomobject]@{ branch = $null; commit = $null; dirty = $null; behind = $null } }
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $listener = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+    $defaultPath = Get-OctoDevStackDefaultPath
+    $daemonPath = if ($listener) { Get-OctoDevStackCheckoutFromCommandLine $listener.commandLine } else { $null }
+    if (-not [string]::IsNullOrWhiteSpace($Path)) { $repoPath = Resolve-OctoDevStackPath $Path; $pathSource = 'parameter' }
+    elseif ($daemonPath) { $repoPath = $daemonPath; $pathSource = 'daemon' }
+    else { $repoPath = $defaultPath; $pathSource = 'default' }
+    $dll = Join-Path $repoPath $script:DllRelativePath
+    $installed = Test-Path -LiteralPath (Join-Path $repoPath '.git')
+    $git = if ($installed) { Get-OctoDevStackGitInfo -Path $repoPath } else { [pscustomobject]@{ branch = $null; commit = $null; dirty = $null; behind = $null } }
     # A process that answers /health but is visibly not octo-devstack does not count as running octo-devstack.
     $healthy = (Test-OctoDevStackHealth -Port $Port) -and -not ($listeners.Count -gt 0 -and -not $listener)
     $launchAgent = if (Test-OctoDevStackMacOS) { Test-Path -LiteralPath (Get-OctoDevStackLaunchAgentPath) } else { $null }
@@ -780,6 +806,8 @@ function Get-OctoDevStackStatus {
     $status = [ordered]@{
         installed  = [bool]$installed
         path       = $repoPath
+        pathSource = $pathSource
+        defaultPath = $defaultPath
         branch     = $git.branch
         commit     = $git.commit
         dirty      = $git.dirty
@@ -807,6 +835,9 @@ function Get-OctoDevStackStatus {
     $yesNo = { param($v) if ($null -eq $v) { 'n/a' } elseif ($v) { 'yes' } else { 'no' } }
     Write-Host 'octo-devstack' -ForegroundColor Cyan
     Write-Host ("  Installed:   {0}  {1}" -f (& $yesNo $status.installed), $status.path) -ForegroundColor ($(if ($status.installed) { 'Green' } else { 'Yellow' }))
+    if ($pathSource -eq 'daemon') {
+        Write-Host "               (checkout of the running daemon$(if ($repoPath -ne $defaultPath) { "; default checkout: $defaultPath" }))" -ForegroundColor DarkGray
+    }
     if ($status.installed) {
         $behindText = if ($null -eq $status.behind) { 'no upstream' } elseif ($status.behind -eq 0) { 'up to date (last fetch)' } else { "$($status.behind) commit(s) behind - Install-OctoDevStack -Update" }
         Write-Host ("  Checkout:    {0} {1}{2}, {3}" -f $status.branch, $status.commit, $(if ($status.dirty) { ' (local changes)' } else { '' }), $behindText)
