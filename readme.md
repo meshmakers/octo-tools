@@ -350,6 +350,17 @@ Any other `## ` heading is an error: move its content to `docs/` or under one of
 point is only checked for missing sections. The sentence and the headings are defined once, in
 `modules/agent-docs.rules.json`.
 
+`AGENTS.md` is the one canonical file and must work with any agent, so it and `docs/*.md`
+carry no Claude-style `@path` import (`@docs/x.md`, `@./a.md`, `@~/x.md`, `@/abs/x.md`,
+`@AGENTS.md`): other agents ignore that line and never see the imported text. Rule
+`no-eager-import` (error, non-relaxable) reports each one with file and line; only the
+`CLAUDE.md` shim imports. Like Claude Code it reads `@` at the start of a line or after
+whitespace and skips inline code, fenced blocks and HTML comments; e-mail addresses, npm
+scopes, decorators and mentions are not imports; an `@name/sub` without a file extension
+and without a `./`, `~/` or `/` prefix is treated as a package, not a path. Borderline:
+`@/components` is reported, while `**@docs/x.md**` (no whitespace before the `@`) is not.
+A `CLAUDE.md` that is still the entry point is checked the same way.
+
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
 from each doc's `applies_to` frontmatter, writes the `CLAUDE.md` shim, and writes the opening
 sentence below the title of `AGENTS.md` (inserted, or replacing a different first paragraph).

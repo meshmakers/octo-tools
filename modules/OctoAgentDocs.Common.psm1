@@ -15,7 +15,7 @@ $script:RuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
     'frontmatter-present', 'doc-reachable', 'reference-resolves', 'reference-to-shim',
     'routing-current', 'docs-count', 'shim-valid', 'required-sections',
-    'no-invisible-characters', 'migration-pending'
+    'no-invisible-characters', 'no-eager-import', 'migration-pending'
 )
 
 function Get-OctoAgentDocsRuleIdList {
