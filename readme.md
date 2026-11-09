@@ -361,6 +361,14 @@ and without a `./`, `~/` or `/` prefix is treated as a package, not a path. Bord
 `@/components` is reported, while `**@docs/x.md**` (no whitespace before the `@`) is not.
 A `CLAUDE.md` that is still the entry point is checked the same way.
 
+Rule `globs-match` (error, so enforce mode stops a rename that orphans a doc; a repository may lower it in `.agent-docs.json` with a reason) reports each `applies_to` glob that matches no file, with the doc and
+the line of `applies_to`, so a doc is never routed to code that was moved or renamed. With
+several globs only the ones that match nothing are reported; `background: true` docs are not
+checked. The files are what git lists (tracked, plus untracked files that are not ignored),
+or a folder walk outside a git checkout; folders in `scan.ignore` (`bin`, `obj`,
+`node_modules`, ...) never count. `**` crosses folders, `*` and `?` stay inside one, `{a,b}`
+alternates, a glob without a `/` matches at any depth, and matching is case-sensitive.
+
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
 from each doc's `applies_to` frontmatter, writes the `CLAUDE.md` shim, and writes the opening
 sentence below the title of `AGENTS.md` (inserted, or replacing a different first paragraph).
