@@ -58,20 +58,34 @@ function Invoke-KillDotnet {
         }
         $processes = @(Get-OctoLaneDotnetProcesses -branchRootPath $laneRoot)
         $killedCount = 0
+        $failed = @()
         if (Test-OctoKillDotnetWindows) {
             foreach ($process in $processes) {
                 if (-not $Json) { Write-Host "Stop dotnet process $($process.pid) of the lane ($($process.reason))" -ForegroundColor Yellow }
-                Stop-Process -Id $process.pid -Force -ErrorAction SilentlyContinue
-                $killedCount++
+                try {
+                    Stop-Process -Id $process.pid -Force -ErrorAction Stop
+                    $killedCount++
+                }
+                catch {
+                    # A process that exited in the meantime is fine; one that is still there (e.g. access denied)
+                    # is reported, because it may keep files of the lane locked.
+                    if (Get-Process -Id $process.pid -ErrorAction SilentlyContinue) {
+                        $failed += [ordered]@{ pid = $process.pid; reason = $process.reason; error = $_.Exception.Message }
+                        Write-Warning "Could not stop dotnet process $($process.pid) of the lane: $($_.Exception.Message)"
+                    }
+                }
             }
         }
         elseif (-not $Json -and $processes.Count -gt 0) {
             Write-Host "$($processes.Count) dotnet process(es) of the lane found; not stopped (no file locks on this OS)" -ForegroundColor DarkGray
         }
+        $exitCode = if ($failed.Count -gt 0) { 1 } else { 0 }
+        $global:LASTEXITCODE = $exitCode
         if ($Json) {
-            Write-OctoJson -Command 'Invoke-KillDotnet' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
+            Write-OctoJson -Command 'Invoke-KillDotnet' -Data (New-OctoActionResult -Success ($failed.Count -eq 0) -ExitCode $exitCode -Extra @{
                     killedCount         = $killedCount
                     processes           = @($processes)
+                    failed              = @($failed)
                     scoped              = $true
                     buildServerShutdown = $false
                 })

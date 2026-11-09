@@ -154,6 +154,39 @@ Describe 'Invoke-KillDotnet on Windows' {
         Should -Invoke -ModuleName Invoke-KillDotnet lsof -Times 0
     }
 
+    It 'lane mode reports a process it could not stop and does not count it as killed' {
+        Mock -ModuleName Invoke-KillDotnet Get-Process {
+            @(
+                (New-FakeProcess 201 -command 'dotnet Meshmakers.Octo.Sdk.dll' -modules @((Join-Path $script:Lane 'octo-sdk/bin/DebugL/net10.0/Meshmakers.Octo.Sdk.dll'))),
+                (New-FakeProcess 203 -command "dotnet $(Join-Path $script:Lane 'octo-cli/bin/DebugL/net10.0/octo-cli.dll')")
+            )
+        }
+        Mock -ModuleName Invoke-KillDotnet Stop-Process { throw 'Access is denied' } -ParameterFilter { $Id -contains 203 }
+
+        $json = Invoke-KillDotnet -branchRootPath $script:Lane -Json 3>$null | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.exitCode | Should -Be 1
+        $json.data.killedCount | Should -Be 1
+        @($json.data.failed).Count | Should -Be 1
+        $json.data.failed[0].pid | Should -Be 203
+        $json.data.failed[0].error | Should -Match 'Access is denied'
+    }
+
+    It 'lane mode tolerates a process that exited before it could be stopped' {
+        Mock -ModuleName Invoke-KillDotnet Get-Process {
+            @((New-FakeProcess 201 -command 'dotnet Meshmakers.Octo.Sdk.dll' -modules @((Join-Path $script:Lane 'octo-sdk/bin/DebugL/net10.0/Meshmakers.Octo.Sdk.dll'))))
+        }
+        Mock -ModuleName Invoke-KillDotnet Get-Process { $null } -ParameterFilter { $Id }
+        Mock -ModuleName Invoke-KillDotnet Stop-Process { throw 'Cannot find a process with the process identifier 201.' }
+
+        $json = Invoke-KillDotnet -branchRootPath $script:Lane -Json 3>$null | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.killedCount | Should -Be 0
+        @($json.data.failed).Count | Should -Be 0
+    }
+
     It 'without -branchRootPath it keeps the legacy behaviour: build-server shutdown and every dotnet process' {
         Mock -ModuleName Invoke-KillDotnet Get-Process {
             @((New-FakeProcess 301), (New-FakeProcess 302 -command 'dotnet octo-devstack.dll'), (New-FakeProcess 303 -name 'pwsh'))

@@ -1344,6 +1344,15 @@ Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
         $text | Should -Match 'dotnet build-server shutdown before the purge'
     }
 
+    It 'warns but continues when the build-server shutdown fails' {
+        Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 3 }
+
+        $warnings = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json 3>&1 |
+            Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        @($warnings | Where-Object { $_.Message -match 'build-server shutdown exited with code 3' }).Count | Should -Be 1
+    }
+
     It 'no build-server shutdown for an isolated lane, a Release run or another OS' {
         Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
         Mock -ModuleName Invoke-BuildAll dotnet { }

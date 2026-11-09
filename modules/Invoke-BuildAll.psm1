@@ -456,6 +456,10 @@ function Invoke-BuildAllCore {
         if ($shutdownBuildServer) {
             if (-not $Json) { Write-Host "Shutdown the dotnet build servers (they may lock 999.0.0 analyzers in the global package cache; they restart on demand)" -ForegroundColor Yellow }
             dotnet build-server shutdown *>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                # Not fatal: the servers restart on demand. But the purge below may now fail on locked files.
+                Write-Warning "dotnet build-server shutdown exited with code $LASTEXITCODE; the package purge may fail on locked files."
+            }
         }
         Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json | Out-Null
     }
