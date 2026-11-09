@@ -29,6 +29,10 @@
         octo-communication-sdk);
       - packages older than the nuget/ copy (another repository produced a newer one).
 
+.PARAMETER nugetPath
+    Target folder override (created when missing), e.g. a private feed of Invoke-BuildRange -feedPath.
+    Default: <checkout>/nuget of -branch. With -onlyChanged the comparison is made against this folder.
+
 .PARAMETER Json
     Emit { success, copiedCount, files, skipped } as a JSON document. `files` lists the copied file
     names, `skipped` the packages left alone with the reason (unchanged / olderThanNuget / orphaned).
@@ -43,6 +47,7 @@ function Copy-NuGetPackages
         [string]$directory = ".\",
         [Nullable[DateTime]]$modifiedSince = $null,
         [switch]$onlyChanged,
+        [string]$nugetPath = "",
         [switch]$Json
     )
 
@@ -54,15 +59,20 @@ function Copy-NuGetPackages
     if (-not $Json) { Write-Host "Searching at $directory" }
     $binDirectories = Get-ChildItem -Path $directory -Filter 'DebugL' -Recurse -Directory | Where-Object { $_.FullName -like '*[/\]bin[/\]DebugL' }
 
-    $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
     $repositoryRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($directory))
-    $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
+    if ([string]::IsNullOrWhiteSpace($nugetPath)) {
+        $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
+        $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
+    }
+    else {
+        $branchNugetPath = [IO.Path]::GetFullPath($nugetPath)
+    }
     if (-not $Json) { Write-Host "Branch NuGet Path: $branchNugetPath" }
 
     # Check if the branch NuGet path exists, if not create it
     if (!(Test-Path $branchNugetPath)) {
         if (-not $Json) { Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow }
-        New-Item -ItemType Directory -Path $branchNugetPath | Out-Null
+        New-Item -ItemType Directory -Force -Path $branchNugetPath | Out-Null
     }
 
     foreach ($binDirectory in $binDirectories) {

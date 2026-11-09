@@ -104,6 +104,17 @@ lane (main) the global cache (`NUGET_PACKAGES` or `~/.nuget/packages`), plus `<l
 when `<lane>/Octo.User.props` sets `RestorePackagesPath`. `-WhatIf` prints the lane, its environment,
 the caches and the per-repo `RestoreSources`.
 
+**Private feeds for library worktrees.** `-repoPaths @{ 'octo-construction-kit-engine' = '<absolute worktree folder>' }`
+builds that repository from the given folder (e.g. a git worktree) instead of `<checkout>/<repo>`, at the same
+position in the build order; the folder must exist and contain a `.sln`/`.slnx` or a `src/` folder.
+`-feedPath <dir>` (DebugL) copies the built packages into `<dir>` instead of `<checkout>/nuget` and purges no
+package cache; the caller provides the isolation (`NUGET_PACKAGES`, `RestoreSources` in its environment - the
+run does not override them). `-WhatIf` shows both, `-Json` reports `feedPath` / `repoPaths`.
+
+**Progress events.** `-EventsFile <file>` (also on `Invoke-Build` and `Invoke-BuildAll`) appends one JSON line per
+event while the run is going: `plan`, per repository `repoStart` / `phase` / `repoDone`, and a closing `done`
+(also when the run refuses or throws). The contract is in `CLAUDE.md` (`-Json` section).
+
 It stops at the first failing repository (fail fast, prints the repository name and the error lines
 of its `Invoke-Build.log`) and prints per-repository timings at the end (`-Json` for a
 machine-readable result). It refuses to start while processes run out of a repository in the range

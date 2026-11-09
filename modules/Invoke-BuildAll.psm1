@@ -36,7 +36,9 @@ function Compile-Repo {
         # Lane settings from Get-OctoLaneBuildSettings; $null = legacy behaviour.
         $laneSettings = $null,
         # Effective MSBuild properties for this repository (-msbuildProperties merged with -msbuildPropertiesPerRepo).
-        [hashtable]$msbuildProperties = @{}
+        [hashtable]$msbuildProperties = @{},
+        # -EventsFile state of Invoke-BuildAll ($null = no events).
+        $events = $null
     )
 
     # Isolated lane only: repos without their own <RestoreSources> would restore from the user-level
@@ -50,7 +52,7 @@ function Compile-Repo {
         }
     }
     try {
-        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties
+        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties -events $events
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
@@ -64,7 +66,8 @@ function Compile-RepoCore {
         [string]$path,
         [Parameter(Mandatory=$true)]
         [string]$configuration,
-        [hashtable]$msbuildProperties = @{}
+        [hashtable]$msbuildProperties = @{},
+        $events = $null
     )
 
     $builder = Get-RepoBuilder -path $path
@@ -108,6 +111,10 @@ function Compile-RepoCore {
     }
 
     if ($configuration -ieq "DebugL" -And $state -eq $true) {
+        if ($null -ne $events -and $events.Path) {
+            $events.Phase = 'packages'
+            Write-OctoBuildEvent -Path $events.Path -Command 'Invoke-BuildAll' -Event 'phase' -Data ([ordered]@{ repo = (Split-Path -Leaf $path); phase = 'packages' })
+        }
         Copy-NuGetPackages -directory $path -branch $branch
     }
 
@@ -205,8 +212,74 @@ function Invoke-BuildAll {
         [switch]$DryRun,
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog (DebugL).
         [switch]$skipCkSync,
+        # Progress events, one JSON line each (Write-OctoBuildEvent). Not written by -DryRun.
+        [string]$EventsFile = '',
         [switch]$Json
     )
+
+    # The run lives in Invoke-BuildAllCore; this wrapper guarantees the closing `done` event of
+    # -EventsFile, also on an early exit or a throw.
+    $forward = @{}
+    foreach ($key in $PSBoundParameters.Keys) {
+        if ($key -ne 'EventsFile') { $forward[$key] = $PSBoundParameters[$key] }
+    }
+    $events = @{ Path = $EventsFile; Repo = $null; Phase = $null; Success = $false; FailedRepo = $null; FailedStep = $null; Completed = $false }
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        Invoke-BuildAllCore @forward -events $events
+    }
+    finally {
+        $watch.Stop()
+        if (-not $DryRun -and -not [string]::IsNullOrWhiteSpace($EventsFile)) {
+            if (-not $events.Completed) {
+                $events.Success = $false
+                if (-not $events.FailedRepo) { $events.FailedRepo = $events.Repo }
+                if (-not $events.FailedStep) { $events.FailedStep = if ($events.Phase) { $events.Phase } else { 'preflight' } }
+            }
+            Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-BuildAll' -Event 'done' -Data ([ordered]@{
+                    success        = [bool]$events.Success
+                    failedRepo     = if ($events.Success) { $null } else { $events.FailedRepo }
+                    failedStep     = if ($events.Success) { $null } else { $events.FailedStep }
+                    elapsedSeconds = $watch.Elapsed.TotalSeconds
+                })
+        }
+    }
+}
+
+# The builder of Get-RepoBuilder in the mode vocabulary of Invoke-BuildRange's plan (events).
+function Get-RepoBuildMode {
+    param([string]$builder)
+    switch ($builder) {
+        'build.ps1' { return 'script' }
+        'Invoke-Publish' { return 'frontend' }
+        'Invoke-BuildZenonPlug' { return 'zenon' }
+        'none' { return 'none' }
+        default { return 'dotnet' }
+    }
+}
+
+function Invoke-BuildAllCore {
+    # The body of Invoke-BuildAll (see its help); $events is the -EventsFile state shared with the wrapper.
+    param(
+        [string]$configuration = "Release",
+        [string]$branch = "",
+        [Boolean]$excludeAdditional = $false,
+        [Boolean]$excludeFrontend = $false,
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto',
+        [hashtable]$msbuildProperties = @{},
+        [hashtable]$msbuildPropertiesPerRepo = @{},
+        [switch]$DryRun,
+        [switch]$skipCkSync,
+        [hashtable]$events = @{},
+        [switch]$Json
+    )
+
+    $eventsPath = [string]$events.Path
+    $emit = {
+        param([string]$name, [System.Collections.IDictionary]$data)
+        Write-OctoBuildEvent -Path $eventsPath -Command 'Invoke-BuildAll' -Event $name -Data $data
+    }
 
     # Validate early so a typo fails before anything is wiped or killed.
     try { [void](ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties) }
@@ -310,6 +383,11 @@ function Invoke-BuildAll {
         }
     }
 
+    $repoModes = @{}
+    foreach ($entry in $plan) { $repoModes[$entry.name] = Get-RepoBuildMode -builder (Get-RepoBuilder -path $entry.path) }
+    $repoCount = $plan.Count
+    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.name; mode = $repoModes[$_.name] } }); count = $repoCount })
+
     # kill all dotnet processes. this is necessary to avoid file locks.
     Invoke-KillDotnet
 
@@ -352,22 +430,51 @@ function Invoke-BuildAll {
     # lane. Restored afterwards so the session is left as it was found.
     $repoLaneSettings = if ($configuration -ieq "DebugL") { $laneSettings } else { $null }
     $savedEnvironment = Set-OctoBuildEnvironment -environment $laneSettings.environment
+    $repoIndex = 0
     try {
         foreach ($entry in $plan) {
+            $repoIndex++
+            $events.Repo = $entry.name
+            $events.Phase = 'build'
+            & $emit 'repoStart' ([ordered]@{ repo = $entry.name; index = $repoIndex; count = $repoCount })
+            # Restore and build are one step here (Invoke-Build); the package copy is the 'packages' phase (DebugL).
+            & $emit 'phase' ([ordered]@{ repo = $entry.name; phase = 'build' })
             $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
             # AB#7974: the private catalog's intermediate versions of the repo's ckLanguage 2 models into the lane's
             # local catalog before its CK compile gate runs (warning + fix command on failure, never a build stop).
             if ($configuration -ieq "DebugL" -and -not $skipCkSync) {
                 [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
             }
-            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name]
+            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name] -events $events
             $repoStopWatch.Stop()
             $allStatus.Add($entry.name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
+            # Invoke-BuildAll measures one duration per repository and copies without a per-repository
+            # count: buildSeconds = seconds, copied/purged = null (the lane caches are purged up front).
+            & $emit 'repoDone' ([ordered]@{
+                    repo           = $entry.name
+                    index          = $repoIndex
+                    count          = $repoCount
+                    success        = $buildStatus
+                    seconds        = $repoStopWatch.Elapsed.TotalSeconds
+                    buildSeconds   = $repoStopWatch.Elapsed.TotalSeconds
+                    testSeconds    = 0
+                    packageSeconds = 0
+                    copied         = $null
+                    purged         = $null
+                    logFile        = if ($repoModes[$entry.name] -eq 'dotnet') { Join-Path $entry.path 'Invoke-Build.log' } else { $null }
+                })
+            if (-not $buildStatus -and -not $events.FailedRepo) {
+                $events.FailedRepo = $entry.name
+                $events.FailedStep = 'build'
+            }
         }
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
     }
+    # Invoke-BuildAll does not stop at a failing repository; done reports the first one.
+    $events.Success = ($null -eq $events.FailedRepo)
+    $events.Completed = $true
 
     # Print the status of all builds
     

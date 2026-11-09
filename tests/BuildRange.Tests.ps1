@@ -1069,3 +1069,167 @@ Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574
         Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
     }
 }
+
+Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        $script:seen = [ordered]@{}
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            $script:seen[$entry.Name] = [pscustomobject]@{ Path = $entry.Path; NuGetPackages = $env:NUGET_PACKAGES; RestoreSources = $env:RestoreSources }
+            if ($entry.Name -eq 'octo-construction-kit-engine') {
+                New-Item -ItemType Directory -Force -Path (Join-Path $entry.Path 'bin/DebugL') | Out-Null
+                Set-Content (Join-Path $entry.Path 'bin/DebugL/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') 'from-worktree'
+            }
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+        # A worktree of octo-construction-kit-engine next to the lane's repositories.
+        $script:worktree = Join-Path $fake.Checkout 'wt-8625-octo-construction-kit-engine'
+        New-Item -ItemType Directory -Force -Path $worktree | Out-Null
+        New-FakeSln $worktree 'octo-construction-kit-engine' @('src\Engine\Engine.csproj')
+    }
+
+    It '-repoPaths builds the repository from the given folder at its build-order position' {
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -repoPaths @{ 'construction-kit-engine' = $worktree } -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        @($script:seen.Keys) | Should -Be @('octo-construction-kit-engine', 'octo-sdk')
+        $script:seen['octo-construction-kit-engine'].Path | Should -Be $worktree
+        $script:seen['octo-sdk'].Path | Should -Be (Join-Path $fake.Checkout 'octo-sdk')
+        $json.data.repoPaths.'octo-construction-kit-engine' | Should -Be $worktree
+        (Get-Content (Join-Path $fake.Checkout 'nuget/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') -Raw).Trim() | Should -Be 'from-worktree'
+    }
+
+    It '-repoPaths refuses a missing folder, a folder without a repository and a relative path' {
+        $empty = Join-Path $TestDrive 'empty-folder'
+        New-Item -ItemType Directory -Force -Path $empty | Out-Null
+        $cases = @(
+            @{ Path = (Join-Path $TestDrive 'does-not-exist'); Message = '*does not exist*' },
+            @{ Path = $empty; Message = '*contains no repository*' },
+            @{ Path = 'relative/folder'; Message = '*absolute path*' }
+        )
+        foreach ($case in $cases) {
+            $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $case.Path } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+            $json.data.success | Should -BeFalse
+            $json.data.error | Should -BeLike $case.Message
+        }
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+    }
+
+    It '-repoPaths accepts a folder that only has a src/ folder' {
+        $srcOnly = Join-Path $TestDrive 'src-only-worktree'
+        New-Item -ItemType Directory -Force -Path (Join-Path $srcOnly 'src') | Out-Null
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $srcOnly } -WhatIf -Json | ConvertFrom-Json
+        $json.data.repositories[0].path | Should -Be $srcOnly
+    }
+
+    It '-WhatIf shows -repoPaths and -feedPath and changes nothing' {
+        $feed = Join-Path $TestDrive 'feeds/session-1'
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -feedPath $feed -WhatIf -Json | ConvertFrom-Json
+
+        $json.data.whatIf | Should -BeTrue
+        $json.data.feedPath | Should -Be $feed
+        $json.data.nugetPath | Should -Be $feed
+        $json.data.repoPaths.'octo-construction-kit-engine' | Should -Be $worktree
+        $json.data.repositories[0].path | Should -Be $worktree
+        @($json.data.repositories[0].purge).Count | Should -Be 0
+        Test-Path $feed | Should -BeFalse
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+
+        $text = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -feedPath $feed -WhatIf 6>&1 | Out-String
+        $text | Should -Match 'private feed'
+        $text | Should -Match ([regex]::Escape($worktree))
+    }
+
+    It '-feedPath copies into the private feed, skips the purge and keeps the caller''s environment' {
+        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')     # isolated lane: would set NUGET_PACKAGES / RestoreSources
+        $feed = Join-Path $TestDrive 'feeds/session-2'
+        $callerCache = Join-Path $TestDrive 'session-2-packages'
+        $laneCache = Join-Path $fake.Checkout '.nuget-packages'
+        New-Item -ItemType Directory -Force -Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Out-Null
+        $previousRestore = $env:RestoreSources
+        $env:NUGET_PACKAGES = $callerCache
+        $env:RestoreSources = "$feed;https://api.nuget.org/v3/index.json"
+        try {
+            $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -feedPath $feed -Json | ConvertFrom-Json
+        }
+        finally {
+            $env:NUGET_PACKAGES = $null
+            $env:RestoreSources = $previousRestore
+        }
+
+        $json.data.success | Should -BeTrue
+        $json.data.feedPath | Should -Be $feed
+        Test-Path (Join-Path $feed 'Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') | Should -BeTrue
+        Test-Path (Join-Path $feed 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+        @(Get-ChildItem (Join-Path $fake.Checkout 'nuget')).Name | Should -Be @('Meshmakers.Common.Shared.999.0.0.nupkg')   # lane feed untouched
+        Test-Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeTrue                         # no purge
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeTrue
+        @($json.data.repositories | ForEach-Object { @($_.purged).Count }) | Should -Be @(0, 0)
+        $script:seen['octo-construction-kit-engine'].NuGetPackages | Should -Be $callerCache
+        $script:seen['octo-construction-kit-engine'].RestoreSources | Should -Be "$feed;https://api.nuget.org/v3/index.json"
+        $json.data.lane.environment.PSObject.Properties.Name | Should -Not -Contain 'NUGET_PACKAGES'
+    }
+
+    It '-feedPath refuses -purgeStaleCache and non-DebugL configurations' {
+        $feed = Join-Path $TestDrive 'feeds/session-3'
+        $json = Invoke-BuildRange -branch main -from octo-sdk -feedPath $feed -purgeStaleCache -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*-purgeStaleCache*'
+
+        $json = Invoke-BuildRange -branch main -from octo-sdk -feedPath $feed -configuration Release -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*DebugL*'
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+    }
+
+    It 'without -feedPath the -Json document reports feedPath null and no repoPaths' {
+        $json = Invoke-BuildRange -branch main -from octo-sdk -Json | ConvertFrom-Json
+        $json.data.feedPath | Should -BeNullOrEmpty
+        @($json.data.repoPaths.PSObject.Properties).Count | Should -Be 0
+    }
+
+    It 'Copy-NuGetPackages -nugetPath copies into the given folder (created when missing), not into <checkout>/nuget' {
+        $target = Join-Path $TestDrive 'feeds/copy-target'
+        $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -nugetPath $target -onlyChanged -Json | ConvertFrom-Json
+
+        @($json.data.files) | Should -Be @('Meshmakers.Octo.Sdk.Common.999.0.0.nupkg')
+        Test-Path (Join-Path $target 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+        @(Get-ChildItem (Join-Path $fake.Checkout 'nuget')).Count | Should -Be 1
+
+        # -onlyChanged compares against the target folder
+        $again = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -nugetPath $target -onlyChanged -Json | ConvertFrom-Json
+        $again.data.copiedCount | Should -Be 0
+    }
+}
+
+Describe 'Invoke-Build checks the restore exit code' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Import-Module (Join-Path $PSScriptRoot '../modules/Invoke-Build.psm1') -Force
+        $script:dotnetCalls = [System.Collections.Generic.List[string]]::new()
+    }
+
+    It 'stops after a failed restore with success=false and the restore exit code' {
+        Mock -ModuleName Invoke-Build dotnet {
+            $script:dotnetCalls.Add($args[0])
+            $global:LASTEXITCODE = if ($args[0] -eq 'restore') { 7 } else { 0 }
+        }
+
+        $json = Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -Json | ConvertFrom-Json
+
+        @($script:dotnetCalls) | Should -Be @('restore')
+        $json.data.success | Should -BeFalse
+        $json.data.exitCode | Should -Be 7
+        $global:LASTEXITCODE | Should -Be 7
+    }
+
+    It 'still builds after a successful restore' {
+        Mock -ModuleName Invoke-Build dotnet { $script:dotnetCalls.Add($args[0]); $global:LASTEXITCODE = 0 }
+
+        $json = Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -Json | ConvertFrom-Json
+
+        @($script:dotnetCalls) | Should -Be @('restore', 'build')
+        $json.data.success | Should -BeTrue
+    }
+}
