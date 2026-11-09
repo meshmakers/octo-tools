@@ -762,6 +762,7 @@ Describe 'globs-match' {
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
     }
     It 'asks git in a checkout: ignored files do not count, untracked ones do' {
+        if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { Set-ItResult -Skipped -Because 'git is not on PATH'; return }
         $r = New-Fixture
         Write-File (Join-Path $r '.gitignore') "gen/`n"
         Write-File (Join-Path $r 'gen/out.cs') 'x'
@@ -779,6 +780,7 @@ Describe 'globs-match' {
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
     }
     It 'does not count a tracked file that was deleted from the working tree' {
+        if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { Set-ItResult -Skipped -Because 'git is not on PATH'; return }
         $r = New-Fixture
         Write-File (Join-Path $r 'old/gone.cs') 'x'
         git -C $r init -q 2>$null
@@ -786,6 +788,16 @@ Describe 'globs-match' {
         Remove-Item -LiteralPath (Join-Path $r 'old/gone.cs')
         Set-Doc $r 'old/**'
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 1
+    }
+    It 'walks the folder in a checkout when git is not on PATH' {
+        $r = New-Fixture
+        New-Item -ItemType Directory -Path (Join-Path $r '.git') -Force | Out-Null
+        Write-File (Join-Path $r 'src/a.cs') 'x'
+        Set-Doc $r 'src/**, moved/**'
+        $path = $env:PATH
+        try { $env:PATH = '' ; $f = Get-RuleFinding (Get-Result $r) 'globs-match' } finally { $env:PATH = $path }
+        $f.Count | Should -Be 1
+        $f[0].message | Should -Match "'moved/\*\*'"
     }
     It 'reports an unclosed brace instead of failing the run' {
         $r = New-Fixture

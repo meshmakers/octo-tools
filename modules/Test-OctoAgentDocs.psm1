@@ -373,10 +373,11 @@ function Test-GlobMatch {
 
 function Get-RepositoryFile {
     # Repository-relative paths: what git knows (tracked, plus untracked files that are not
-    # ignored) in a git checkout, otherwise a walk. Folders in scan.ignore are left out of both.
+    # ignored) in a git checkout, otherwise - or without git on PATH - a walk. Folders in
+    # scan.ignore are left out of both.
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo)
     $paths = $null
-    if (Test-Path -LiteralPath (Join-Path $Repo.Root '.git')) {
+    if ((Test-Path -LiteralPath (Join-Path $Repo.Root '.git')) -and (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
         $out = & git -C $Repo.Root ls-files -z --cached --others --exclude-standard 2>$null
         if ($LASTEXITCODE -eq 0) {
             # --cached still lists a tracked file that was deleted from the working tree.
