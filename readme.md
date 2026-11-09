@@ -222,8 +222,8 @@ Stop-OctoDevStack                       # stops the daemon only; the stack servi
 
 MCP: `http://127.0.0.1:5090/mcp`, status page: `http://127.0.0.1:5090/`, log: `~/.local/state/octo-devstack/daemon.log`,
 configuration: `~/.config/octo-devstack/devstack.yaml` (written on the first start). On macOS
-`Install-OctoDevStack -LaunchAgent` starts it at login instead (launchd restarts it after `Stop-OctoDevStack`; remove it
-with `scripts/install-launchagent.sh --uninstall` in the checkout).
+`Install-OctoDevStack -LaunchAgent` starts it at login instead; `Start-OctoDevStack` / `Stop-OctoDevStack` then load and
+unload it through `launchctl`.
 
 # Tests
 

@@ -65,6 +65,20 @@ function Get-OctoDevStackLaunchAgentPath {
     return Join-Path $home_ "Library/LaunchAgents/$($script:LaunchAgentLabel).plist"
 }
 
+# The daemon is managed by launchd when the LaunchAgent is installed (macOS): start and stop go through launchctl,
+# because launchd restarts a killed daemon (KeepAlive) and would race a second, hand-started one.
+function Test-OctoDevStackLaunchAgent {
+    return (Test-OctoDevStackMacOS) -and (Test-Path -LiteralPath (Get-OctoDevStackLaunchAgentPath))
+}
+
+function Get-OctoDevStackLaunchdDomain { return "gui/$(id -u)" }
+
+function Invoke-OctoDevStackLaunchctl {
+    param([string[]]$Arguments)
+    $output = & launchctl @Arguments 2>&1
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String).Trim() }
+}
+
 function Get-OctoDevStackUrls([int]$Port) {
     $base = "http://127.0.0.1:$Port"
     return [ordered]@{ url = $base; mcpUrl = "$base/mcp"; statusPage = "$base/"; healthUrl = "$base/health" }
@@ -405,7 +419,7 @@ function Start-OctoDevStack {
     $result = [ordered]@{
         alreadyRunning = $false; started = $false; pid = $null; port = $Port
         url = $urls.url; mcpUrl = $urls.mcpUrl; statusPage = $urls.statusPage
-        logPath = $logPath; dll = $dll; claudeRegistration = $null
+        logPath = $logPath; dll = $dll; claudeRegistration = $null; launchAgent = $false
     }
     $finish = {
         param([bool]$success, [string]$message)
@@ -464,6 +478,39 @@ function Start-OctoDevStack {
     }
 
     if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
+    if (Test-OctoDevStackLaunchAgent) {
+        # Installed as a LaunchAgent: let launchd start it (it logs to <state>/daemon.log as well).
+        $result.launchAgent = $true
+        $domain = Get-OctoDevStackLaunchdDomain
+        $boot = Invoke-OctoDevStackLaunchctl -Arguments @('bootstrap', $domain, (Get-OctoDevStackLaunchAgentPath))
+        if ($boot.ExitCode -ne 0) {
+            # Already loaded (e.g. exited and throttled): ask launchd to start it now.
+            $kick = Invoke-OctoDevStackLaunchctl -Arguments @('kickstart', "$domain/$($script:LaunchAgentLabel)")
+            if ($kick.ExitCode -ne 0) {
+                & $finish $false "launchctl could not start $($script:LaunchAgentLabel): $($boot.Output) $($kick.Output)".Trim()
+                return
+            }
+        }
+        $deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
+        while (-not (Test-OctoDevStackHealth -Port $Port) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        if (-not (Test-OctoDevStackHealth -Port $Port)) {
+            $result.logTail = @(Get-OctoDevStackLogTail -LogPath $logPath)
+            & $finish $false "octo-devstack (LaunchAgent $($script:LaunchAgentLabel)) does not answer $($urls.healthUrl) after $HealthTimeoutSeconds s; see $logPath."
+            return
+        }
+        $listener = @(Get-OctoDevStackListener -Port $Port | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+        $result.pid = if ($listener) { $listener.pid } else { $null }
+        $result.started = $true
+        if (-not $Json) {
+            Write-Host "octo-devstack is running (LaunchAgent$(if ($result.pid) { ", PID $($result.pid)" }))" -ForegroundColor Green
+            Write-Host "  MCP:         $($urls.mcpUrl)"
+            Write-Host "  Status page: $($urls.statusPage)"
+            Write-Host "  Log:         $logPath"
+        }
+        if ($RegisterClaude) { $result.claudeRegistration = Register-OctoDevStackClaude -McpUrl $urls.mcpUrl -Quiet $Json }
+        & $finish $true $null
+        return
+    }
     if (Test-OctoDevStackWindows) {
         $process = Start-Process -FilePath 'dotnet' -ArgumentList @($dll, '--url', $urls.url) -WorkingDirectory $repoPath `
             -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError (Join-Path $statePath 'daemon.err.log') -PassThru
@@ -521,8 +568,8 @@ function Stop-OctoDevStack {
         (lsof + ps on macOS/Linux, Get-NetTCPConnection + Win32_Process on Windows) - never by name pattern.
         Another process on the port is refused. macOS/Linux: SIGTERM, after -TimeoutSeconds SIGKILL;
         Windows: Stop-Process. The services the daemon started keep running and are adopted by the next
-        start. With the macOS LaunchAgent installed, launchd starts the daemon again (KeepAlive): remove it
-        with `scripts/install-launchagent.sh --uninstall` in the checkout first.
+        start. With the macOS LaunchAgent installed the daemon is stopped through launchd (`launchctl bootout`),
+        so launchd does not start it again; Start-OctoDevStack loads it again (`launchctl bootstrap`).
 
     .PARAMETER Json
         { success, exitCode, stopped, pid, port, launchAgent, note[, error] }.
@@ -536,7 +583,7 @@ function Stop-OctoDevStack {
 
     $command = 'Stop-OctoDevStack'
     $note = 'Stack services the daemon started keep running; the next Start-OctoDevStack adopts them.'
-    $launchAgent = (Test-OctoDevStackMacOS) -and (Test-Path -LiteralPath (Get-OctoDevStackLaunchAgentPath))
+    $launchAgent = Test-OctoDevStackLaunchAgent
     $result = [ordered]@{ stopped = $false; pid = $null; port = $Port; launchAgent = [bool]$launchAgent; note = $note }
     $finish = {
         param([bool]$success, [string]$message)
@@ -544,6 +591,29 @@ function Stop-OctoDevStack {
         if ($message) { $extra.error = $message }
         Write-OctoDevStackResult -Command $command -Json $Json -Success $success -ExitCode ([int](-not $success)) -Extra $extra
         if (-not $success) { Write-Error $message }
+    }
+
+    if ($launchAgent) {
+        # Managed by launchd: unload the job, so KeepAlive does not start it again.
+        $target = @(Get-OctoDevStackListener -Port $Port | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+        $result.pid = if ($target) { $target.pid } else { $null }
+        $out = Invoke-OctoDevStackLaunchctl -Arguments @('bootout', "$(Get-OctoDevStackLaunchdDomain)/$($script:LaunchAgentLabel)")
+        if ($out.ExitCode -ne 0 -and $target) {
+            & $finish $false "launchctl bootout $($script:LaunchAgentLabel) failed: $($out.Output)"
+            return
+        }
+        if ($target) {
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+            if (Test-OctoDevStackProcessAlive -ProcessId $target.pid) { Stop-Process -Id $target.pid -Force -ErrorAction SilentlyContinue }
+        }
+        $result.stopped = [bool]$target
+        if (-not $Json) {
+            if ($target) { Write-Host "octo-devstack stopped (LaunchAgent unloaded). $note" -ForegroundColor Green }
+            else { Write-Host "octo-devstack was not running on port $Port (LaunchAgent unloaded)." -ForegroundColor DarkGray }
+        }
+        & $finish $true $null
+        return
     }
 
     $listeners = @(Get-OctoDevStackListener -Port $Port)
@@ -587,9 +657,6 @@ function Stop-OctoDevStack {
     $result.stopped = $true
     if (-not $Json) {
         Write-Host "octo-devstack stopped. $note" -ForegroundColor Green
-        if ($launchAgent) {
-            Write-Host 'The LaunchAgent is installed: launchd starts the daemon again. Remove it with scripts/install-launchagent.sh --uninstall.' -ForegroundColor Yellow
-        }
     }
     & $finish $true $null
 }

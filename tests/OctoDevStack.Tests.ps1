@@ -207,6 +207,7 @@ Describe 'Install-OctoDevStack' {
 
 Describe 'Start-OctoDevStack' {
     BeforeEach {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackLaunchAgent { $false }
         Set-DotnetMock
         Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $false }
         Mock -ModuleName OctoDevStack Start-Sleep { }
@@ -370,6 +371,7 @@ Describe 'Start-OctoDevStack' {
 
 Describe 'Stop-OctoDevStack' {
     BeforeEach {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackLaunchAgent { $false }
         Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $false }
         Mock -ModuleName OctoDevStack Test-OctoDevStackMacOS { $false }
         Mock -ModuleName OctoDevStack Start-Sleep { }
@@ -443,6 +445,52 @@ Describe 'Stop-OctoDevStack' {
         $json.data.stopped | Should -BeTrue
         Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 1 -ParameterFilter { $Id -eq 1234 }
         $script:KillCalls | Should -HaveCount 0
+    }
+}
+
+Describe 'OctoDevStack with the macOS LaunchAgent' {
+    BeforeEach {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackLaunchAgent { $true }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackLaunchAgentPath { '/Users/x/Library/LaunchAgents/io.meshmakers.octo-devstack.plist' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackLaunchdDomain { 'gui/501' }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $false }
+        Mock -ModuleName OctoDevStack Start-Sleep { }
+        Mock -ModuleName OctoDevStack Stop-Process { }
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { 1 }
+        $script:Launchctl = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName OctoDevStack Invoke-OctoDevStackLaunchctl { $script:Launchctl.Add($Arguments -join ' '); [pscustomobject]@{ ExitCode = 0; Output = '' } }
+        Mock -ModuleName OctoDevStack kill { throw 'kill must not be used with the LaunchAgent' }
+    }
+
+    It 'Stop unloads the LaunchAgent instead of killing the daemon' {
+        Mock -ModuleName OctoDevStack lsof { '902' }
+        Mock -ModuleName OctoDevStack ps { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
+
+        $json = Stop-OctoDevStack -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.stopped | Should -BeTrue
+        $json.data.launchAgent | Should -BeTrue
+        $script:Launchctl | Should -Be @('bootout gui/501/io.meshmakers.octo-devstack')
+        Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 0
+    }
+
+    It 'Start loads the LaunchAgent instead of starting a second daemon' {
+        $script:Health = 0
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:Health++; $script:Health -gt 2 }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListener { @() }
+        $dir = Join-Path $TestDrive 'devstack'
+        New-Item -ItemType Directory -Force -Path (Join-Path $dir 'bin/Release/net10.0') | Out-Null
+        Set-Content (Join-Path $dir 'bin/Release/net10.0/octo-devstack.dll') 'x'
+
+        $json = Start-OctoDevStack -Path $dir -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.started | Should -BeTrue
+        $json.data.launchAgent | Should -BeTrue
+        $script:Launchctl | Should -Be @('bootstrap gui/501 /Users/x/Library/LaunchAgents/io.meshmakers.octo-devstack.plist')
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
     }
 }
 
