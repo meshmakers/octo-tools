@@ -1330,7 +1330,7 @@ function Invoke-OctoBuildRangeCore {
                         }
                     })
                 notBuilt       = @($plan | Select-Object -Skip $results.Count | ForEach-Object { $_.Name })
-                msbuildProperties = @($propertyArgs)
+                msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
                 staleGlobalCache = @($staleCache | ForEach-Object { [ordered]@{ packageId = $_.PackageId; cachePath = $_.CachePath; reason = $_.Reason } })
                 staleGlobalCachePurged = @($stalePurged)
                 elapsedSeconds = $totalWatch.Elapsed.TotalSeconds

@@ -153,6 +153,15 @@ Describe 'Initialize-OctoLaneUserProps' {
         Test-Path (Join-Path $lane 'Octo.User.props.bak') | Should -BeFalse
     }
 
+    It 'a commented-out standard line is no setting: reported as missing, -AddRestorePackagesPath adds a real one' {
+        $original = "<Project>`n  <!-- $StandardLine -->`n</Project>`n"
+        $lane = New-FakeLane 'main-f' $original
+        (Initialize-OctoLaneUserProps -branch 'main-f' -Json | ConvertFrom-Json).data.status | Should -Be 'missing-restore-packages-path'
+        (Initialize-OctoLaneUserProps -branch 'main-f' -AddRestorePackagesPath -Json | ConvertFrom-Json).data.status | Should -Be 'added'
+        (Get-OctoLaneBuildSettings -laneRootPath $lane).isolated | Should -BeTrue
+        (Initialize-OctoLaneUserProps -branch 'main-f' -Json | ConvertFrom-Json).data.status | Should -Be 'ok'
+    }
+
     It 'never rewrites a RestorePackagesPath with another value' {
         $original = '<Project><PropertyGroup><RestorePackagesPath>/somewhere/else</RestorePackagesPath></PropertyGroup></Project>'
         $lane = New-FakeLane 'main-e' $original

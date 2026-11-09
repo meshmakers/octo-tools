@@ -366,6 +366,119 @@ function Get-OctoInPlaceRestoreSources {
     return ($sources -join ';')
 }
 
+function Split-OctoSourceCredentials {
+    # Splits "scheme://user:password@host/..." sources into the source without credentials and its credentials.
+    # Returns { Sources = [string[]] (same order, no userinfo); Credentials = @{ <source without userinfo> = @{ User; Password } } }.
+    param([string]$restoreSources)
+    $sources = [System.Collections.Generic.List[string]]::new()
+    $credentials = @{}
+    foreach ($source in ($restoreSources -split ';')) {
+        if (-not $source) { continue }
+        if ($source -match '^(?<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?<user>[^:/@]*)(:(?<password>[^/@]*))?@(?<rest>.*)$') {
+            $plain = "$($Matches['scheme'])$($Matches['rest'])"
+            $credentials[$plain] = @{ User = [Uri]::UnescapeDataString($Matches['user']); Password = [Uri]::UnescapeDataString([string]$Matches['password']) }
+            $sources.Add($plain)
+        }
+        else { $sources.Add($source) }
+    }
+    return [pscustomobject]@{ Sources = @($sources); Credentials = $credentials }
+}
+
+function Get-OctoUserNuGetConfigFile {
+    # The user-level NuGet.Config (a wrapper so tests never read the developer's real file).
+    if ($IsWindows) { return Join-Path $env:APPDATA 'NuGet/NuGet.Config' }
+    return Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.nuget/NuGet/NuGet.Config'
+}
+
+function Set-OctoOwnerOnlyAccess {
+    # Restricts a file or folder to the current user: mode 600/700 on macOS/Linux, an ACL with only the current user
+    # (no inheritance) on Windows.
+    param([Parameter(Mandatory = $true)] [string]$path, [switch]$directory)
+    if ($IsWindows) {
+        $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($directory) {
+            $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+            $acl.SetAccessRuleProtection($true, $false)
+            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            [System.IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($path), $acl)
+        }
+        else {
+            $acl = [System.Security.AccessControl.FileSecurity]::new()
+            $acl.SetAccessRuleProtection($true, $false)
+            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'Allow'))
+            [System.IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($path), $acl)
+        }
+        return
+    }
+    $mode = if ($directory) { [IO.UnixFileMode]'UserRead, UserWrite, UserExecute' } else { [IO.UnixFileMode]'UserRead, UserWrite' }
+    [IO.File]::SetUnixFileMode($path, $mode)
+}
+
+function New-OctoRestoreConfigFile {
+    <#
+        Writes an owner-only NuGet.Config in a new temporary folder that carries the credentials of the given sources, so
+        they never reach dotnet as command-line arguments (visible in ps). The sources themselves stay in RestoreSources
+        (a global property, it decides the list); NuGet takes the credentials of a restore source from the config's
+        source with the same URL. RestoreConfigFile replaces the user-level NuGet.Config, so credentials it holds for
+        these sources (e.g. Telerik) are copied over. Returns the file; the caller deletes its folder in finally.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$sources,
+        [Parameter(Mandatory = $true)] [hashtable]$credentials,
+        [string]$userConfigPath = (Get-OctoUserNuGetConfigFile)
+    )
+    $escape = { param([string]$v) [System.Security.SecurityElement]::Escape($v) }
+    # Credentials of the user-level config, keyed by source URL.
+    $userCredentials = @{}
+    if ($userConfigPath -and (Test-Path -LiteralPath $userConfigPath -PathType Leaf)) {
+        try {
+            [xml]$user = Get-Content -LiteralPath $userConfigPath -Raw
+            $urlOfKey = @{}
+            foreach ($add in @($user.SelectNodes("/configuration/packageSources/add"))) { $urlOfKey[[string]$add.GetAttribute('key')] = [string]$add.GetAttribute('value') }
+            foreach ($node in @($user.SelectNodes("/configuration/packageSourceCredentials/*"))) {
+                $key = [System.Xml.XmlConvert]::DecodeName($node.LocalName)
+                if ($urlOfKey.ContainsKey($key)) { $userCredentials[$urlOfKey[$key]] = @($node.SelectNodes('add')) }
+            }
+        }
+        catch { Write-Warning "Cannot read the user-level NuGet.Config ($userConfigPath) - its feed credentials are not carried over: $($_.Exception.Message)" }
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('<?xml version="1.0" encoding="utf-8"?>')
+    $lines.Add('<configuration>')
+    $lines.Add('  <packageSources>')
+    $lines.Add('    <clear />')
+    for ($i = 0; $i -lt $sources.Count; $i++) { $lines.Add("    <add key=""octo-source-$($i + 1)"" value=""$(& $escape $sources[$i])"" />") }
+    $lines.Add('  </packageSources>')
+    $lines.Add('  <packageSourceCredentials>')
+    for ($i = 0; $i -lt $sources.Count; $i++) {
+        $key = "octo-source-$($i + 1)"
+        if ($credentials.ContainsKey($sources[$i])) {
+            $credential = $credentials[$sources[$i]]
+            $lines.Add("    <$key>")
+            $lines.Add("      <add key=""Username"" value=""$(& $escape $credential.User)"" />")
+            $lines.Add("      <add key=""ClearTextPassword"" value=""$(& $escape $credential.Password)"" />")
+            $lines.Add("    </$key>")
+        }
+        elseif ($userCredentials.ContainsKey($sources[$i])) {
+            $lines.Add("    <$key>")
+            foreach ($add in $userCredentials[$sources[$i]]) { $lines.Add("      <add key=""$(& $escape $add.GetAttribute('key'))"" value=""$(& $escape $add.GetAttribute('value'))"" />") }
+            $lines.Add("    </$key>")
+        }
+    }
+    $lines.Add('  </packageSourceCredentials>')
+    $lines.Add('</configuration>')
+
+    $folder = Join-Path ([IO.Path]::GetTempPath()) ("octo-restore-" + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($folder)
+    Set-OctoOwnerOnlyAccess -path $folder -directory
+    $file = Join-Path $folder 'NuGet.Config'
+    # Create empty and restrict it before any credential is written.
+    [IO.File]::WriteAllText($file, '')
+    Set-OctoOwnerOnlyAccess -path $file
+    [IO.File]::WriteAllText($file, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+    return $file
+}
+
 function Get-OctoAdoptedWorktreeEntry {
     # Manifest entry of an adopted worktree at $path (after the move, or in place).
     param([Parameter(Mandatory = $true)] $info, [Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string]$role)
@@ -1320,7 +1433,11 @@ function Remove-OctoEnvironment {
     position (Invoke-BuildRange -externalRepoPaths) with the environment's feed, cache and CK catalog as global
     properties: RestoreSources (Get-OctoInPlaceRestoreSources: the environment feed in place of ../nuget plus the
     repository's own DebugL sources, e.g. Telerik for octo-report-services; nuget.org when it declares none),
-    RestorePackagesPath=<env>/.nuget-packages, OctoLocalCatalogRootPath=<env>/.octo/local-catalog.
+    RestorePackagesPath=<env>/.nuget-packages, OctoLocalCatalogRootPath=<env>/.octo/local-catalog. Credentials in a
+    source never reach the dotnet command line: RestoreSources carries the source without them, an owner-only
+    NuGet.Config in a temporary folder (mode 600 / current-user ACL, deleted after the build, also on failure) passed
+    as RestoreConfigFile carries them, with the user-level NuGet.Config's credentials for the same sources
+    (RestoreConfigFile replaces that file).
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
     Before the build the kill scope of the environment is cleared: Invoke-KillDotnet -branchRootPath wt-<env>
     -additionalRoots <in-place worktrees> (Windows stops the matched dotnet processes, macOS/Linux list them);
@@ -1359,14 +1476,25 @@ function Invoke-BuildEnvironment {
     catch { & $fail $_.Exception.Message; return }
     $external = @{}
     $perRepo = @{}
+    $credentialSources = [System.Collections.Generic.List[string]]::new()
+    $credentials = @{}
+    $credentialRepos = @()
     $environmentFeed = Join-Path $environmentPath 'nuget'
     foreach ($repo in @($manifest['repos'] | Where-Object { Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath })) {
         if (-not (Test-Path -LiteralPath $repo['path'] -PathType Container)) { & $fail "In-place worktree $($repo['path']) of $($repo['name']) does not exist."; return }
         $external[[string]$repo['name']] = [string]$repo['path']
+        # Credentials in a source (user:password@, e.g. a resolved OctoNugetPrivateServer) never go on the dotnet
+        # command line: RestoreSources keeps the sources without them, an owner-only RestoreConfigFile carries them.
+        $split = Split-OctoSourceCredentials -restoreSources (Get-OctoInPlaceRestoreSources -repositoryPath ([string]$repo['path']) -environmentFeed $environmentFeed -userPropsPaths @((Join-Path $basePath 'Octo.User.props'), (Join-Path $environmentPath 'Octo.User.props')))
         $perRepo[[string]$repo['name']] = @{
-            RestoreSources           = (Get-OctoInPlaceRestoreSources -repositoryPath ([string]$repo['path']) -environmentFeed $environmentFeed -userPropsPaths @((Join-Path $basePath 'Octo.User.props'), (Join-Path $environmentPath 'Octo.User.props')))
+            RestoreSources           = ($split.Sources -join ';')
             RestorePackagesPath      = (Join-Path $environmentPath '.nuget-packages')
             OctoLocalCatalogRootPath = (Join-Path $environmentPath '.octo/local-catalog')
+        }
+        if ($split.Credentials.Count -gt 0) {
+            foreach ($source in $split.Sources) { if (-not $credentialSources.Contains($source)) { $credentialSources.Add($source) } }
+            foreach ($key in $split.Credentials.Keys) { $credentials[$key] = $split.Credentials[$key] }
+            $credentialRepos += [string]$repo['name']
         }
     }
     try { $order = @(Get-OctoBuildOrder -branchRootPath $environmentPath -excludeFrontend $false -excludeAdditional $false -additionalRepos $external) }
@@ -1413,12 +1541,23 @@ function Invoke-BuildEnvironment {
     if ($EventsFile) { $range['EventsFile'] = $EventsFile }
     if ($DryRun) { $range['WhatIf'] = $true }
 
-    if (-not $Json) {
-        Invoke-BuildRange @range
-        return
+    # The credentials file exists only while the build runs; it is deleted in finally, also after a failure.
+    $restoreConfig = $null
+    try {
+        if ($credentialRepos.Count -gt 0) {
+            $restoreConfig = if ($DryRun) { '<owner-only NuGet.Config, generated at build time>' } else { New-OctoRestoreConfigFile -sources @($credentialSources) -credentials $credentials }
+            foreach ($name in $credentialRepos) { $perRepo[$name]['RestoreConfigFile'] = $restoreConfig }
+        }
+        if (-not $Json) {
+            Invoke-BuildRange @range
+            return
+        }
+        $output = @(Invoke-BuildRange @range -Json)
+        $exitCode = $global:LASTEXITCODE
     }
-    $output = @(Invoke-BuildRange @range -Json)
-    $exitCode = $global:LASTEXITCODE
+    finally {
+        if ($restoreConfig -and -not $DryRun) { Remove-Item -LiteralPath (Split-Path -Parent $restoreConfig) -Recurse -Force -ErrorAction SilentlyContinue }
+    }
     $data = [ordered]@{}
     try {
         $inner = ($output -join "`n") | ConvertFrom-Json -AsHashtable

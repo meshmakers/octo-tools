@@ -852,30 +852,96 @@ Describe 'In-place RestoreSources with private feeds (macros from Octo.User.prop
     }
 }
 
-Describe 'Invoke-BuildEnvironment never prints private feed credentials' {
+Describe 'Invoke-BuildEnvironment keeps private feed credentials off the command line' {
     BeforeEach {
         $script:ws = New-FakeWorkspace
         New-OctoEnvironment -env env-c2 -repos octo-construction-kit-engine -branchName 'feature/c2' -Json | Out-Null
         $script:inPlace = Join-Path $ws.Root 'wt-lane-octo-sdk'
         Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree add -q -b 'reimar/AB#7_c' $inPlace | Out-Null
-        Set-Content -Path (Join-Path $inPlace 'Directory.Build.props') -Value '<Project><PropertyGroup><RestoreSources Condition="''$(OctoNugetPrivateServer)''!=''''">$(OctoNugetPrivateServer)</RestoreSources><RestoreSources Condition="''$(Configuration)''==''DebugL''">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources></PropertyGroup></Project>'
-        Set-Content -Path (Join-Path $ws.Main 'Octo.User.props') -Value '<Project><PropertyGroup><OctoNugetPrivateServer>https://builder:topsecret@nuget.example.invalid/v3/index.json</OctoNugetPrivateServer></PropertyGroup></Project>'
+        Set-Content -Path (Join-Path $inPlace 'Directory.Build.props') -Value @'
+<Project><PropertyGroup>
+  <RestoreSources Condition="'$(RestoreSources)'==''">https://api.nuget.org/v3/index.json;https://nuget.telerik.com/v3/index.json</RestoreSources>
+  <RestoreSources Condition="'$(OctoNugetPrivateServer)'!=''">$(OctoNugetPrivateServer);https://nuget.telerik.com/v3/index.json</RestoreSources>
+  <RestoreSources Condition="'$(Configuration)'=='DebugL'">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources>
+</PropertyGroup></Project>
+'@
+        Set-Content -Path (Join-Path $ws.Main 'Octo.User.props') -Value '<Project><PropertyGroup><OctoNugetPrivateServer>https://builder:top%40secret@nuget.example.invalid/v3/index.json</OctoNugetPrivateServer></PropertyGroup></Project>'
+        # user-level NuGet.Config with the Telerik credentials (never the developer's real one)
+        $script:userConfig = Join-Path $TestDrive 'user-NuGet.Config'
+        Set-Content -Path $userConfig -Value '<configuration><packageSources><add key="Telerik Feed" value="https://nuget.telerik.com/v3/index.json" /></packageSources><packageSourceCredentials><Telerik_x0020_Feed><add key="Username" value="api-key" /><add key="ClearTextPassword" value="telerik-secret" /></Telerik_x0020_Feed></packageSourceCredentials></configuration>'
+        Mock -ModuleName OctoEnvironment Get-OctoUserNuGetConfigFile { $script:userConfig }
         Add-OctoEnvironmentRepo -env env-c2 -path $inPlace -inPlace -Json | Out-Null
         Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
         Mock -ModuleName OctoEnvironment Invoke-KillDotnet { Write-OctoJson -Command 'Invoke-KillDotnet' -Data ([ordered]@{ success = $true; exitCode = 0; killedCount = 0; processes = @() }) }
-        $script:received = $null
+        $script:seen = $null
+        $script:buildFails = $false
+        $script:buildThrows = $false
         Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
-            if ($entry.Name -eq 'octo-sdk') { $script:received = $msbuildProperties.RestoreSources }
+            if ($entry.Name -eq 'octo-sdk') {
+                $config = [string]$msbuildProperties.RestoreConfigFile
+                $script:seen = [pscustomobject]@{
+                    Arguments     = (ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties) -join ' '
+                    Sources       = $msbuildProperties.RestoreSources
+                    Config        = $config
+                    ConfigExisted = (Test-Path -LiteralPath $config)
+                    ConfigText    = if (Test-Path -LiteralPath $config) { Get-Content -LiteralPath $config -Raw } else { '' }
+                    Mode          = if (-not $IsWindows -and (Test-Path -LiteralPath $config)) { [IO.File]::GetUnixFileMode($config) } else { $null }
+                    FolderMode    = if (-not $IsWindows -and (Test-Path -LiteralPath $config)) { [IO.File]::GetUnixFileMode((Split-Path -Parent $config)) } else { $null }
+                }
+                if ($script:buildThrows) { throw 'build crashed' }
+                return [pscustomobject]@{ Success = -not $script:buildFails; LogFile = $null }
+            }
             [pscustomobject]@{ Success = $true; LogFile = $null }
         }
     }
 
-    It 'passes the full private feed to the build but masks it in JSON, plan and host output' {
+    It 'passes the sources without credentials and the credentials in an owner-only RestoreConfigFile that is gone afterwards' {
         $json = (Invoke-BuildEnvironment -env env-c2 -Json) -join "`n"
-        $script:received | Should -Be "$(Join-Path $ws.Root 'wt-env-c2/nuget');https://builder:topsecret@nuget.example.invalid/v3/index.json"
-        $json | Should -Not -Match 'topsecret'
-        $json | Should -Match 'https://\*\*\*@nuget.example.invalid'
-        ((Invoke-BuildEnvironment -env env-c2 -DryRun -Json) -join "`n") | Should -Not -Match 'topsecret'
-        (Invoke-BuildEnvironment -env env-c2 -DryRun *>&1 | Out-String) | Should -Not -Match 'topsecret'
+        $feed = Join-Path $ws.Root 'wt-env-c2/nuget'
+        $seen.Sources | Should -Be "$feed;https://nuget.example.invalid/v3/index.json;https://nuget.telerik.com/v3/index.json"
+        $seen.Arguments | Should -Not -Match 'secret'
+        $seen.Arguments | Should -Match '-p:RestoreConfigFile='
+        $seen.ConfigExisted | Should -BeTrue
+        [xml]$config = $seen.ConfigText
+        @($config.configuration.packageSources.add.value) | Should -Be @($feed, 'https://nuget.example.invalid/v3/index.json', 'https://nuget.telerik.com/v3/index.json')
+        $config.configuration.packageSourceCredentials.'octo-source-2'.add[0].value | Should -Be 'builder'
+        $config.configuration.packageSourceCredentials.'octo-source-2'.add[1].value | Should -Be 'top@secret'
+        $config.configuration.packageSourceCredentials.'octo-source-3'.add[1].value | Should -Be 'telerik-secret'   # carried over from the user-level config
+        if (-not $IsWindows) {
+            $seen.Mode | Should -Be ([IO.UnixFileMode]'UserRead, UserWrite')
+            $seen.FolderMode | Should -Be ([IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+        }
+        Test-Path -LiteralPath $seen.Config | Should -BeFalse
+        Test-Path -LiteralPath (Split-Path -Parent $seen.Config) | Should -BeFalse
+        $json | Should -Not -Match 'secret'
+    }
+
+    It 'removes the credentials file after a failing and after a throwing build' {
+        $script:buildFails = $true
+        (Get-Doc (Invoke-BuildEnvironment -env env-c2 -Json)).data.success | Should -BeFalse
+        $seen.ConfigExisted | Should -BeTrue
+        Test-Path -LiteralPath $seen.Config | Should -BeFalse
+
+        $script:buildFails = $false
+        $script:buildThrows = $true
+        { Invoke-BuildEnvironment -env env-c2 -Json } | Should -Throw
+        $seen.ConfigExisted | Should -BeTrue
+        Test-Path -LiteralPath $seen.Config | Should -BeFalse
+    }
+
+    It '-DryRun creates no credentials file and prints no credential' {
+        $text = (Invoke-BuildEnvironment -env env-c2 -DryRun -Json) -join "`n"
+        $text | Should -Not -Match 'secret'
+        $text | Should -Match 'generated at build time'
+        (Invoke-BuildEnvironment -env env-c2 -DryRun *>&1 | Out-String) | Should -Not -Match 'secret'
+    }
+
+    It 'Split-OctoSourceCredentials unescapes credentials and keeps the order' {
+        InModuleScope OctoEnvironment {
+            $split = Split-OctoSourceCredentials -restoreSources '/feed;https://u%3Ax:p%40ss@a.invalid/v3;https://b.invalid/v3'
+            @($split.Sources) | Should -Be @('/feed', 'https://a.invalid/v3', 'https://b.invalid/v3')
+            $split.Credentials['https://a.invalid/v3'].User | Should -Be 'u:x'
+            $split.Credentials['https://a.invalid/v3'].Password | Should -Be 'p@ss'
+        }
     }
 }

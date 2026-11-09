@@ -323,13 +323,12 @@ function Initialize-OctoLaneUserProps {
             $status = "would-create"
         }
     }
-    elseif (Select-String -Path $propsPath -Pattern $standardLine -SimpleMatch -Quiet) {
-        $status = "ok"
-    }
     elseif (Test-OctoLaneUserPropsRestorePackagesPath -propsPath $propsPath) {
-        # Declared, but with another value: isolated per Get-OctoLaneBuildSettings, yet octo-tools purges
-        # and sets NUGET_PACKAGES for <lane>/.nuget-packages. Never rewrite a value somebody chose.
-        $status = "custom-restore-packages-path"
+        # Only a real declaration counts (XML, so a commented-out line is no setting). The standard value is ok;
+        # another value is isolated per Get-OctoLaneBuildSettings, yet octo-tools purges and sets NUGET_PACKAGES for
+        # <lane>/.nuget-packages - never rewrite a value somebody chose.
+        $declared = @(([xml](Get-Content -Path $propsPath -Raw)).SelectNodes("//*[local-name()='RestorePackagesPath']") | ForEach-Object { ([string]$_.InnerText).Trim() })
+        $status = if ($declared -contains '$(MSBuildThisFileDirectory).nuget-packages') { "ok" } else { "custom-restore-packages-path" }
     }
     elseif (-not $AddRestorePackagesPath) {
         $status = "missing-restore-packages-path"
