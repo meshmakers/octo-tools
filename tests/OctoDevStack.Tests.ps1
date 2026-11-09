@@ -219,6 +219,24 @@ Describe 'Start-OctoDevStack' {
         Mock -ModuleName OctoDevStack Get-Command { $null } -ParameterFilter { $Name -eq 'claude' }
     }
 
+    It 'refuses when something else answers /health on the port' {
+        Mock -ModuleName OctoDevStack Invoke-RestMethod { @{ status = 'ok' } }
+        Mock -ModuleName OctoDevStack lsof { '555' }
+        Mock -ModuleName OctoDevStack ps { 'node /tmp/other-health-server.js' }
+        $path = New-FakeCheckout 'foreignhealth' -Built
+
+        $json = Start-OctoDevStack -Path $path -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.alreadyRunning | Should -BeFalse
+        $json.data.error | Should -BeLike '*PID 555*not octo-devstack*'
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+
+        $status = Get-OctoDevStackStatus -Path $path -Json | ConvertFrom-Json
+        $status.data.healthy | Should -BeFalse
+        $status.data.running | Should -BeFalse
+    }
+
     It 'does nothing when /health already answers' {
         Mock -ModuleName OctoDevStack Invoke-RestMethod { @{ status = 'ok' } }
         Mock -ModuleName OctoDevStack lsof { '777' }
@@ -357,6 +375,17 @@ Describe 'Start-OctoDevStack' {
             $json = Start-OctoDevStack -Path (New-FakeCheckout 'claudepresent' -Built) -RegisterClaude -Json | ConvertFrom-Json
             $json.data.claudeRegistration | Should -Be 'present'
             @($script:ClaudeCalls | Where-Object { $_ -like 'mcp add*' }) | Should -HaveCount 0
+        }
+
+        It 'reports a mismatch and changes nothing when octo-devstack is registered with another URL' {
+            Mock -ModuleName OctoDevStack claude {
+                $script:ClaudeCalls.Add($args -join ' ')
+                $global:LASTEXITCODE = 0
+                if ($args[1] -eq 'list') { 'octo-devstack: http://127.0.0.1:5199/mcp (HTTP) - Connected' }
+            }
+            $json = Start-OctoDevStack -Path (New-FakeCheckout 'claudemismatch' -Built) -RegisterClaude -Json 3>$null | ConvertFrom-Json
+            $json.data.claudeRegistration | Should -Be 'mismatch'
+            @($script:ClaudeCalls | Where-Object { $_ -like 'mcp add*' -or $_ -like 'mcp remove*' }) | Should -HaveCount 0
         }
 
         It 'only reports the command when claude is not on PATH' {

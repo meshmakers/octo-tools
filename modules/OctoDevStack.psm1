@@ -339,8 +339,9 @@ function Install-OctoDevStack {
 function Register-OctoDevStackClaude {
     <#
     .SYNOPSIS
-        Adds the MCP server to Claude Code (user scope) unless `claude mcp list` already names octo-devstack.
-        Returns added | present | notFound | failed.
+        Adds the MCP server to Claude Code (user scope) unless `claude mcp list` already has octo-devstack with
+        this URL. Returns added | present | mismatch | notFound | failed; mismatch = registered with another URL
+        (nothing is changed, the commands to fix it are printed).
     #>
     param([string]$McpUrl, [bool]$Quiet)
     $addCommand = "claude mcp add --transport http --scope user octo-devstack $McpUrl"
@@ -348,10 +349,16 @@ function Register-OctoDevStackClaude {
         if (-not $Quiet) { Write-Host "claude is not on PATH. Register the MCP server yourself: $addCommand" -ForegroundColor Yellow }
         return 'notFound'
     }
-    $list = (@(claude mcp list 2>&1) | ForEach-Object { "$_" }) -join "`n"
-    if ($list -match 'octo-devstack') {
-        if (-not $Quiet) { Write-Host 'Claude Code already knows the MCP server octo-devstack.' -ForegroundColor Green }
-        return 'present'
+    $entries = @(@(claude mcp list 2>&1) | ForEach-Object { "$_" } | Where-Object { $_ -match '^\s*octo-devstack\b' })
+    if ($entries.Count -gt 0) {
+        if (@($entries | Where-Object { $_.Contains($McpUrl) }).Count -gt 0) {
+            if (-not $Quiet) { Write-Host "Claude Code already knows the MCP server octo-devstack ($McpUrl)." -ForegroundColor Green }
+            return 'present'
+        }
+        if (-not $Quiet) {
+            Write-Warning "Claude Code has octo-devstack registered with another URL ($($entries[0].Trim())). To point it at $McpUrl run: claude mcp remove --scope user octo-devstack; $addCommand"
+        }
+        return 'mismatch'
     }
     $null = claude mcp add --transport http --scope user octo-devstack $McpUrl 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -430,7 +437,14 @@ function Start-OctoDevStack {
     }
 
     if (Test-OctoDevStackHealth -Port $Port) {
-        $listener = @(Get-OctoDevStackListener -Port $Port | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+        $listeners = @(Get-OctoDevStackListener -Port $Port)
+        $listener = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+        if ($listeners.Count -gt 0 -and -not $listener) {
+            # Something answers /health on the port, but it is not octo-devstack.
+            $who = ($listeners | ForEach-Object { "PID $($_.pid) ($($_.commandLine))" }) -join ', '
+            & $finish $false "Port $Port is in use by $who, which is not octo-devstack. Stop that process or pass -Port."
+            return
+        }
         $result.alreadyRunning = $true
         $result.pid = if ($listener) { $listener.pid } else { $null }
         if (-not $Json) {
@@ -692,8 +706,10 @@ function Get-OctoDevStackStatus {
     $statePath = Get-OctoDevStackStatePath
     $installed = Test-Path -LiteralPath (Join-Path $repoPath '.git')
     $git = if ($installed) { Get-OctoDevStackGitInfo -Path $repoPath } else { [pscustomobject]@{ branch = $null; commit = $null; dirty = $null; behind = $null } }
-    $healthy = Test-OctoDevStackHealth -Port $Port
-    $listener = @(Get-OctoDevStackListener -Port $Port | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+    $listeners = @(Get-OctoDevStackListener -Port $Port)
+    $listener = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+    # A process that answers /health but is visibly not octo-devstack does not count as running octo-devstack.
+    $healthy = (Test-OctoDevStackHealth -Port $Port) -and -not ($listeners.Count -gt 0 -and -not $listener)
     $launchAgent = if (Test-OctoDevStackMacOS) { Test-Path -LiteralPath (Get-OctoDevStackLaunchAgentPath) } else { $null }
 
     $status = [ordered]@{
