@@ -380,7 +380,9 @@ function New-OctoSolutionFilter {
     )
     # One folder per checkout (hash of the solution's parent directory) so concurrent runs in the
     # main and dev checkouts never overwrite each other's filters.
-    $checkout = [IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $solutionPath)))
+    # The repository folder, not the lane: a worktree and the lane repo of the same solution name must not
+    # share a filter file when they build at the same time.
+    $checkout = [IO.Path]::GetFullPath((Split-Path -Parent $solutionPath))
     $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($checkout.ToLowerInvariant()))).Substring(0, 12)
     $directory = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath "octo-buildrange/$hash"
     if (!(Test-Path $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
@@ -970,9 +972,15 @@ function Invoke-OctoBuildRangeCore {
     if ($privateFeed) {
         $dotnetRepos = @($plan | Where-Object { $_.Mode -eq 'dotnet' })
         if ($dotnetRepos.Count -gt 1) {
-            $missing = @(@('RestoreSources', 'RestorePackagesPath') | Where-Object { -not $msbuildProperties.ContainsKey($_) })
+            # Effective properties per repository: the run-wide ones, overridden by -msbuildPropertiesPerRepo.
+            $missing = @(foreach ($repo in $dotnetRepos) {
+                    $perRepo = if ($msbuildPropertiesPerRepo.ContainsKey($repo.Name)) { $msbuildPropertiesPerRepo[$repo.Name] } else { @{} }
+                    foreach ($key in @('RestoreSources', 'RestorePackagesPath')) {
+                        if (-not $msbuildProperties.ContainsKey($key) -and -not $perRepo.ContainsKey($key)) { "$($repo.Name): $key" }
+                    }
+                })
             if ($missing.Count -gt 0) {
-                & $fail "-feedPath with $($dotnetRepos.Count) dotnet repositories ($(($dotnetRepos.Name) -join ', ')) needs -msbuildProperties with RestoreSources (the private feed first) and RestorePackagesPath (a private package cache); missing: $($missing -join ', ')."
+                & $fail "-feedPath with $($dotnetRepos.Count) dotnet repositories ($(($dotnetRepos.Name) -join ', ')) needs RestoreSources (the private feed first) and RestorePackagesPath (a private package cache) for every one of them, via -msbuildProperties or -msbuildPropertiesPerRepo; missing: $($missing -join ', ')."
                 return
             }
         }

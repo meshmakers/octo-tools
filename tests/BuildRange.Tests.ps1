@@ -437,6 +437,15 @@ Describe 'Invoke-BuildRange' {
 Describe 'Copy-NuGetPackages / Copy-AllNuGetPackages' {
     BeforeEach { $script:fake = New-FakeCheckout }
 
+    It 'Copy-NuGetPackages reports a package it could not copy and does not count it' {
+        Mock -ModuleName Copy-NuGetPackages Copy-Item { throw 'disk full' }
+        $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.copiedCount | Should -Be 0
+        @($json.data.errors).Count | Should -BeGreaterThan 0
+        $json.data.error | Should -Match 'disk full'
+    }
+
     It 'Copy-NuGetPackages -modifiedSince copies only newer packages' {
         $since = (Get-Date).AddMinutes(-1)
         Set-Content (Join-Path $fake.Checkout 'octo-sdk/src/Sdk.Common/bin/DebugL/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') 'fresh'
@@ -1222,11 +1231,16 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
         $feed = Join-Path $TestDrive 'feeds/session-4'
         $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeFalse
-        $json.data.error | Should -BeLike '*missing: RestoreSources, RestorePackagesPath*'
+        $json.data.error | Should -BeLike '*missing: octo-construction-kit-engine: RestoreSources, octo-construction-kit-engine: RestorePackagesPath, octo-sdk: RestoreSources, octo-sdk: RestorePackagesPath.'
 
         $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeFalse
-        $json.data.error | Should -BeLike '*missing: RestorePackagesPath.'
+        $json.data.error | Should -BeLike '*missing: octo-construction-kit-engine: RestorePackagesPath, octo-sdk: RestorePackagesPath.'
+
+        # per-repository overrides count: the run-wide RestoreSources plus RestorePackagesPath for one repo only
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -msbuildPropertiesPerRepo @{ 'octo-sdk' = @{ RestorePackagesPath = 'cache' } } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*missing: octo-construction-kit-engine: RestorePackagesPath.'
         Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
         Test-Path $feed | Should -BeFalse
 
@@ -1236,6 +1250,10 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
 
         # both properties given: accepted
         $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties $feedProps -Json | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+
+        # also accepted when the cache comes per repository
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -msbuildPropertiesPerRepo @{ 'octo-construction-kit-engine' = @{ RestorePackagesPath = 'c1' }; 'octo-sdk' = @{ RestorePackagesPath = 'c2' } } -Json | ConvertFrom-Json
         $json.data.success | Should -BeTrue
     }
 

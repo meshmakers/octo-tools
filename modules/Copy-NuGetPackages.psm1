@@ -54,6 +54,7 @@ function Copy-NuGetPackages
     $filter = "Meshmakers.*.999.0.0.nupkg"
     $copiedCount = 0
     $copiedFiles = @()
+    $copyErrors = @()
     $skipped = @()
 
     if (-not $Json) { Write-Host "Searching at $directory" }
@@ -96,7 +97,15 @@ function Copy-NuGetPackages
                     }
                 }
                 if (-not $Json) { Write-Host "Copy $file" -ForegroundColor Green }
-                Copy-Item -Path $file -Destination $branchNugetPath -Force
+                try {
+                    Copy-Item -Path $file -Destination $branchNugetPath -Force -ErrorAction Stop
+                }
+                catch {
+                    # A package that did not land must not count as copied, and the result must say so.
+                    $copyErrors += "$($file.Name): $($_.Exception.Message)"
+                    Write-Error "Could not copy $($file.Name) to ${branchNugetPath}: $($_.Exception.Message)" -ErrorAction Continue
+                    continue
+                }
                 $copiedCount++
                 $copiedFiles += $file.Name
             }
@@ -104,7 +113,7 @@ function Copy-NuGetPackages
     }
 
     if ($Json) {
-        Write-OctoJson -Command 'Copy-NuGetPackages' -Data ([ordered]@{ success = $true; copiedCount = $copiedCount; files = @($copiedFiles); skipped = @($skipped) })
+        Write-OctoJson -Command 'Copy-NuGetPackages' -Data ([ordered]@{ success = ($copyErrors.Count -eq 0); copiedCount = $copiedCount; files = @($copiedFiles); skipped = @($skipped); errors = @($copyErrors); error = if ($copyErrors.Count -gt 0) { $copyErrors -join '; ' } else { $null } })
         return
     }
 }
