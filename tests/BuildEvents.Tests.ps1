@@ -196,10 +196,12 @@ Describe 'Invoke-BuildRange -EventsFile' {
         Invoke-BuildRange -branch main -from octo-construction-kit-engine -EventsFile $events -WhatIf -Json | Out-Null
         Test-Path $events | Should -BeFalse
 
+        # TestDrive is shared by the tests of this Describe block: compare against the event files already there.
+        $before = @(Get-ChildItem -Path $TestDrive -Recurse -File -Filter '*.jsonl').Count
         Push-Location $TestDrive
         try { Invoke-BuildRange -branch main -from octo-construction-kit-engine -Json | Out-Null }
         finally { Pop-Location }
-        @(Get-ChildItem -Path $TestDrive -Recurse -File -Filter '*.jsonl').Count | Should -Be 0
+        @(Get-ChildItem -Path $TestDrive -Recurse -File -Filter '*.jsonl').Count | Should -Be $before
     }
 
     It 'leaves the -Json output unchanged' {
