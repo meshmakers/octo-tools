@@ -1201,6 +1201,18 @@ function Invoke-OctoBuildRangeCore {
             $copyArgs = @{ directory = $entry.Path; branch = $branch; onlyChanged = $true; Json = $true }
             if ($privateFeed) { $copyArgs['nugetPath'] = $nugetTarget }
             $copy = Copy-NuGetPackages @copyArgs | ConvertFrom-Json
+            if ($null -eq $copy -or $copy.data.success -ne $true) {
+                # e.g. an unwritable -feedPath: a repository whose packages did not land is not a success.
+                $packageWatch.Stop()
+                $result.packageDuration = $packageWatch.Elapsed
+                $result.success = $false
+                $results.Add($result)
+                $failed = $entry
+                $failedStep = 'packages'
+                Write-Error "Copy-NuGetPackages failed for $($entry.Name)$(if ($copy.data.error) { ": $($copy.data.error)" })"
+                & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
+                break
+            }
             $copiedFiles = @($copy.data.files | Where-Object { $_ })
             $result.copiedCount = $copiedFiles.Count
             if ($purgeCaches) {

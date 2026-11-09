@@ -318,6 +318,7 @@ Describe 'Invoke-BuildAll -EventsFile' {
         $script:events = Join-Path $TestDrive "events-$([guid]::NewGuid()).jsonl"
         Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
         Mock -ModuleName Invoke-BuildAll Compile-Repo { (Split-Path -Leaf $path) -ne 'octo-sdk' }
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
     }
 
     It 'writes plan, repoStart/phase/repoDone per repository and done with the first failure' {

@@ -179,7 +179,11 @@ Describe 'Get-OctoBuildOrder' {
 }
 
 Describe 'Invoke-BuildAll uses the shared build order unchanged' {
-    BeforeEach { $script:fake = New-FakeCheckout }
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        # Never run a real `dotnet build-server shutdown` (Windows, DebugL main lane).
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
+    }
 
     It 'compiles the repositories in the legacy order' {
         $script:compiled = [System.Collections.Generic.List[string]]::new()
@@ -1011,6 +1015,8 @@ Describe 'Range-run lows (T-L3)' {
 Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574)' {
     BeforeEach {
         $script:fake = New-FakeCheckout
+        # Never run a real `dotnet build-server shutdown` (Windows, DebugL main lane).
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
         Mock -ModuleName Invoke-BuildAll Compile-Repo { $true }
         Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
         $script:laneCache = Join-Path $fake.Checkout '.nuget-packages'
@@ -1153,6 +1159,17 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
         $text | Should -Match ([regex]::Escape($worktree))
     }
 
+    It 'a failed package copy fails the repository with failedStep packages' {
+        Mock -ModuleName Invoke-BuildRange Copy-NuGetPackages { '{"schemaVersion":1,"command":"Copy-NuGetPackages","data":{"success":false,"error":"access denied"}}' }
+
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -Json 2>$null | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.failedRepo | Should -Be 'octo-construction-kit-engine'
+        $json.data.failedStep | Should -Be 'packages'
+        $json.data.repositories[0].success | Should -BeFalse
+    }
+
     It '-feedPath copies into the private feed, skips the purge and keeps the caller''s environment' {
         Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')     # isolated lane: would set NUGET_PACKAGES / RestoreSources
         $feed = Join-Path $TestDrive 'feeds/session-2'
@@ -1290,6 +1307,8 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
 Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
     BeforeEach {
         $script:fake = New-FakeCheckout
+        # Never run a real `dotnet build-server shutdown` (Windows, DebugL main lane).
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
         Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
         $script:seenEnv = @()
         Mock -ModuleName Invoke-BuildAll Compile-Repo {
@@ -1333,7 +1352,7 @@ Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
 
     It 'on Windows a DebugL run whose purge includes the global cache shuts the build servers down first' {
         Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
-        Mock -ModuleName Invoke-BuildAll dotnet { }
+        $global:LASTEXITCODE = 0
 
         Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
         Should -Invoke -ModuleName Invoke-BuildAll dotnet -Times 1 -Exactly
