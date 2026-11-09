@@ -328,9 +328,33 @@ reachable and every link resolves, and that no file carries invisible characters
 Tag, zero-width, bidirectional overrides) - text a reviewer cannot see but a model reads.
 Findings are grouped in the order to fix them: integrity, entry point, docs, budgets.
 
+Every `AGENTS.md` starts the same way. Rule `required-sections` (error) checks that the first
+paragraph below the `# ` title is the opening sentence, and that the level-2 headings are
+exactly these five, in this order:
+
+```markdown
+# <repository>
+
+Instructions for coding agents in this repository. Detail lives in `docs/`; read the matching file before changing the
+code it covers.
+
+## What this repo is
+## Read before you change
+## Build & test
+## Before you commit
+## Rules
+```
+
+Any other `## ` heading is an error: move its content to `docs/` or under one of the five as a
+`###` section. Level-3 and lower headings are not checked. A `CLAUDE.md` that is still the entry
+point is only checked for missing sections. The sentence and the headings are defined once, in
+`modules/agent-docs.rules.json`.
+
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
-from each doc's `applies_to` frontmatter, and writes the `CLAUDE.md` shim. It never writes
-prose, and leaves a `CLAUDE.md` with real content alone unless you pass `-Force`.
+from each doc's `applies_to` frontmatter, writes the `CLAUDE.md` shim, and writes the opening
+sentence below the title of `AGENTS.md` (inserted, or replacing a different first paragraph).
+It never writes headings or other prose, and leaves a `CLAUDE.md` with real content alone
+unless you pass `-Force`.
 
 Rules are `[severity, options]` with `off | warn | error` and cascade: the org defaults in
 `modules/agent-docs.rules.json`, a repository's `.agent-docs.json`, `-ConfigPath`, `-Mode`.
@@ -346,10 +370,11 @@ Initialize-OctoAgentDocs -Path octo-new-repo -WhatIf  # show what it would write
 
 `Initialize-OctoAgentDocs` never overwrites a file and ends with a five-row checklist
 (`AGENTS.md`, `CLAUDE.md`, `docs/`, the migration brief, the check) and the next steps. A
-repository without agent files gets `AGENTS.md` with the required sections and routing
-markers plus the `CLAUDE.md` shim. A repository with a hand-written `CLAUDE.md` gets only
+repository without agent files gets `AGENTS.md` with the title, the opening sentence, the
+required sections and the routing markers plus the `CLAUDE.md` shim. A repository with a hand-written `CLAUDE.md` gets only
 `AGENTS-MIGRATION.md`, a brief for the agent and developer doing the migration, rendered
-from the ruleset; the checker warns while it exists and it is deleted in the migration commit.
+from the ruleset; its first step is the start shown above. The checker warns while it exists
+and it is deleted in the migration commit.
 
 Tests, from the `octo-tools` folder (Pester 5 or later): `Invoke-Pester ./tests`.
 

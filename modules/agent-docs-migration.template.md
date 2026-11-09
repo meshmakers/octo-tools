@@ -20,10 +20,13 @@ CLAUDE.md          the shim, exactly these lines and nothing else:
 docs/<topic>.md    one topic per file, with frontmatter that routes it (see below)
 ```
 
-`AGENTS.md` carries these level-2 sections (the checker requires their presence, not their order), with
-the routing markers under the first:
+`AGENTS.md` starts exactly like this: the title, the opening sentence as its first paragraph, and
+these level-2 headings in this order. No other `## ` heading is allowed; structure inside a section
+uses `###` and below. The routing markers go under `## {{ROUTING}}`:
 
-{{SECTIONS}}
+```markdown
+{{START}}
+```
 
 ```markdown
 {{START_MARKER}}
@@ -56,12 +59,14 @@ Run `Test-OctoAgentDocs -Path {{PATH}}` after every step, not only at the end. T
 rule behind each finding; `Test-OctoAgentDocs -Explain -Rule <id>` explains why it exists and
 what to do.
 
-1. **Read `CLAUDE.md` once, end to end.** List its level-2 and level-3 sections. For each, note
+1. **Create `AGENTS.md` with exactly the start above** - title, opening sentence, the five
+   headings in order - and the routing markers. Nothing else yet.
+2. **Read `CLAUDE.md` once, end to end.** List its level-2 and level-3 sections. For each, note
    whether it is a rule or pointer every session needs, or detail that matters only when a
-   particular part of the code changes. Do not rewrite anything yet.
-2. **Create `AGENTS.md`** with the required sections above and the routing markers. Move the
-   session-wide material into it: how to build and test, what to do before a commit, the rules
-   that apply everywhere. Keep its budget in mind from the start.
+   particular part of the code changes. Then move the session-wide material under the matching
+   heading of `AGENTS.md`: how to build and test, what to do before a commit, the rules that
+   apply everywhere. A `CLAUDE.md` section that fits none of the headings goes to `docs/` or
+   becomes a `###` section under one of them. Keep the budget in mind from the start.
 3. **Move the detail into `docs/`,** one topic per file, with frontmatter. Move text verbatim.
    Shortening, merging and deleting are the developer's decisions, made in review, not the
    agent's; what you believe is obsolete goes into a list for the developer, not into the bin.
@@ -82,8 +87,8 @@ Rules for the agent during the migration:
 - Move, do not rewrite. A sentence that was correct in `CLAUDE.md` is correct in its new home.
 - The checker never writes prose. A missing section or description is yours to write, and you
   write it from what the repository does, not from what a template suggests.
-- `-Fix` is yours to run. It regenerates the two derived regions and nothing else, and it refuses
-  to overwrite content it does not own.
+- `-Fix` is yours to run. It regenerates the two derived regions and the opening sentence, nothing
+  else, and it refuses to overwrite content it does not own.
 - When a budget is exceeded, split by topic before you trim, and trim before you ask for a higher
   limit. A higher limit in `.agent-docs.json` needs a reason in the pull request.
 

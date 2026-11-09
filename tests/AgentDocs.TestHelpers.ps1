@@ -10,8 +10,11 @@ Import-Module (Join-Path $PSScriptRoot '../modules/Initialize-OctoAgentDocs.psm1
 
 $script:Fixtures = [System.Collections.Generic.List[string]]::new()
 $script:Shim = "<!-- Claude Code loads this file. AGENTS.md is the source of truth - edit that, not this. -->`n@AGENTS.md`n"
+# The opening sentence as -Fix and Initialize write it: wrapped at the line-length limit.
+$script:Opening = "Instructions for coding agents in this repository. Detail lives in ``docs/``; read the matching file before changing the`ncode it covers."
 $script:Entry = @(
-    '# Entry', '', '## Read before you change', '', '<!-- >>> generated: routing -->', '<!-- <<< end generated: routing -->', '',
+    '# Entry', '', $script:Opening, '', '## What this repo is', '', '## Read before you change', '',
+    '<!-- >>> generated: routing -->', '<!-- <<< end generated: routing -->', '',
     '## Build & test', '', 'Run the build.', '', '## Before you commit', '', '## Rules', ''
 ) -join "`n"
 $script:DocOne = "---`ndescription: One routed document.`napplies_to: src/**`n---`n# One`n`nText.`n"

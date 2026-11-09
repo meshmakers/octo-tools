@@ -12,7 +12,8 @@ function Initialize-OctoAgentDocs {
     existing file is ever overwritten. The state follows from the repository:
 
       created     neither file, or a CLAUDE.md with nothing but comments and an @import.
-                  AGENTS.md is written with the required sections and the routing markers;
+                  AGENTS.md is written with the title, the opening sentence, the required
+                  sections and the routing markers;
                   CLAUDE.md gets the shim when it is absent. Nothing else is created.
       migration   no AGENTS.md, but a CLAUDE.md with real content. Only AGENTS-MIGRATION.md
                   is written: a brief for the coding agent and the developer doing the
@@ -20,7 +21,8 @@ function Initialize-OctoAgentDocs {
       migrating   AGENTS.md exists, but CLAUDE.md is not the shim yet or the brief is still there.
       migrated    AGENTS.md exists, CLAUDE.md is the shim, no brief is left.
 
-    Section names, the shim text and the budgets come from the built-in ruleset. The check
+    The opening sentence, section names, the shim text and the budgets come from the
+    built-in ruleset. The check
     behind the checklist always runs in logOnly mode.
 
     .PARAMETER Path
@@ -48,6 +50,7 @@ function Initialize-OctoAgentDocs {
     $repoName = Split-Path -Leaf $repo
     $config = Read-OctoAgentDocsBuiltInRuleset
     $sections = @($config.rules['required-sections'][1]['sections'])
+    $routingSection = $config.rules['required-sections'][1]['routingSection']
     $shim = @($config.rules['shim-valid'][1]['content']) -join "`n"
     $briefName = Get-OctoAgentDocsConstant BriefName
     $agentsPath = Join-Path $repo 'AGENTS.md'
@@ -75,7 +78,7 @@ function Initialize-OctoAgentDocs {
     }
     else {
         $state = 'created'
-        $skeleton = "# $repoName`n`n" + (@(for ($i = 0; $i -lt $sections.Count; $i++) { "## $($sections[$i])`n`n" + $(if ($i -eq 0) { "$(Get-OctoAgentDocsConstant RoutingStart)`n$(Get-OctoAgentDocsConstant RoutingEnd)`n`n" }) }) -join '')
+        $skeleton = (Format-EntryStart -Repo $repoName -Config $config) + "`n" + (@(foreach ($s in $sections) { "## $s`n`n" + $(if ($s -eq $routingSection) { "$(Get-OctoAgentDocsConstant RoutingStart)`n$(Get-OctoAgentDocsConstant RoutingEnd)`n`n" }) }) -join '')
         if ($PSCmdlet.ShouldProcess('AGENTS.md', 'Write the entry point with the required sections and routing markers')) { Write-OctoAgentDocsText $agentsPath $skeleton; $written.Add('AGENTS.md') }
         # A thin existing CLAUDE.md is still somebody's pointer; replacing it is what
         # Test-OctoAgentDocs -Fix is for, with its guard and its -WhatIf.
@@ -213,6 +216,17 @@ function Write-InitReport {
     }
 }
 
+function Format-EntryStart {
+    # Title, opening sentence and, with -Headings, the required headings: the start every
+    # AGENTS.md shares. The skeleton and the brief both render it from the ruleset.
+    param([string]$Repo, [hashtable]$Config, [switch]$Headings)
+    $options = $Config.rules['required-sections'][1]
+    $opening = Format-OctoAgentDocsOpening -Sentence $options['opening'] -Width $Config.rules['line-length'][1]['max']
+    $text = "# $Repo`n`n$opening`n"
+    if ($Headings) { $text += "`n" + (@($options['sections'] | ForEach-Object { "## $_" }) -join "`n") + "`n" }
+    return $text
+}
+
 function Format-MigrationBrief {
     param([string]$Repo, [string]$PathArgument, [hashtable]$Config)
     $templatePath = Join-Path $PSScriptRoot 'agent-docs-migration.template.md'
@@ -251,7 +265,8 @@ function Format-MigrationBrief {
         START_MARKER = Get-OctoAgentDocsConstant RoutingStart
         END_MARKER   = Get-OctoAgentDocsConstant RoutingEnd
         SHIM         = (@($Config.rules['shim-valid'][1]['content']) | ForEach-Object { "                   $_" }) -join "`n"
-        SECTIONS     = (@($Config.rules['required-sections'][1]['sections']) | ForEach-Object { "- ``## $_``" }) -join "`n"
+        START        = (Format-EntryStart -Repo $Repo -Config $Config -Headings).TrimEnd("`n")
+        ROUTING      = $Config.rules['required-sections'][1]['routingSection']
         BUDGETS      = $budgets -join "`n"
         RULES        = ($rules -join "`n").TrimEnd("`n")
     }
