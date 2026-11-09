@@ -207,6 +207,24 @@ Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutpu
 
 Details and examples: [docs/tenant-sweep.md](docs/tenant-sweep.md).
 
+# octo-devstack (local stack daemon)
+
+[octo-devstack](https://github.com/meshmakers/octo-devstack) (private) runs the local OctoMesh stack for several
+Claude Code sessions and exposes it as an MCP server. Install, start and register it once:
+
+```powershell
+Install-OctoDevStack                    # clone next to octo-tools (e.g. ~/dev/meshmakers/octo-devstack) and build Release
+Start-OctoDevStack -RegisterClaude      # start in the background, wait for /health, add the MCP server to Claude Code
+Get-OctoDevStackStatus                  # installed / built / behind / running, URLs, config and log paths
+Install-OctoDevStack -Update            # fast-forward main and rebuild; then Stop-OctoDevStack; Start-OctoDevStack
+Stop-OctoDevStack                       # stops the daemon only; the stack services keep running and are adopted
+```
+
+MCP: `http://127.0.0.1:5090/mcp`, status page: `http://127.0.0.1:5090/`, log: `~/.local/state/octo-devstack/daemon.log`,
+configuration: `~/.config/octo-devstack/devstack.yaml` (written on the first start). On macOS
+`Install-OctoDevStack -LaunchAgent` starts it at login instead (launchd restarts it after `Stop-OctoDevStack`; remove it
+with `scripts/install-launchagent.sh --uninstall` in the checkout).
+
 # Tests
 
 Pester tests for the build tooling live in `tests/` (they run against a fake checkout in `TestDrive`
