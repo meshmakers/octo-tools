@@ -454,6 +454,7 @@ Describe 'Invoke-BuildEnvironment' {
         New-OctoEnvironment -env 'env-other' -repos octo-construction-kit-engine -branchName 'feature/o' -Json | Out-Null
         $script:envPath = Join-Path $ws.Root 'wt-env-b'
         Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName OctoEnvironment Invoke-KillDotnet { Write-OctoJson -Command 'Invoke-KillDotnet' -Data ([ordered]@{ success = $true; exitCode = 0; killedCount = 0; processes = @() }) }
         $script:built = [System.Collections.Generic.List[object]]::new()
         Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
             $script:built.Add([pscustomobject]@{ Repo = $entry.Name; Path = $entry.Path; NuGetPackages = $env:NUGET_PACKAGES; VerifyTests = [bool]$verifyTests })
@@ -560,18 +561,19 @@ Describe 'Kill scope and CK sync in environments' {
 Describe 'Environments are octo-claude-pm lanes (wt-<env>)' {
     BeforeEach { $script:ws = New-FakeWorkspace }
 
-    It 'accepts lane names; Remove deletes only what the environment owns (lane content such as claims stays)' {
+    It 'accepts lane names; Remove deletes only what the environment owns (other files in the folder stay)' {
         $lane = Join-Path $ws.Root 'wt-odysseus-kind'
         $doc = Get-Doc (New-OctoEnvironment -env odysseus-kind -repos octo-sdk -branchName 'reimar/AB#1_x' -Json)
         $doc.data.success | Should -BeTrue
         Test-Path (Join-Path $lane 'octo-sdk/.git') -PathType Leaf | Should -BeTrue
-        New-Item -ItemType Directory -Force -Path (Join-Path $lane '.octo/claims') | Out-Null
-        Set-Content -Path (Join-Path $lane '.octo/claims/octo-sdk.md') -Value 'claim'
+        New-Item -ItemType Directory -Force -Path (Join-Path $lane '.octo/notes') | Out-Null
+        Set-Content -Path (Join-Path $lane '.octo/notes/handover.md') -Value 'someone else''s file'
 
         $removed = Get-Doc (Remove-OctoEnvironment -env odysseus-kind -Json)
         $removed.data.success | Should -BeTrue
         @($removed.data.leftOver) | Should -Be @('.octo')
-        Test-Path (Join-Path $lane '.octo/claims/octo-sdk.md') | Should -BeTrue
+        Test-Path (Join-Path $lane '.octo/notes/handover.md') | Should -BeTrue
+        Test-Path (Join-Path $lane '.octo/claims') | Should -BeFalse     # environments create no claims (they live in the base lane)
         foreach ($item in @('octo-sdk', 'nuget', '.nuget-packages', 'Octo.User.props', '.octo/environment.json', '.octo/local-catalog')) {
             Test-Path (Join-Path $lane $item) | Should -BeFalse
         }
@@ -692,6 +694,13 @@ Describe 'Invoke-BuildEnvironment with in-place worktrees' {
         Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree add -q -b 'reimar/AB#6_p' $inPlace | Out-Null
         Add-OctoEnvironmentRepo -env env-p -path $inPlace -inPlace -Json | Out-Null
         Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        $script:killCalls = [System.Collections.Generic.List[object]]::new()
+        $script:killSucceeds = $true
+        Mock -ModuleName OctoEnvironment Invoke-KillDotnet {
+            $script:killCalls.Add([pscustomobject]@{ Root = $branchRootPath; Additional = @($additionalRoots) })
+            if ($script:killSucceeds) { Write-OctoJson -Command 'Invoke-KillDotnet' -Data ([ordered]@{ success = $true; exitCode = 0; killedCount = 1; processes = @([ordered]@{ pid = 9; name = 'dotnet'; reason = 'cwd' }) }) }
+            else { Write-OctoJson -Command 'Invoke-KillDotnet' -Data ([ordered]@{ success = $false; exitCode = 1; error = 'access denied'; killedCount = 0; processes = @() }) }
+        }
         $script:built = [System.Collections.Generic.List[object]]::new()
         Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
             $script:built.Add([pscustomobject]@{ Repo = $entry.Name; Path = $entry.Path; Properties = $msbuildProperties })
@@ -711,6 +720,42 @@ Describe 'Invoke-BuildEnvironment with in-place worktrees' {
         $sdk.Properties.RestorePackagesPath | Should -Be (Join-Path $envPath '.nuget-packages')
         $sdk.Properties.OctoLocalCatalogRootPath | Should -Be (Join-Path $envPath '.octo/local-catalog')
         $doc.data.environment.inPlace.'octo-sdk' | Should -Be $inPlace
+    }
+
+    It 'keeps the own feeds of an in-place repository that declares RestoreSources (Telerik), with the environment feed instead of ../nuget' {
+        Set-Content -Path (Join-Path $inPlace 'Directory.Build.props') -Value @'
+<Project>
+    <PropertyGroup>
+        <RestoreSources Condition="'$(RestoreSources)'==''">https://api.nuget.org/v3/index.json;https://nuget.telerik.com/v3/index.json</RestoreSources>
+        <RestoreSources Condition="'$(OctoNugetPrivateServer)'!=''">$(OctoNugetPrivateServer);https://nuget.telerik.com/v3/index.json</RestoreSources>
+        <RestoreSources Condition="'$(Configuration)'=='DebugL'">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources>
+    </PropertyGroup>
+</Project>
+'@
+        Invoke-BuildEnvironment -env env-p -Json | Out-Null
+        ($script:built | Where-Object Repo -eq 'octo-sdk').Properties.RestoreSources |
+            Should -Be "$(Join-Path $envPath 'nuget');https://api.nuget.org/v3/index.json;https://nuget.telerik.com/v3/index.json"
+    }
+
+    It 'clears the kill scope of wt-<env> and every in-place worktree before the build; -skipKill and -DryRun do not' {
+        $doc = Get-Doc (Invoke-BuildEnvironment -env env-p -Json)
+        $script:killCalls.Count | Should -Be 1
+        $script:killCalls[0].Root | Should -Be $envPath
+        @($script:killCalls[0].Additional) | Should -Be @($inPlace)
+        @($doc.data.killDotnet.roots) | Should -Be @($envPath, $inPlace)
+        $doc.data.killDotnet.killedCount | Should -Be 1
+
+        Invoke-BuildEnvironment -env env-p -skipKill -Json | Out-Null
+        Invoke-BuildEnvironment -env env-p -DryRun -Json | Out-Null
+        $script:killCalls.Count | Should -Be 1
+    }
+
+    It 'does not build when the kill scope cannot be cleared' {
+        $script:killSucceeds = $false
+        $doc = Get-Doc (Invoke-BuildEnvironment -env env-p -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'access denied'
+        $script:built.Count | Should -Be 0
     }
 
     It 'fails when the in-place worktree is gone' {
@@ -733,3 +778,25 @@ Describe 'Get-OctoBuildOrder -additionalRepos' {
         { Get-OctoBuildOrder -branchRootPath $lane -additionalRepos @{ 'something' = $lane } } | Should -Throw '*not an mm-* or octo-*'
     }
 }
+
+Describe 'Get-OctoInPlaceRestoreSources' {
+    It 'resolves the DebugL sources of a repository: own defaults kept, ../nuget replaced, macros dropped' {
+        InModuleScope OctoEnvironment -Parameters @{ root = (Join-Path $TestDrive 'restore-sources') } {
+            $feed = '/env/nuget'
+            $repo = Join-Path $root 'plain'
+            New-Item -ItemType Directory -Force -Path $repo | Out-Null
+            Get-OctoInPlaceRestoreSources -repositoryPath $repo -environmentFeed $feed | Should -Be "$feed;https://api.nuget.org/v3/index.json"
+
+            $repo = Join-Path $root 'sdk-like'
+            New-Item -ItemType Directory -Force -Path $repo | Out-Null
+            Set-Content -Path (Join-Path $repo 'Directory.Build.props') -Value '<Project><PropertyGroup><RestoreSources Condition="''$(OctoNugetPrivateServer)''!=''''">$(OctoNugetPrivateServer)</RestoreSources><RestoreSources Condition="''$(Configuration)''==''DebugL''">$(OctoRepoRootPath)../nuget;$(RestoreSources)</RestoreSources></PropertyGroup></Project>'
+            Get-OctoInPlaceRestoreSources -repositoryPath $repo -environmentFeed $feed | Should -Be "$feed;https://api.nuget.org/v3/index.json"
+
+            $repo = Join-Path $root 'feed-last'
+            New-Item -ItemType Directory -Force -Path $repo | Out-Null
+            Set-Content -Path (Join-Path $repo 'Directory.Build.props') -Value '<Project><PropertyGroup><RestoreSources Condition=" ''$(RestoreSources)'' == '''' ">https://a.example/v3/index.json</RestoreSources><RestoreSources Condition="''$(Configuration)''==''DebugL''">$(RestoreSources);$(OctoRepoRootPath)../nuget</RestoreSources></PropertyGroup></Project>'
+            Get-OctoInPlaceRestoreSources -repositoryPath $repo -environmentFeed $feed | Should -Be "https://a.example/v3/index.json;$feed"
+        }
+    }
+}
+

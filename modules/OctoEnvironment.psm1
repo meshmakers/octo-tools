@@ -281,6 +281,51 @@ function Get-OctoWorktreeInfo {
     }
 }
 
+function Get-OctoInPlaceRestoreSources {
+    <#
+        RestoreSources for an in-place worktree: the environment feed plus the repository's own non-local sources, as
+        its Directory.Build.props would resolve them in DebugL without OctoNugetPrivateServer. Its default
+        (Condition '$(RestoreSources)'=='') is taken as $(RestoreSources); in the DebugL value the entry
+        $(OctoRepoRootPath)../nuget (or ...nuget) is replaced by the environment feed, so e.g. octo-report-services keeps
+        the Telerik feed. Entries with other MSBuild macros are dropped. Without own sources: feed + nuget.org.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$repositoryPath, [Parameter(Mandatory = $true)] [string]$environmentFeed)
+    $nugetOrg = 'https://api.nuget.org/v3/index.json'
+    $props = Join-Path $repositoryPath 'Directory.Build.props'
+    $elements = @()
+    if (Test-Path -LiteralPath $props -PathType Leaf) {
+        try {
+            [xml]$xml = Get-Content -LiteralPath $props -Raw
+            $elements = @($xml.SelectNodes("//*[local-name()='RestoreSources']"))
+        }
+        catch { Write-Warning "Cannot parse $props - in-place RestoreSources fall back to the environment feed and nuget.org: $_" }
+    }
+    if ($elements.Count -eq 0) { return "$environmentFeed;$nugetOrg" }
+
+    $default = ''
+    $debugTemplate = $null
+    foreach ($element in $elements) {
+        $condition = [string]$element.GetAttribute('Condition') -replace '\s', ''
+        $value = ([string]$element.InnerText).Trim()
+        if ($condition -eq '' -or $condition -match "^'\`$\(RestoreSources\)'==''$") { $default = $value }
+        elseif ($condition -match "Configuration\)'=='DebugL'") { $debugTemplate = $value }
+    }
+    if ($null -eq $debugTemplate) { $debugTemplate = '$(OctoRepoRootPath)../nuget;$(RestoreSources)' }
+    $sources = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in ($debugTemplate -split ';')) {
+        $entry = $entry.Trim()
+        if ($entry -eq '') { continue }
+        if ($entry -eq '$(RestoreSources)') {
+            foreach ($own in ($default -split ';')) { $own = $own.Trim(); if ($own -and $own -notmatch '\$\(') { $sources.Add($own) } }
+        }
+        elseif ($entry -match '^\$\(OctoRepoRootPath\)(\.\./)?nuget/?$') { $sources.Add($environmentFeed) }
+        elseif ($entry -notmatch '\$\(') { $sources.Add($entry) }
+    }
+    if (-not $sources.Contains($environmentFeed)) { $sources.Insert(0, $environmentFeed) }
+    if ($sources.Count -eq 1) { $sources.Add($nugetOrg) }
+    return (@($sources | Select-Object -Unique) -join ';')
+}
+
 function Get-OctoAdoptedWorktreeEntry {
     # Manifest entry of an adopted worktree at $path (after the move, or in place).
     param([Parameter(Mandatory = $true)] $info, [Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string]$role)
@@ -1140,7 +1185,7 @@ function Get-OctoAffectedRepos {
     commit that no remote has. There is no -force: commit and push, or discard, first. Feature branches are kept.
     In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are neither checked nor removed. Only what the environment
     owns is deleted (worktrees, nuget/, .nuget-packages/, logFiles/, Octo.User.props, the catalogs, .octo/sync and the
-    manifest); an octo-claude-pm lane folder with other content (e.g. .octo/claims) is kept. Stop the environment's
+    manifest); anything else in the folder is kept, the folder goes only when empty. Stop the environment's
     services first (octo-devstack env_remove does that and releases the lease).
 .EXAMPLE
     Remove-OctoEnvironment -env ab8625-enum-null -WhatIf
@@ -1200,8 +1245,8 @@ function Remove-OctoEnvironment {
     }
     $leftOver = @()
     if ($errors.Count -eq 0) {
-        # Only what the environment owns. An octo-claude-pm lane folder keeps its other content (claims, worktrees of
-        # the sweep layout); the folder goes only when it is empty afterwards.
+        # Only what the environment owns; anything else somebody put there stays, the folder goes only when empty.
+        # (Claims are not here: they live in the base lane, branches/main/.octo/claims/<repo>.md.)
         foreach ($item in @('nuget', '.nuget-packages', 'logFiles', 'Octo.User.props', '.octo/sync', '.octo/local-catalog', '.octo/local-blueprint-catalog', '.octo/environment.json')) {
             $itemPath = Join-Path $environmentPath $item
             if (Test-Path -LiteralPath $itemPath) { Remove-Item -LiteralPath $itemPath -Recurse -Force }
@@ -1233,12 +1278,14 @@ function Remove-OctoEnvironment {
     <env>/nuget, the per-package purge hits only <env>/.nuget-packages (the environment is an isolated lane).
     In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are built from their own folder at their build-order
     position (Invoke-BuildRange -externalRepoPaths) with the environment's feed, cache and CK catalog as global
-    properties: RestoreSources=<env>/nuget;nuget.org, RestorePackagesPath=<env>/.nuget-packages,
-    OctoLocalCatalogRootPath=<env>/.octo/local-catalog (like octo-devstack's private feeds). The global
-    RestoreSources replaces a repository's own default feeds (e.g. Telerik in octo-report-services) - move such a
-    worktree into the environment instead.
+    properties: RestoreSources (Get-OctoInPlaceRestoreSources: the environment feed in place of ../nuget plus the
+    repository's own DebugL sources, e.g. Telerik for octo-report-services; nuget.org when it declares none),
+    RestorePackagesPath=<env>/.nuget-packages, OctoLocalCatalogRootPath=<env>/.octo/local-catalog.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
-    -DryRun prints the plan (Invoke-BuildRange -WhatIf) and changes nothing, also no sync. -EventsFile writes the
+    Before the build the kill scope of the environment is cleared: Invoke-KillDotnet -branchRootPath wt-<env>
+    -additionalRoots <in-place worktrees> (Windows stops the matched dotnet processes, macOS/Linux list them);
+    -skipKill turns it off. -DryRun prints the plan (Invoke-BuildRange -WhatIf) and changes nothing, also no sync and
+    no kill. -EventsFile writes the
     build events with command "Invoke-BuildEnvironment".
 .EXAMPLE
     Invoke-BuildEnvironment -env ab8625-enum-null -syncMain -verifyTests
@@ -1250,6 +1297,7 @@ function Invoke-BuildEnvironment {
         [switch]$verifyTests,
         [switch]$includeTests,
         [string]$EventsFile = '',
+        [switch]$skipKill,
         [switch]$DryRun,
         [switch]$Json
     )
@@ -1276,7 +1324,7 @@ function Invoke-BuildEnvironment {
         if (-not (Test-Path -LiteralPath $repo['path'] -PathType Container)) { & $fail "In-place worktree $($repo['path']) of $($repo['name']) does not exist."; return }
         $external[[string]$repo['name']] = [string]$repo['path']
         $perRepo[[string]$repo['name']] = @{
-            RestoreSources           = "$environmentFeed;https://api.nuget.org/v3/index.json"
+            RestoreSources           = (Get-OctoInPlaceRestoreSources -repositoryPath ([string]$repo['path']) -environmentFeed $environmentFeed)
             RestorePackagesPath      = (Join-Path $environmentPath '.nuget-packages')
             OctoLocalCatalogRootPath = (Join-Path $environmentPath '.octo/local-catalog')
         }
@@ -1284,6 +1332,23 @@ function Invoke-BuildEnvironment {
     try { $order = @(Get-OctoBuildOrder -branchRootPath $environmentPath -excludeFrontend $false -excludeAdditional $false -additionalRepos $external) }
     catch { & $fail $_.Exception.Message; return }
     if ($order.Count -eq 0) { & $fail "Environment $env holds no repository."; return }
+
+    # Kill scope: the lane matching of Invoke-KillDotnet over wt-<env> AND every in-place worktree (Windows stops the
+    # matched dotnet processes, which could lock build output; macOS/Linux only list them).
+    $killRoots = @($environmentPath) + @($external.Values)
+    $kill = [ordered]@{ roots = $killRoots; skipped = [bool]($skipKill -or $DryRun); processes = @(); killedCount = 0 }
+    if (-not $kill.skipped) {
+        $killDoc = (@(Invoke-KillDotnet -branchRootPath $environmentPath -additionalRoots @($external.Values) -Json) -join "`n") | ConvertFrom-Json
+        if ($null -eq $killDoc -or -not $killDoc.data.success) {
+            & $fail "Invoke-KillDotnet failed for the environment scope ($($killRoots -join ', ')): $(if ($killDoc.data.error) { $killDoc.data.error } else { 'dotnet processes could not be stopped' })"
+            return
+        }
+        $kill.processes = @($killDoc.data.processes)
+        $kill.killedCount = [int]$killDoc.data.killedCount
+        if (-not $Json -and $kill.processes.Count -gt 0) {
+            Write-Host "Kill scope $($killRoots -join ', '): $($kill.processes.Count) dotnet process(es), $($kill.killedCount) stopped" -ForegroundColor DarkGray
+        }
+    }
 
     $sync = $null
     if ($syncMain -and -not $DryRun) {
@@ -1326,6 +1391,7 @@ function Invoke-BuildEnvironment {
     }
     $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external }
     $data['synced'] = $null -ne $sync
+    $data['killDotnet'] = $kill
     if ($null -ne $sync) { $data['sync'] = $sync }
     $global:LASTEXITCODE = $exitCode
     Write-OctoJson -Command 'Invoke-BuildEnvironment' -Data $data

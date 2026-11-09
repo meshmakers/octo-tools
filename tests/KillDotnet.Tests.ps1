@@ -246,3 +246,40 @@ Describe 'Get-OctoProcessesUnderFolder (list-only, every process)' {
     }
 }
 
+Describe 'Invoke-KillDotnet -additionalRoots (one scope, several roots)' {
+    BeforeAll {
+        $script:InPlace = Join-Path $TestDrive 'dev/meshmakers/wt-lane-octo-sdk'
+        New-Item -ItemType Directory -Force -Path $script:InPlace | Out-Null
+        Set-Content -Path (Join-Path $script:InPlace '.git') -Value 'gitdir: /somewhere/.git/worktrees/x'
+        $script:NotGit = Join-Path $TestDrive 'dev/meshmakers/plain'
+        New-Item -ItemType Directory -Force -Path $script:NotGit | Out-Null
+    }
+
+    It 'matches processes under the lane folder and under every additional root, stops nothing on macOS/Linux' {
+        Mock -ModuleName Invoke-KillDotnet Test-OctoKillDotnetWindows { $false }
+        Mock -ModuleName Invoke-KillDotnet Get-Process {
+            @(
+                [pscustomobject]@{ Id = 21; Name = 'dotnet'; CommandLine = 'dotnet A.dll'; Modules = @() },
+                [pscustomobject]@{ Id = 22; Name = 'dotnet'; CommandLine = 'dotnet B.dll'; Modules = @() },
+                [pscustomobject]@{ Id = 23; Name = 'dotnet'; CommandLine = 'dotnet C.dll'; Modules = @() }
+            )
+        }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords { @('p21', "n$script:Lane/octo-sdk/bin", 'p22', "n$script:InPlace/bin/DebugL", 'p23', "n$script:OtherLane/octo-sdk") }
+        Mock -ModuleName Invoke-KillDotnet Stop-Process { throw 'must not stop' }
+
+        $doc = (Invoke-KillDotnet -branchRootPath $script:Lane -additionalRoots $script:InPlace -Json) | ConvertFrom-Json
+        $doc.data.success | Should -BeTrue
+        @($doc.data.processes.pid) | Should -Be @(21, 22)
+        @($doc.data.roots) | Should -Be @($script:Lane, $script:InPlace)
+    }
+
+    It 'refuses an additional root that is no git repository or worktree, and -additionalRoots without a lane' {
+        Mock -ModuleName Invoke-KillDotnet Get-Process { throw 'must not look at processes' }
+        $doc = (Invoke-KillDotnet -branchRootPath $script:Lane -additionalRoots $script:NotGit -Json -ErrorAction SilentlyContinue) | ConvertFrom-Json
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'no git repository or worktree'
+        $err = Invoke-KillDotnet -additionalRoots $script:InPlace 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
+        "$err" | Should -Match 'needs -branchRootPath'
+    }
+}
+
