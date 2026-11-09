@@ -2,8 +2,10 @@
 <#
     Pester tests for Invoke-KillDotnet (legacy: every dotnet process; lane mode: -branchRootPath).
 
-    No process is ever stopped or started: Get-Process, lsof, Stop-Process, `dotnet` and the OS check
-    (Test-OctoKillDotnetWindows) are mocked, the "processes" are plain objects.
+    No process is ever stopped or started: Get-Process, the lsof wrapper (Get-OctoProcessCwdRecords),
+    Stop-Process, `dotnet` and the OS check (Test-OctoKillDotnetWindows) are mocked, the "processes" are
+    plain objects. Native tools are never mocked by name (Pester cannot mock a command that does not
+    exist, e.g. lsof on Windows); `dotnet` gets a stub when it is not installed.
 
     Run:  Invoke-Pester ./tests/KillDotnet.Tests.ps1
 #>
@@ -20,9 +22,20 @@ BeforeAll {
     # Lane mode refuses folders that do not look like a lane: give the fake lane a repository folder.
     New-Item -ItemType Directory -Force -Path (Join-Path $script:Lane 'octo-sdk'), $script:Daemon | Out-Null
 
+    # Pester can only mock commands that exist: stub dotnet on a machine without it.
+    $script:Stubs = @()
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+        New-Item -Path 'function:global:dotnet' -Value { } | Out-Null
+        $script:Stubs += 'dotnet'
+    }
+
     function New-FakeProcess([int]$id, [string]$name = 'dotnet', [string]$command = '', [string[]]$modules = @()) {
         [pscustomobject]@{ Id = $id; Name = $name; CommandLine = $command; Modules = @($modules | ForEach-Object { [pscustomobject]@{ FileName = $_ } }) }
     }
+}
+
+AfterAll {
+    foreach ($name in $script:Stubs) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }
 }
 
 Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
@@ -40,7 +53,7 @@ Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
                 (New-FakeProcess 105 -command "dotnet $(Join-Path $script:Daemon 'octo-devstack.dll') --events $(Join-Path $script:Lane 'x.jsonl')")
             )
         }
-        Mock -ModuleName Invoke-KillDotnet lsof {
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords {
             @('p101', "n$(Join-Path $script:Lane 'octo-sdk/bin/DebugL/net10.0')",
                 'p102', "n$script:Daemon",
                 'p103', "n$(Join-Path $script:OtherLane 'octo-sdk/bin/DebugL/net10.0')",
@@ -61,7 +74,7 @@ Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
         @($json.data.processes.name) | Should -Be @('dotnet', 'dotnet')
         Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 0
         Should -Invoke -ModuleName Invoke-KillDotnet dotnet -Times 0
-        Should -Invoke -ModuleName Invoke-KillDotnet lsof -Times 1 -Exactly
+        Should -Invoke -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords -Times 1 -Exactly
     }
 
     It 'returns the matched processes without -Json' {
@@ -129,7 +142,7 @@ Describe 'Invoke-KillDotnet on Windows' {
         Mock -ModuleName Invoke-KillDotnet Test-OctoKillDotnetWindows { $true }
         Mock -ModuleName Invoke-KillDotnet Stop-Process { }
         Mock -ModuleName Invoke-KillDotnet dotnet { }
-        Mock -ModuleName Invoke-KillDotnet lsof { }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords { }
     }
 
     It 'lane mode stops only processes with a module or command line under the lane, without build-server shutdown' {
@@ -151,7 +164,7 @@ Describe 'Invoke-KillDotnet on Windows' {
         Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -contains 201 }
         Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -contains 203 }
         Should -Invoke -ModuleName Invoke-KillDotnet dotnet -Times 0
-        Should -Invoke -ModuleName Invoke-KillDotnet lsof -Times 0
+        Should -Invoke -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords -Times 0
     }
 
     It 'lane mode reports a process it could not stop and does not count it as killed' {

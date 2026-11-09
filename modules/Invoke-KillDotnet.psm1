@@ -146,7 +146,7 @@ function Get-OctoLaneDotnetProcesses {
     # command line alone does not show the lane - read the working directories.
     if (-not $windows -and $candidates.Count -gt 0) {
         $currentPid = $null
-        foreach ($line in @(& lsof -a -d cwd -p (($candidates.Pid) -join ',') -Fpn 2>$null)) {
+        foreach ($line in @(Get-OctoProcessCwdRecords -processIds $candidates.Pid)) {
             if ($line -like 'p*') { $currentPid = [int]$line.Substring(1) }
             elseif ($line -like 'n*' -and $null -ne $currentPid) {
                 $candidate = $candidates | Where-Object { $_.Pid -eq $currentPid } | Select-Object -First 1
@@ -156,6 +156,14 @@ function Get-OctoLaneDotnetProcesses {
     }
 
     return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $branchRootPath)
+}
+
+function Get-OctoProcessCwdRecords {
+    # The lsof field output (`p<pid>` / `n<cwd>` lines) for the working directories of the given processes
+    # (macOS/Linux only). Separate so tests can mock it: lsof does not exist on Windows, and Pester can
+    # only mock commands that exist.
+    param([int[]]$processIds)
+    return @(& lsof -a -d cwd -p ($processIds -join ',') -Fpn 2>$null)
 }
 
 function Test-OctoLaneFolder {
