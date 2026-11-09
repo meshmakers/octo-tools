@@ -182,7 +182,7 @@ Describe 'Start-OctoDevStackDaemon' {
         $json.data.success | Should -BeTrue
         $json.data.pid | Should -Be 4242
         Should -Invoke -ModuleName OctoDevStack Start-Process -Times 1 -ParameterFilter {
-            $FilePath -eq 'dotnet' -and $ArgumentList[0] -eq (Join-Path $checkout 'bin/Release/net10.0/octo-devstack.dll') -and
+            $FilePath -eq 'dotnet' -and $ArgumentList[0] -eq ('"' + (Join-Path $checkout 'bin/Release/net10.0/octo-devstack.dll') + '"') -and
             $ArgumentList[1] -eq '--url' -and $ArgumentList[2] -eq 'http://127.0.0.1:5090' -and
             $WindowStyle -eq 'Hidden' -and $RedirectStandardOutput -like '*daemon.log' -and $RedirectStandardError -like '*daemon.err.log'
         }

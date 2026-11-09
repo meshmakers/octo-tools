@@ -460,7 +460,7 @@ function Invoke-BuildAllCore {
         # Again right before the package folders are wiped (lane processes only, see above).
         if (-not $skipKill) {
             $global:LASTEXITCODE = 0   # a stale exit code of an earlier native call must not count as a cleanup failure
-        [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json)
+            [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json)
             $failure = & $cleanupFailure
             if ($failure) { & $reportCleanupFailure $failure; return }
         }
@@ -492,6 +492,14 @@ function Invoke-BuildAllCore {
         $errorsBefore = $global:Error.Count
         Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json | Out-Null
         if ($global:Error.Count -gt $errorsBefore) { $purgeErrors += @($global:Error[0..($global:Error.Count - $errorsBefore - 1)]) }
+
+        # A reset that left packages behind (locked files on Windows) would build against stale 999.0.0 packages:
+        # stop before building; done reports failedStep "purge".
+        if ($purgeErrors.Count -gt 0) {
+            $events.FailedStep = 'purge'
+            & $reportCleanupFailure "Invoke-BuildAll: the DebugL package purge failed ($($purgeErrors.Count) error(s), first: $($purgeErrors[0])); nothing was built. Stop the processes that lock the files and run it again."
+            return
+        }
     }
 
     # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run; empty for the legacy
@@ -500,6 +508,7 @@ function Invoke-BuildAllCore {
     $savedEnvironment = Set-OctoBuildEnvironment -environment $runEnvironment
     $repoIndex = 0
     $firstFailedRepo = $null
+    $runError = $null
     try {
         foreach ($entry in $plan) {
             $repoIndex++
@@ -519,7 +528,17 @@ function Invoke-BuildAllCore {
             if ($configuration -ieq "DebugL" -and -not $skipCkSync) {
                 [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
             }
-            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name] -events $events
+            # A failed package copy (Copy-NuGetPackages throws) leaves the dependent repositories without the new
+            # packages: the repository counts as failed and the run stops.
+            $copyError = $null
+            try {
+                [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name] -events $events
+            }
+            catch {
+                if ($_.Exception.Message -notlike 'Copy-NuGetPackages:*') { throw }
+                $buildStatus = $false
+                $copyError = "$($entry.name): $($_.Exception.Message)"
+            }
             $repoStopWatch.Stop()
             $allStatus.Add($entry.name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
             # Invoke-BuildAll measures one duration per repository and copies without a per-repository
@@ -539,6 +558,7 @@ function Invoke-BuildAllCore {
                 })
             $events.RepoDone = $true
             if (-not $buildStatus -and -not $firstFailedRepo) { $firstFailedRepo = $entry.name }
+            if ($copyError) { $runError = $copyError; break }
         }
     }
     finally {
@@ -546,9 +566,9 @@ function Invoke-BuildAllCore {
     }
     # Invoke-BuildAll does not stop at a failing repository; done reports the first one. A DebugL reset
     # whose purge left files behind (locked on Windows) is not a success either: failedStep "purge".
-    $events.Success = ($null -eq $firstFailedRepo) -and $purgeErrors.Count -eq 0
+    $events.Success = ($null -eq $firstFailedRepo)
     $events.FailedRepo = $firstFailedRepo
-    $events.FailedStep = if ($firstFailedRepo) { 'build' } elseif ($purgeErrors.Count -gt 0) { 'purge' } else { $null }
+    $events.FailedStep = if ($runError) { 'packages' } elseif ($firstFailedRepo) { 'build' } else { $null }
     $events.Completed = $true
 
     # Print the status of all builds
@@ -571,6 +591,7 @@ function Invoke-BuildAllCore {
         $data = @{
             branch        = $branch
             configuration = $configuration
+            success       = [bool]$events.Success
             repositories  = $repoEntries
             summary       = [ordered]@{
                 total             = $repositoryCount
@@ -580,10 +601,13 @@ function Invoke-BuildAllCore {
                 elapsedSeconds    = $stopWatch.Elapsed.TotalSeconds
             }
         }
+        if ($runError) { $data.error = "Package copy failed, the run stopped: $runError" }
         Write-OctoJson -Command 'Invoke-BuildAll' -Data $data
+        if ($runError) { Write-Error $data.error }
         return
     }
 
+    if ($runError) { Write-Error "Package copy failed, the run stopped: $runError" }
     Write-Host "Summary:"
     Write-Host "---------------------------------"
     Write-Host "Build branch $branch with configuration $configuration"

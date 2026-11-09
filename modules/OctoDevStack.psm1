@@ -128,7 +128,7 @@ function Write-OctoDevStackResult([string]$Command, [bool]$Json, [bool]$Success,
     $global:LASTEXITCODE = $exitCode
     if ($ErrorMessage) { $Data.error = $ErrorMessage }
     if ($Json) { Write-OctoJson -Command $Command -Data (New-OctoActionResult -Success $Success -ExitCode $exitCode -Extra $Data) }
-    if (-not $Success) { Write-Error $ErrorMessage -ErrorAction Continue }
+    if (-not $Success) { Write-Error $ErrorMessage }
 }
 
 # ---------------------------------------------------------------------------------------------------------
@@ -214,7 +214,8 @@ function Start-OctoDevStackDaemon {
         $errorLogPath = Join-Path $statePath 'daemon.err.log'
         Save-OctoDevStackPreviousLog -LogPath $logPath
         Save-OctoDevStackPreviousLog -LogPath $errorLogPath
-        $process = Start-Process -FilePath 'dotnet' -ArgumentList @($dll, '--url', $url) -WorkingDirectory $repoPath `
+        # Start-Process joins the arguments with spaces and does not quote them: a path with spaces needs quotes.
+        $process = Start-Process -FilePath 'dotnet' -ArgumentList @("`"$dll`"", '--url', $url) -WorkingDirectory $repoPath `
             -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru
         $processId = if ($process) { [int]$process.Id } else { $null }
     }
