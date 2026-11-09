@@ -174,6 +174,18 @@ function Start-OctoDevStackDetachedUnix {
     return [int]$text
 }
 
+function Save-OctoDevStackPreviousLog([string]$LogPath) {
+    <#
+    .SYNOPSIS
+        Windows: moves <name>.log to <name>.prev.log (replacing an older one) before a start, because
+        Start-Process -RedirectStandardOutput/-RedirectStandardError cannot append. One previous run is kept.
+    #>
+    if (-not (Test-Path -LiteralPath $LogPath)) { return }
+    $previous = [IO.Path]::ChangeExtension($LogPath, '.prev.log')
+    try { Move-Item -LiteralPath $LogPath -Destination $previous -Force -ErrorAction Stop }
+    catch { Write-Warning "Could not keep $LogPath as $previous ($($_.Exception.Message)); it is overwritten." }
+}
+
 function Test-OctoDevStackProcessAlive([int]$ProcessId) {
     return [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
@@ -418,7 +430,9 @@ function Start-OctoDevStack {
         - The build is missing: refused with a hint to run Install-OctoDevStack (or builds with -Build).
         - Default: started detached. macOS/Linux: in its own process group with SIGHUP ignored, so neither
           Ctrl+C nor closing the pwsh window stops it; Windows: Start-Process -WindowStyle Hidden. Output goes
-          to <state>/daemon.log (Windows: daemon.log and daemon.err.log). Then /health is polled for up to
+          to <state>/daemon.log. macOS/Linux append to it; on Windows stdout and stderr go to daemon.log and
+          daemon.err.log, which Start-Process cannot append to, so the previous run's files are first moved to
+          daemon.prev.log / daemon.err.prev.log (one run kept). Then /health is polled for up to
           -HealthTimeoutSeconds.
         - -Foreground: runs in this console (Ctrl+C stops the daemon and, same process group, its services).
           -Json is not supported with -Foreground.
@@ -561,8 +575,12 @@ function Start-OctoDevStack {
         return
     }
     if (Test-OctoDevStackWindows) {
+        # Start-Process can only overwrite its redirect targets: keep the previous run's output first.
+        $errLogPath = Join-Path $statePath 'daemon.err.log'
+        Save-OctoDevStackPreviousLog -LogPath $logPath
+        Save-OctoDevStackPreviousLog -LogPath $errLogPath
         $process = Start-Process -FilePath 'dotnet' -ArgumentList @($dll, '--url', $urls.url) -WorkingDirectory $repoPath `
-            -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError (Join-Path $statePath 'daemon.err.log') -PassThru
+            -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errLogPath -PassThru
         $processId = if ($process) { [int]$process.Id } else { $null }
     }
     else {

@@ -321,6 +321,11 @@ Describe 'Start-OctoDevStack' {
         Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:HealthCalls++; $script:HealthCalls -ge 2 }
         # not $path: inside the filter it is Start-Process's -Path alias of -FilePath
         $checkout = New-FakeCheckout 'startwin' -Built
+        # Start-Process cannot append: the previous run's logs are kept as *.prev.log.
+        New-Item -ItemType Directory -Force -Path $env:OCTO_DEVSTACK_STATE | Out-Null
+        Set-Content -Path (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.log') -Value 'previous stdout'
+        Set-Content -Path (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.err.log') -Value 'previous stderr'
+        Set-Content -Path (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.prev.log') -Value 'older run'
 
         $json = Start-OctoDevStack -Path $checkout -Json | ConvertFrom-Json
 
@@ -331,6 +336,10 @@ Describe 'Start-OctoDevStack' {
             $ArgumentList[1] -eq '--url' -and $ArgumentList[2] -eq 'http://127.0.0.1:5090' -and
             $WindowStyle -eq 'Hidden' -and $RedirectStandardOutput -like '*daemon.log' -and $RedirectStandardError -like '*daemon.err.log'
         }
+        Get-Content (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.prev.log') | Should -Be 'previous stdout'
+        Get-Content (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.err.prev.log') | Should -Be 'previous stderr'
+        Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.log' | Should -Not -Exist
+        Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.err.log' | Should -Not -Exist
     }
 
     It 'fails with the log tail when the daemon exits before it is healthy' {
