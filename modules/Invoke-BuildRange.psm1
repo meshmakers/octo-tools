@@ -708,6 +708,10 @@ function Write-OctoBuildRangePlan {
     purge) and repoDone, and finally done - also on an early refusal or a throw (success=false).
     Nothing is written under -WhatIf. The -Json output is not affected.
 
+.PARAMETER EventsCommand
+    The command name recorded in every event of -EventsFile. Default Invoke-BuildRange; wrappers such as
+    Invoke-BuildEnvironment pass their own name so a reader sees which cmdlet ran the build.
+
 .PARAMETER WhatIf
     Print the plan (repositories, projects, global-cache folders to purge, running processes,
     -repoPaths and -feedPath) and do nothing.
@@ -755,6 +759,7 @@ function Invoke-BuildRange {
         [hashtable]$repoPaths = @{},
         [string]$feedPath = '',
         [string]$EventsFile = '',
+        [string]$EventsCommand = 'Invoke-BuildRange',
         [switch]$Json
     )
 
@@ -762,13 +767,13 @@ function Invoke-BuildRange {
     # event of -EventsFile, also when the run refuses early or throws.
     # The core is a simple function: -WhatIf / -ErrorAction reach it as the preference variables of this
     # scope, and its Write-Error lands in this cmdlet's error stream (-ErrorVariable) like before.
-    $skip = @([System.Management.Automation.PSCmdlet]::CommonParameters) + @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters) + @('EventsFile')
+    $skip = @([System.Management.Automation.PSCmdlet]::CommonParameters) + @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters) + @('EventsFile', 'EventsCommand')
     $forward = @{}
     foreach ($key in $PSBoundParameters.Keys) {
         if ($key -in $skip) { continue }
         $forward[$key] = $PSBoundParameters[$key]
     }
-    $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-BuildRange'
+    $events = New-OctoBuildEventState -Path $EventsFile -Command $EventsCommand
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         Invoke-OctoBuildRangeCore @forward -events $events
@@ -874,7 +879,7 @@ function Invoke-OctoBuildRangeCore {
     $eventsPath = [string]$events.Path
     $emit = {
         param([string]$name, [System.Collections.IDictionary]$data)
-        Write-OctoBuildEvent -Path $eventsPath -Command 'Invoke-BuildRange' -Event $name -Data $data
+        Write-OctoBuildEvent -Path $eventsPath -Command ([string]$events.Command) -Event $name -Data $data
     }
 
     # Every early exit reports through the same path: Write-Error, LASTEXITCODE 1 and, with -Json,
