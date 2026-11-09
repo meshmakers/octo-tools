@@ -70,13 +70,16 @@ function Format-OctoAgentDocsArgument {
 function ConvertTo-OctoAgentDocsProse {
     <#
     .SYNOPSIS
-    The text without its fenced code blocks. With -KeepLineNumbers each block becomes the
-    same number of empty lines, so a line number in the result is a line number in the file.
+    The text without its fenced code blocks and, with -StripComments, without HTML comments
+    outside them. With -KeepLineNumbers each removed block becomes the same number of empty
+    lines, so a line number in the result is a line number in the file.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers)
+    param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers, [switch]$StripComments)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
-    if (-not $KeepLineNumbers) { return [regex]::Replace($Text, $script:FencePattern, '') }
-    return [regex]::Replace($Text, $script:FencePattern, { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) })
+    $blank = if ($KeepLineNumbers) { { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) } } else { { param($m) '' } }
+    $Text = [regex]::Replace($Text, $script:FencePattern, $blank)
+    if ($StripComments) { $Text = [regex]::Replace($Text, '(?s)<!--.*?-->', $blank) }
+    return $Text
 }
 
 function Format-OctoAgentDocsOpening {

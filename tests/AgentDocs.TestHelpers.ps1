@@ -50,6 +50,7 @@ function New-Fixture {
 }
 function Set-Override { param([string]$Root, [string]$Json) Write-File (Join-Path $Root '.agent-docs.json') $Json }
 function Add-Line { param([string]$Root, [string]$File, [string[]]$Text) Add-Content -LiteralPath (Join-Path $Root $File) -Value $Text }
+function Get-LastLine { param([string]$Root, [string]$File) "$($File):$((Get-Content -LiteralPath (Join-Path $Root $File)).Count)" }   # 'file:n' of the last line
 function Get-Result {
     param([string]$Root, [hashtable]$Extra = @{})
     return ((Test-OctoAgentDocs -Path $Root -Json @Extra 3>$null 6>$null) | ConvertFrom-Json)

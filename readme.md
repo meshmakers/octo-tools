@@ -350,24 +350,22 @@ Any other `## ` heading is an error: move its content to `docs/` or under one of
 point is only checked for missing sections. The sentence and the headings are defined once, in
 `modules/agent-docs.rules.json`.
 
-`AGENTS.md` is the one canonical file and must work with any agent, so it and `docs/*.md`
-carry no Claude-style `@path` import (`@docs/x.md`, `@./a.md`, `@~/x.md`, `@/abs/x.md`,
-`@AGENTS.md`): other agents ignore that line and never see the imported text. Rule
-`no-eager-import` (error, non-relaxable) reports each one with file and line; only the
-`CLAUDE.md` shim imports. Like Claude Code it reads `@` at the start of a line or after
-whitespace and skips inline code, fenced blocks and HTML comments; e-mail addresses, npm
-scopes, decorators and mentions are not imports; an `@name/sub` without a file extension
-and without a `./`, `~/` or `/` prefix is treated as a package, not a path. Borderline:
-`@/components` is reported, while `**@docs/x.md**` (no whitespace before the `@`) is not.
-A `CLAUDE.md` that is still the entry point is checked the same way.
+`AGENTS.md` must work with any agent, so rule `no-eager-import` (error, non-relaxable)
+reports every Claude-style `@path` import in it, in `docs/*.md` and in a `CLAUDE.md` that is
+still the entry point; only the `CLAUDE.md` shim imports. Like Claude Code it reads an `@` at
+the start of a line or after whitespace, outside code spans, fenced blocks and HTML comments.
+The target counts as a path when it starts with `./`, `../`, `~/` or `/`, or names a file
+(`@src/Foo.cs`, `@notes.txt`), so e-mail addresses, npm scopes such as `@angular/core`,
+decorators and mentions are not reported. Borderline: `@/components` is reported, `**@x.txt**`
+(no whitespace before the `@`) is not.
 
-Rule `globs-match` (error, so enforce mode stops a rename that orphans a doc; a repository may lower it in `.agent-docs.json` with a reason) reports each `applies_to` glob that matches no file, with the doc and
-the line of `applies_to`, so a doc is never routed to code that was moved or renamed. With
-several globs only the ones that match nothing are reported; `background: true` docs are not
-checked. The files are what git lists (tracked, plus untracked files that are not ignored),
-or a folder walk outside a git checkout; folders in `scan.ignore` (`bin`, `obj`,
-`node_modules`, ...) never count. `**` crosses folders, `*` and `?` stay inside one, `{a,b}`
-alternates, a glob without a `/` matches at any depth, and matching is case-sensitive.
+Rule `globs-match` (error; a repository may lower it in `.agent-docs.json`, with a reason)
+reports each `applies_to` glob that matches no file, with the doc and the line, so a rename
+cannot orphan a doc unnoticed; `background: true` docs are not checked. The files are what git
+lists (tracked and not deleted, plus untracked files that are not ignored), or a folder walk
+outside a git checkout, minus the folders in `scan.ignore`. `**` crosses folders, `*` and `?`
+stay inside one, `{a,b}` alternates, a glob without a `/` matches at any depth, and matching
+is case-sensitive.
 
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
 from each doc's `applies_to` frontmatter, writes the `CLAUDE.md` shim, and writes the opening

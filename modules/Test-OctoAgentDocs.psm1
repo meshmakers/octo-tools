@@ -359,13 +359,13 @@ function Test-GlobMatch {
         $fm = Get-Frontmatter -Content $content
         if (-not $fm['applies_to'] -or $fm['background'] -match '^(true|yes)$') { continue }
         if ($null -eq $files) { $files = Get-RepositoryFile -Rules $Rules -Repo $Repo }
-        $line = 1 + @($content -split "`n" | Select-String -Pattern '^applies_to\s*:' -List | ForEach-Object { $_.LineNumber - 1 } | Select-Object -First 1)[0]
+        $at = "docs/$($d.Name):$(($content -split "`n" | Select-String -Pattern '^applies_to\s*:' | Select-Object -First 1).LineNumber)"
         foreach ($glob in (Split-GlobList -Value $fm['applies_to'])) {
             $pattern = ConvertTo-GlobRegex -Glob $glob
-            if (-not $pattern) { $Findings.Add('globs-match', "docs/$($d.Name):$line", "applies_to glob '$glob' has an unclosed '{'"); continue }
+            if (-not $pattern) { $Findings.Add('globs-match', $at, "applies_to glob '$glob' has an unclosed '{'"); continue }
             $regex = [regex]::new($pattern)
             if (-not $files.Where({ $regex.IsMatch($_) }, 'First')) {
-                $Findings.Add('globs-match', "docs/$($d.Name):$line", "applies_to glob '$glob' matches no file - the doc is routed to code that is not there")
+                $Findings.Add('globs-match', $at, "applies_to glob '$glob' matches no file - the doc is routed to code that is not there")
             }
         }
     }
@@ -375,7 +375,6 @@ function Get-RepositoryFile {
     # Repository-relative paths: what git knows (tracked, plus untracked files that are not
     # ignored) in a git checkout, otherwise a walk. Folders in scan.ignore are left out of both.
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo)
-    $ignore = @($Rules.Config['scan']['ignore'])
     $paths = $null
     if (Test-Path -LiteralPath (Join-Path $Repo.Root '.git')) {
         $out = & git -C $Repo.Root ls-files -z --cached --others --exclude-standard 2>$null
@@ -383,15 +382,25 @@ function Get-RepositoryFile {
             # --cached still lists a tracked file that was deleted from the working tree.
             $gone = & git -C $Repo.Root ls-files -z --deleted 2>$null
             if ($LASTEXITCODE -eq 0) {
-                $deleted = @(("$($gone -join '')" -split "`0") | Where-Object { $_ })
-                $paths = @(("$($out -join '')" -split "`0") | Where-Object { $_ -and $deleted -cnotcontains $_ })
+                $deleted = [System.Collections.Generic.HashSet[string]]::new([string[]]("$($gone -join '')" -split "`0"), [StringComparer]::Ordinal)
+                $paths = ("$($out -join '')" -split "`0").Where({ $_ -and -not $deleted.Contains($_) })
             }
         }
     }
     if ($null -eq $paths) {
         $paths = @(Get-ChildItem -LiteralPath $Repo.Root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $Repo.Relative($_.FullName) })
     }
-    return , @($paths | Where-Object { -not (($_ -split '/' | Select-Object -SkipLast 1) | Where-Object { $ignore -contains $_ }) })
+    $ignored = Get-ScanIgnorePattern -Rules $Rules
+    return , @(if ($ignored) { $paths.Where({ ($_ -replace '/?[^/]*$', '') -notmatch $ignored }) } else { $paths })
+}
+
+function Get-ScanIgnorePattern {
+    # Matches a repository-relative folder that is or lies below a folder named in scan.ignore
+    # (compared case-insensitively, like -contains); $null when nothing is ignored.
+    param([AgentDocsRuleSet]$Rules)
+    $names = @($Rules.Config['scan']['ignore'] | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_) })
+    if (-not $names) { return $null }
+    return "(?:^|/)(?:$($names -join '|'))(?:/|$)"
 }
 
 function ConvertTo-GlobRegex {
@@ -453,9 +462,9 @@ function Test-InvisibleCharacter {
         'stray zero-width joiner' = '(?<![\p{So}\uFE0F\uDC00-\uDFFF])\u200D|\u200D(?![\p{So}\uFE0F\uD800-\uDBFF])'
         'bidirectional override'  = '[\u202A-\u202E\u2066-\u2069]'
     }
-    $ignore = @($Rules.Config['scan']['ignore'])
+    $ignored = Get-ScanIgnorePattern -Rules $Rules
     $files = Get-ChildItem -LiteralPath $Repo.Root -Recurse -Force -File -Filter '*.md' -ErrorAction SilentlyContinue |
-        Where-Object { -not ($Repo.Relative($_.DirectoryName) -split '/' | Where-Object { $ignore -contains $_ }) } | Sort-Object FullName
+        Where-Object { -not $ignored -or $Repo.Relative($_.DirectoryName) -notmatch $ignored } | Sort-Object FullName
     foreach ($f in $files) {
         $content = $Repo.ReadText($f.FullName)
         foreach ($kind in $invisible.Keys) {
@@ -480,9 +489,7 @@ function Test-EagerImport {
     $textFile = '\.(md|mdc|mdx|markdown|txt|rst|json|ya?ml|toml)$'
     $nestedFile = '^[^/\s]+/(?:[^/\s]+/)*[^/\s]*\.[A-Za-z0-9]{1,8}$'
     foreach ($f in @($Repo.EntryPath) + @($Repo.Docs.FullName) | Where-Object { $_ }) {
-        $text = ConvertTo-OctoAgentDocsProse -Text $Repo.ReadText($f).TrimStart([char]0xFEFF) -KeepLineNumbers
-        $text = [regex]::Replace($text, '(?s)<!--.*?-->', { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) })
-        $lines = $text -split "`n"
+        $lines = (ConvertTo-OctoAgentDocsProse -Text $Repo.ReadText($f) -KeepLineNumbers -StripComments) -split "`n"
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($lines[$i] -notmatch '@') { continue }
             $line = [regex]::Replace($lines[$i], '(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)', '')

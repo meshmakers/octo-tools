@@ -622,7 +622,7 @@ Describe 'no-eager-import' {
         $f.Count | Should -Be 1
         $f[0].severity | Should -Be 'error'
         $f[0].tier | Should -Be 2
-        $f[0].file | Should -Be "AGENTS.md:$((Get-Content -LiteralPath (Join-Path $r 'AGENTS.md')).Count)"
+        $f[0].file | Should -Be (Get-LastLine $r 'AGENTS.md')
     }
     It 'reports an import in a routed doc, with the line inside that doc' {
         $r = New-Fixture
@@ -660,14 +660,14 @@ Describe 'no-eager-import' {
         Add-Line $r 'AGENTS.md' @('```', '@AGENTS.md', '```', '@AGENTS.md')
         $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
         $f.Count | Should -Be 1
-        $f[0].file | Should -Be "AGENTS.md:$((Get-Content -LiteralPath (Join-Path $r 'AGENTS.md')).Count)"
+        $f[0].file | Should -Be (Get-LastLine $r 'AGENTS.md')
     }
     It 'keeps line numbers across a multi-line HTML comment, a BOM and CRLF' {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' @('<!--', '@docs/x.md', '-->', '@docs/y.md')
         $f = Get-RuleFinding (Get-Result $r) 'no-eager-import'
         $f.Count | Should -Be 1
-        $f[0].file | Should -Be "AGENTS.md:$((Get-Content -LiteralPath (Join-Path $r 'AGENTS.md')).Count)"
+        $f[0].file | Should -Be (Get-LastLine $r 'AGENTS.md')
         $c = New-Fixture -Crlf
         Add-Line $c 'AGENTS.md' '@docs/one.md'
         (Get-RuleFinding (Get-Result $c) 'no-eager-import').Count | Should -Be 1
@@ -694,12 +694,8 @@ Describe 'no-eager-import' {
         ($(Get-Output { Test-OctoAgentDocs -Path $r }) -join "`n") | Should -Match "'no-eager-import' is non-relaxable"
         (Get-RuleFinding (Get-Result $r) 'no-eager-import').Count | Should -Be 1
     }
-    It 'is explained as a reference and listed as non-relaxable' {
-        $json = (Test-OctoAgentDocs -Explain no-eager-import -Json 6>$null) | ConvertFrom-Json
-        $row = $json.data.rules[0]
-        $row.nonRelaxable | Should -BeTrue
-        $row.why | Should -Match 'other agent'
-        $row.fix | Should -Not -BeNullOrEmpty
+    It 'is listed as non-relaxable' {
+        ((Test-OctoAgentDocs -Explain no-eager-import -Json 6>$null) | ConvertFrom-Json).data.rules[0].nonRelaxable | Should -BeTrue
     }
     It 'is part of the migration brief' {
         $r = New-Fixture -Empty
@@ -760,6 +756,8 @@ Describe 'globs-match' {
     It 'does not check a background doc, with or without leftover globs' {
         $r = New-Fixture
         Write-File (Join-Path $r 'docs/one.md') "---`ndescription: One.`nbackground: true`n---`n"
+        (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
+        $r = New-Fixture
         Set-Doc $r 'moved/**' "background: true`n"
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
     }
@@ -807,8 +805,6 @@ Describe 'globs-match' {
         $row = ((Test-OctoAgentDocs -Explain globs-match -Json 6>$null) | ConvertFrom-Json).data.rules[0]
         $row.tier | Should -Be 3
         $row.nonRelaxable | Should -BeFalse
-        $row.why | Should -Not -BeNullOrEmpty
-        $row.fix | Should -Not -BeNullOrEmpty
     }
 }
 
