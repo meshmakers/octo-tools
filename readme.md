@@ -195,7 +195,8 @@ rule the r* tag builds use to fill the public catalog), vendored verbatim as `mo
 
 # Feature environments
 
-A feature environment is a small lane of its own at `<rootPath>/envs/<env>` for one work item: git worktrees of the
+A feature environment is a small lane of its own at `<rootPath>/wt-<env>` for one work item - the lane folder of the
+octo-claude-pm lane `<env>`: git worktrees of the
 repositories you change, its own NuGet feed and package cache, its own CK and blueprint catalogs and a manifest
 (`.octo/environment.json`) that octo-devstack reads to run the environment's services in their own stack slot. Work
 on several features at the same time without one build overwriting another's `999.0.0` packages, and without
@@ -209,7 +210,7 @@ New-OctoEnvironment -env ab8625-enum-null -repos octo-construction-kit-engine -w
 Get-OctoAffectedRepos -env ab8625-enum-null
 Add-OctoEnvironmentRepo -env ab8625-enum-null -repo octo-asset-repo-services -role consumer -addAffected
 
-# 3. Work in envs/ab8625-enum-null/octo-construction-kit-engine (Rider, dotnet build: isolated by Octo.User.props)
+# 3. Work in wt-ab8625-enum-null/octo-construction-kit-engine (Rider, dotnet build: isolated by Octo.User.props)
 #    and build the environment incrementally; compile the tests before every hand-off
 Invoke-BuildEnvironment -env ab8625-enum-null -verifyTests
 
@@ -227,12 +228,19 @@ Remove-OctoEnvironment -env ab8625-enum-null
 - **Snapshot, not live.** Main's packages and catalogs are copied when the environment is created and refreshed only
   on request (`Sync-OctoEnvironment`, `-syncMain`). Packages built in the environment always win; catalog indexes
   changed on both sides are merged. Main's feed is never added as a second NuGet source.
-- **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/envs/<env>`; a main build never
+- **Existing worktrees** are adopted with `Add-OctoEnvironmentRepo -env <env> -path <worktree>`: an octo-claude-pm
+  flat worktree `wt-<lane>-<repo>` or a Claude Code worktree `<repo>/.claude/worktrees/<name>` is moved
+  (`git worktree move`, uncommitted work included) to `wt-<env>/<repo>`; refused while git has it locked or a process
+  runs from it (a shell, an IDE or a Claude Code session in that folder). `-inPlace` leaves it where it is:
+  `Invoke-BuildEnvironment` builds it with the environment's feed, cache and CK catalog as global properties, but a
+  plain `dotnet build` or Rider in that folder is **not** isolated, and `Remove-OctoEnvironment` never deletes it.
+- **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/wt-<env>`; a main build never
   touches environment processes.
 - **Running** the environment's services is octo-devstack's job (own stack slot per environment, fallback to main's
   binaries for the services the environment does not build). `Start-Octo` stays for main.
 - Load the profile from the `octo-tools` checkout next to `branches/` (`$rootPath` = the workspace root). Environment
-  folders inside `branches/main` are refused.
+  folders inside `branches/main` are refused. An existing octo-claude-pm lane folder becomes the environment; its
+  claims (`.octo/claims`) stay, also after `Remove-OctoEnvironment`.
 
 # Working on many tenants
 
