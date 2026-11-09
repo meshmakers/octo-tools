@@ -140,7 +140,7 @@ This cmdlet pair assumes your clusters do not bind a persistent `cluster-owner` 
 ## Project Structure
 
 - `/modules/` - PowerShell modules for all development commands
-- `/tests/` - Pester tests (`Invoke-Pester ./tests`); they use a fake checkout in `TestDrive` and mock the build step - never run real builds or touch the real NuGet folders from tests
+- `/tests/` - Pester 5 tests (`Invoke-Pester ./tests`; install with `Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser`, without `-MaximumVersion` you get Pester 6); they use a fake checkout in `TestDrive` and mock the build step - never run real builds or touch the real NuGet folders from tests
 - `/infrastructure/` - Docker Compose configuration and MongoDB init scripts (deprecated, removal 2026-12-31)
 - `/kubernetes/` - Local kind cluster manifests, Helm values, and the dev-env runbooks (`README.md` / `QUICKSTART.md`)
 - `/assets/` - Terminal profile assets and logos

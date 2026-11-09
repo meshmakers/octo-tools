@@ -231,7 +231,8 @@ Pester tests for the build tooling live in `tests/` (they run against a fake che
 and never build or touch the real NuGet folders):
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser   # once
+# once; -MaximumVersion keeps it on Pester 5 - -MinimumVersion alone installs Pester 6
+Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser
 Invoke-Pester ./tests
 ```
 
@@ -405,7 +406,7 @@ required sections and the routing markers plus the `CLAUDE.md` shim. A repositor
 from the ruleset; its first step is the start shown above. The checker warns while it exists
 and it is deleted in the migration commit.
 
-Tests, from the `octo-tools` folder (Pester 5 or later): `Invoke-Pester ./tests`.
+Tests, from the `octo-tools` folder (Pester 5, see [Tests](#tests)): `Invoke-Pester ./tests`.
 
 # Support and Feedback
 
