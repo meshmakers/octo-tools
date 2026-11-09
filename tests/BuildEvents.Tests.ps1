@@ -348,6 +348,20 @@ Describe 'Invoke-BuildAll -EventsFile' {
         Test-Path $dry | Should -BeFalse
     }
 
+    It 'a DebugL purge that left files behind is reported as failedStep purge' {
+        Mock -ModuleName Invoke-BuildAll Compile-Repo { $true }
+        Mock -ModuleName Invoke-BuildAll Remove-OctoLaneNuGetPackages { Write-Error 'The process cannot access the file because it is being used by another process.' }
+
+        Invoke-BuildAll -branch main -configuration DebugL -skipKill -EventsFile $events -Json 2>$null | Out-Null
+
+        $all = Read-Events $events
+        @($all | Where-Object event -eq 'repoDone').success | Should -Be @($true, $true, $true)
+        $all[-1].event | Should -Be 'done'
+        $all[-1].success | Should -BeFalse
+        $all[-1].failedRepo | Should -BeNullOrEmpty
+        $all[-1].failedStep | Should -Be 'purge'
+    }
+
     It 'a throw in a repository writes its repoDone(success=false) before done' {
         Mock -ModuleName Invoke-BuildAll Compile-Repo { if ((Split-Path -Leaf $path) -eq 'octo-sdk') { throw 'boom' }; $true }
 

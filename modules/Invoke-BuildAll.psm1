@@ -435,6 +435,7 @@ function Invoke-BuildAllCore {
     # Start a timer
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    $purgeErrors = @()
     if ($configuration -ieq "DebugL"){
         # Again right before the package folders are wiped (lane processes only, see above).
         if (-not $skipKill) { [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json) }
@@ -446,7 +447,8 @@ function Invoke-BuildAllCore {
             Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow
             New-Item -ItemType Directory -Path $branchNugetPath | Out-Null
         }
-        Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force
+        # Errors are still shown, and collected so a reset that left locked files behind is not reported as success.
+        Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force -ErrorVariable +purgeErrors
 
         # Purge the meshmakers.*/999.0.0 folders of every package cache this lane restores into
         # (Get-OctoRangePackageCaches): an isolated lane (dev) only <lane>/.nuget-packages; the main lane
@@ -461,7 +463,10 @@ function Invoke-BuildAllCore {
                 Write-Warning "dotnet build-server shutdown exited with code $LASTEXITCODE; the package purge may fail on locked files."
             }
         }
+        # Plain function (no -ErrorVariable): collect the errors it wrote through $Error.
+        $errorsBefore = $global:Error.Count
         Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json | Out-Null
+        if ($global:Error.Count -gt $errorsBefore) { $purgeErrors += @($global:Error[0..($global:Error.Count - $errorsBefore - 1)]) }
     }
 
     # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run; empty for the legacy
@@ -514,10 +519,11 @@ function Invoke-BuildAllCore {
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
     }
-    # Invoke-BuildAll does not stop at a failing repository; done reports the first one.
-    $events.Success = ($null -eq $firstFailedRepo)
+    # Invoke-BuildAll does not stop at a failing repository; done reports the first one. A DebugL reset
+    # whose purge left files behind (locked on Windows) is not a success either: failedStep "purge".
+    $events.Success = ($null -eq $firstFailedRepo) -and $purgeErrors.Count -eq 0
     $events.FailedRepo = $firstFailedRepo
-    $events.FailedStep = if ($firstFailedRepo) { 'build' } else { $null }
+    $events.FailedStep = if ($firstFailedRepo) { 'build' } elseif ($purgeErrors.Count -gt 0) { 'purge' } else { $null }
     $events.Completed = $true
 
     # Print the status of all builds
