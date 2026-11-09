@@ -426,7 +426,27 @@ function Invoke-BuildAllCore {
 
     # Stop the dotnet processes of this lane (file locks on Windows) - never other lanes, a local daemon
     # or the shared build server. -skipKill: the caller stopped them itself.
-    if (-not $skipKill) { [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json) }
+    # A failed lane cleanup (a process that could not be stopped, or a refused lane folder) ends the run before
+    # anything is built or purged: done reports failedStep "cleanup", -Json a failed document.
+    # Returns the failure message (and reports it) or $null; the caller emits nothing else and returns.
+    $cleanupFailure = {
+        if ($LASTEXITCODE -eq 0) { return $null }
+        $events.FailedStep = 'cleanup'
+        return "Invoke-BuildAll: the lane cleanup (Invoke-KillDotnet -branchRootPath $branchRootPath) failed with exit code $LASTEXITCODE; nothing was built."
+    }
+    $reportCleanupFailure = {
+        param([string]$message)
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-BuildAll' -Data ([ordered]@{ branch = $branch; configuration = $configuration; success = $false; error = $message; repositories = @() })
+        }
+        Write-Error $message -ErrorAction Continue
+    }
+    if (-not $skipKill) {
+        $global:LASTEXITCODE = 0   # a stale exit code of an earlier native call must not count as a cleanup failure
+        [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json)
+        $failure = & $cleanupFailure
+        if ($failure) { & $reportCleanupFailure $failure; return }
+    }
 
 
     # Create a dictionary that contains the directory name and a status weather the build was successful or not
@@ -438,7 +458,12 @@ function Invoke-BuildAllCore {
     $purgeErrors = @()
     if ($configuration -ieq "DebugL"){
         # Again right before the package folders are wiped (lane processes only, see above).
-        if (-not $skipKill) { [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json) }
+        if (-not $skipKill) {
+            $global:LASTEXITCODE = 0   # a stale exit code of an earlier native call must not count as a cleanup failure
+        [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json)
+            $failure = & $cleanupFailure
+            if ($failure) { & $reportCleanupFailure $failure; return }
+        }
 
         # Delete all nuget packages in the octo mesh nuget folder
         $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"

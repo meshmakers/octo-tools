@@ -1341,6 +1341,16 @@ Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
         }
     }
 
+    It 'stops before building when the lane cleanup fails' {
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { $global:LASTEXITCODE = 1 }
+
+        $json = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*lane cleanup*failed*'
+        Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 0
+    }
+
     It 'passes the lane folder to both Invoke-KillDotnet calls (DebugL)' {
         Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
 

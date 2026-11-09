@@ -163,7 +163,15 @@ function Get-OctoProcessCwdRecords {
     # (macOS/Linux only). Separate so tests can mock it: lsof does not exist on Windows, and Pester can
     # only mock commands that exist.
     param([int[]]$processIds)
-    return @(& lsof -a -d cwd -p ($processIds -join ',') -Fpn 2>$null)
+    $records = @(& lsof -a -d cwd -p ($processIds -join ',') -Fpn 2>$null)
+    if ($LASTEXITCODE -ne 0 -and -not ($records | Where-Object { $_ -like 'n*' })) {
+        # lsof also exits non-zero when a process ended in the meantime; only report processes that still live.
+        $alive = @($processIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($alive.Count -gt 0) {
+            Write-Warning "Invoke-KillDotnet: lsof could not read the working directory of $($alive.Count) process(es) (exit code $LASTEXITCODE); they are matched by command line and modules only."
+        }
+    }
+    return $records
 }
 
 function Test-OctoLaneFolder {
