@@ -2,9 +2,12 @@
 <#
     Pester tests for the octo-devstack cmdlets (Install-/Start-/Stop-OctoDevStack, Get-OctoDevStackStatus).
 
-    Nothing real is cloned, built, started or stopped: git, dotnet, claude, lsof, ps, kill, Start-Process,
-    Stop-Process, Invoke-RestMethod and the detached launcher are mocked; the checkout is a fake folder in
-    TestDrive and the state folder is redirected there (OCTO_DEVSTACK_STATE).
+    Nothing real is cloned, built, started or stopped: git, dotnet, claude, the lsof/ps/kill/launchctl seams
+    (Get-OctoDevStackListeningPids, Get-OctoDevStackProcessCommandLine, Send-OctoDevStackSignal,
+    Invoke-OctoDevStackLaunchctl), Start-Process, Stop-Process, Invoke-RestMethod and the detached launcher
+    are mocked. The native tools are never mocked by name: Pester cannot mock a command that does not exist
+    (lsof, launchctl on Windows), and `kill` / `ps` are aliases of Stop-Process / Get-Process there. The
+    checkout is a fake folder in TestDrive and the state folder is redirected there (OCTO_DEVSTACK_STATE).
 
     Run:  Invoke-Pester ./tests/OctoDevStack.Tests.ps1
 #>
@@ -21,9 +24,10 @@ BeforeAll {
 
     $script:Dll = 'bin/Release/net10.0/octo-devstack.dll'
 
-    # Windows-only cmdlets do not exist on macOS/Linux; stubs make them mockable there.
+    # Windows-only cmdlets do not exist on macOS/Linux, and git/dotnet/claude may be missing on a test
+    # machine; stubs make them mockable there.
     $script:Stubs = @()
-    foreach ($name in 'Get-NetTCPConnection', 'Get-CimInstance') {
+    foreach ($name in 'Get-NetTCPConnection', 'Get-CimInstance', 'git', 'dotnet', 'claude') {
         if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
             New-Item -Path "function:global:$name" -Value { } | Out-Null
             $script:Stubs += $name
@@ -214,15 +218,15 @@ Describe 'Start-OctoDevStack' {
         Mock -ModuleName OctoDevStack Start-Process { [pscustomobject]@{ Id = 4242 } }
         Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { 4242 }
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $true }
-        Mock -ModuleName OctoDevStack lsof { }
-        Mock -ModuleName OctoDevStack ps { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { }
         Mock -ModuleName OctoDevStack Get-Command { $null } -ParameterFilter { $Name -eq 'claude' }
     }
 
     It 'refuses when something else answers /health on the port' {
         Mock -ModuleName OctoDevStack Invoke-RestMethod { @{ status = 'ok' } }
-        Mock -ModuleName OctoDevStack lsof { '555' }
-        Mock -ModuleName OctoDevStack ps { 'node /tmp/other-health-server.js' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '555' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'node /tmp/other-health-server.js' }
         $path = New-FakeCheckout 'foreignhealth' -Built
 
         $json = Start-OctoDevStack -Path $path -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
@@ -239,8 +243,8 @@ Describe 'Start-OctoDevStack' {
 
     It 'does nothing when /health already answers' {
         Mock -ModuleName OctoDevStack Invoke-RestMethod { @{ status = 'ok' } }
-        Mock -ModuleName OctoDevStack lsof { '777' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '777' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
         $path = New-FakeCheckout 'running' -Built
 
         $json = Start-OctoDevStack -Path $path -Json | ConvertFrom-Json
@@ -280,8 +284,8 @@ Describe 'Start-OctoDevStack' {
 
     It 'refuses when another process holds the port without answering /health' {
         Mock -ModuleName OctoDevStack Invoke-RestMethod { throw 'connection refused' }
-        Mock -ModuleName OctoDevStack lsof { '555' }
-        Mock -ModuleName OctoDevStack ps { 'node server.js' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '555' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'node server.js' }
         $path = New-FakeCheckout 'foreignport' -Built
         $json = Start-OctoDevStack -Path $path -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeFalse
@@ -398,6 +402,15 @@ Describe 'Start-OctoDevStack' {
     }
 }
 
+Describe 'OctoDevStack native tools' {
+    It 'resolves only executables, never a PowerShell alias of the same name' {
+        InModuleScope OctoDevStack {
+            # gci is an alias on every OS and no executable: on Windows `kill` / `ps` are aliases the same way.
+            Get-OctoDevStackNativeCommand 'gci' | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'Stop-OctoDevStack' {
     BeforeEach {
         Mock -ModuleName OctoDevStack Test-OctoDevStackLaunchAgent { $false }
@@ -406,13 +419,13 @@ Describe 'Stop-OctoDevStack' {
         Mock -ModuleName OctoDevStack Start-Sleep { }
         Mock -ModuleName OctoDevStack Stop-Process { }
         $script:KillCalls = [System.Collections.Generic.List[string]]::new()
-        Mock -ModuleName OctoDevStack kill { $script:KillCalls.Add($args -join ' ') }
+        Mock -ModuleName OctoDevStack Send-OctoDevStackSignal { $script:KillCalls.Add("-$Signal $ProcessId") }
     }
 
     It 'sends SIGTERM only to the octo-devstack listener on the port' {
-        Mock -ModuleName OctoDevStack lsof { '901'; '902' }
-        Mock -ModuleName OctoDevStack ps {
-            if ($args -contains 901) { 'node /tmp/other.js' } else { 'dotnet /Users/x/octo-devstack/bin/Release/net10.0/octo-devstack.dll --url http://127.0.0.1:5090' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '901'; '902' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine {
+            if ($ProcessId -eq 901) { 'node /tmp/other.js' } else { 'dotnet /Users/x/octo-devstack/bin/Release/net10.0/octo-devstack.dll --url http://127.0.0.1:5090' }
         }
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
 
@@ -427,8 +440,8 @@ Describe 'Stop-OctoDevStack' {
     }
 
     It 'kills it after the timeout when SIGTERM is ignored' {
-        Mock -ModuleName OctoDevStack lsof { '902' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet octo-devstack.dll' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '902' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet octo-devstack.dll' }
         $script:AliveChecks = 0
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $script:AliveChecks++; $script:AliveChecks -le 3 }
 
@@ -439,8 +452,8 @@ Describe 'Stop-OctoDevStack' {
     }
 
     It 'refuses when the port belongs to another program, stops nothing' {
-        Mock -ModuleName OctoDevStack lsof { '901' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet Meshmakers.Octo.Identity.dll' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '901' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet Meshmakers.Octo.Identity.dll' }
         $json = Stop-OctoDevStack -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeFalse
         $json.data.stopped | Should -BeFalse
@@ -449,16 +462,16 @@ Describe 'Stop-OctoDevStack' {
     }
 
     It 'does not match a process that only mentions octo-devstack.dll inside another file name' {
-        Mock -ModuleName OctoDevStack lsof { '903' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet /x/not-octo-devstack.dll.bak' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '903' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet /x/not-octo-devstack.dll.bak' }
         $json = Stop-OctoDevStack -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeFalse
         $script:KillCalls | Should -HaveCount 0
     }
 
     It 'is a successful no-op when nothing listens' {
-        Mock -ModuleName OctoDevStack lsof { }
-        Mock -ModuleName OctoDevStack ps { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { }
         $json = Stop-OctoDevStack -Json | ConvertFrom-Json
         $json.data.success | Should -BeTrue
         $json.data.stopped | Should -BeFalse
@@ -488,12 +501,12 @@ Describe 'OctoDevStack with the macOS LaunchAgent' {
         Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { 1 }
         $script:Launchctl = [System.Collections.Generic.List[string]]::new()
         Mock -ModuleName OctoDevStack Invoke-OctoDevStackLaunchctl { $script:Launchctl.Add($Arguments -join ' '); [pscustomobject]@{ ExitCode = 0; Output = '' } }
-        Mock -ModuleName OctoDevStack kill { throw 'kill must not be used with the LaunchAgent' }
+        Mock -ModuleName OctoDevStack Send-OctoDevStackSignal { throw 'kill must not be used with the LaunchAgent' }
     }
 
     It 'Stop unloads the LaunchAgent instead of killing the daemon' {
-        Mock -ModuleName OctoDevStack lsof { '902' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '902' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
 
         $json = Stop-OctoDevStack -Json | ConvertFrom-Json
@@ -506,8 +519,8 @@ Describe 'OctoDevStack with the macOS LaunchAgent' {
     }
 
     It 'Stop leaves the LaunchAgent loaded when a foreign program holds the port' {
-        Mock -ModuleName OctoDevStack lsof { '555' }
-        Mock -ModuleName OctoDevStack ps { 'node /tmp/other.js' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '555' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'node /tmp/other.js' }
 
         $json = Stop-OctoDevStack -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
 
@@ -517,7 +530,7 @@ Describe 'OctoDevStack with the macOS LaunchAgent' {
     }
 
     It 'Stop leaves the LaunchAgent loaded when nothing listens on the port' {
-        Mock -ModuleName OctoDevStack lsof { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
 
         $json = Stop-OctoDevStack -Json | ConvertFrom-Json
 
@@ -527,8 +540,8 @@ Describe 'OctoDevStack with the macOS LaunchAgent' {
     }
 
     It 'Stop reports a failure when the daemon survives bootout and Stop-Process' {
-        Mock -ModuleName OctoDevStack lsof { '902' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '902' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $true }
 
         $json = Stop-OctoDevStack -TimeoutSeconds 0 -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
@@ -565,8 +578,8 @@ Describe 'Get-OctoDevStackStatus' {
     It 'reports an installed, built and running daemon' {
         Set-GitMock -Branch 'main' -Commit 'def5678' -Behind 2
         Mock -ModuleName OctoDevStack Invoke-RestMethod { @{ status = 'ok' } }
-        Mock -ModuleName OctoDevStack lsof { '321' }
-        Mock -ModuleName OctoDevStack ps { 'dotnet octo-devstack.dll --url http://127.0.0.1:5090' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { '321' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet octo-devstack.dll --url http://127.0.0.1:5090' }
         $path = New-FakeCheckout 'status' -Built
 
         $json = Get-OctoDevStackStatus -Path $path -Json | ConvertFrom-Json
@@ -595,8 +608,8 @@ Describe 'Get-OctoDevStackStatus' {
     It 'reports a missing checkout without calling git' {
         Set-GitMock
         Mock -ModuleName OctoDevStack Invoke-RestMethod { throw 'connection refused' }
-        Mock -ModuleName OctoDevStack lsof { }
-        Mock -ModuleName OctoDevStack ps { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { }
 
         $json = Get-OctoDevStackStatus -Path (Join-Path $TestDrive 'nothing-here') -Json | ConvertFrom-Json
 

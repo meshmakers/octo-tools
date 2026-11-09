@@ -71,11 +71,19 @@ function Test-OctoDevStackLaunchAgent {
     return (Test-OctoDevStackMacOS) -and (Test-Path -LiteralPath (Get-OctoDevStackLaunchAgentPath))
 }
 
-function Get-OctoDevStackLaunchdDomain { return "gui/$(id -u)" }
+function Get-OctoDevStackNativeCommand([string]$Name) {
+    # The native executable, never a PowerShell alias of the same name (on Windows `kill` and `ps` are
+    # aliases of Stop-Process / Get-Process). $null when it is not installed.
+    $app = Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($app) { return $app.Source }
+    return $null
+}
+
+function Get-OctoDevStackLaunchdDomain { return "gui/$(& (Get-OctoDevStackNativeCommand 'id') -u)" }
 
 function Invoke-OctoDevStackLaunchctl {
     param([string[]]$Arguments)
-    $output = & launchctl @Arguments 2>&1
+    $output = & (Get-OctoDevStackNativeCommand 'launchctl') @Arguments 2>&1
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String).Trim() }
 }
 
@@ -115,12 +123,35 @@ function Get-OctoDevStackListener {
         }
         return $result
     }
-    $pids = @(lsof -nP "-iTCP:$Port" -sTCP:LISTEN -t 2>$null | Where-Object { $_ -match '^\d+$' } | Select-Object -Unique)
-    foreach ($processId in $pids) {
-        $commandLine = (@(ps -o command= -p $processId 2>$null) -join ' ').Trim()
+    foreach ($processId in @(Get-OctoDevStackListeningPids -Port $Port)) {
+        $commandLine = Get-OctoDevStackProcessCommandLine -ProcessId $processId
         $result += [pscustomobject]@{ pid = [int]$processId; commandLine = $commandLine }
     }
     return $result
+}
+
+# macOS/Linux seams around the native tools (lsof, ps, kill): the tests mock these, never the tools, because
+# Pester cannot mock a command that does not exist (lsof on Windows) and `ps` / `kill` are aliases there.
+function Get-OctoDevStackListeningPids([int]$Port) {
+    $lsof = Get-OctoDevStackNativeCommand 'lsof'
+    if (-not $lsof) {
+        Write-Warning "lsof is not installed: cannot tell which process listens on port $Port."
+        return @()
+    }
+    return @(& $lsof -nP "-iTCP:$Port" -sTCP:LISTEN -t 2>$null | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ } | Select-Object -Unique)
+}
+
+function Get-OctoDevStackProcessCommandLine([int]$ProcessId) {
+    $ps = Get-OctoDevStackNativeCommand 'ps'
+    if (-not $ps) { return '' }
+    return (@(& $ps -o command= -p $ProcessId 2>$null) -join ' ').Trim()
+}
+
+function Send-OctoDevStackSignal([int]$ProcessId, [string]$Signal = 'TERM') {
+    $kill = Get-OctoDevStackNativeCommand 'kill'
+    if (-not $kill) { throw 'kill is not installed.' }
+    & $kill "-$Signal" $ProcessId
+    if ($LASTEXITCODE -ne 0) { throw "kill -$Signal $ProcessId failed (exit code $LASTEXITCODE)." }
 }
 
 function Test-OctoDevStackCommandLine([string]$CommandLine) {
@@ -667,7 +698,7 @@ function Stop-OctoDevStack {
             Stop-Process -Id $target.pid -Force -ErrorAction Stop
         }
         else {
-            kill -TERM $target.pid
+            Send-OctoDevStackSignal -ProcessId $target.pid -Signal TERM
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) {
                 Start-Sleep -Milliseconds 500
