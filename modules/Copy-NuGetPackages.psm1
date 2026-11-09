@@ -29,6 +29,10 @@
         octo-communication-sdk);
       - packages older than the nuget/ copy (another repository produced a newer one).
 
+.PARAMETER nugetPath
+    Target folder override (created when missing), e.g. a private feed of Invoke-BuildRange -feedPath.
+    Default: <checkout>/nuget of -branch. With -onlyChanged the comparison is made against this folder.
+
 .PARAMETER Json
     Emit { success, copiedCount, files, skipped } as a JSON document. `files` lists the copied file
     names, `skipped` the packages left alone with the reason (unchanged / olderThanNuget / orphaned).
@@ -43,26 +47,34 @@ function Copy-NuGetPackages
         [string]$directory = ".\",
         [Nullable[DateTime]]$modifiedSince = $null,
         [switch]$onlyChanged,
+        [string]$nugetPath = "",
         [switch]$Json
     )
 
     $filter = "Meshmakers.*.999.0.0.nupkg"
     $copiedCount = 0
     $copiedFiles = @()
+    $copyErrors = @()
     $skipped = @()
 
     if (-not $Json) { Write-Host "Searching at $directory" }
     $binDirectories = Get-ChildItem -Path $directory -Filter 'DebugL' -Recurse -Directory | Where-Object { $_.FullName -like '*[/\]bin[/\]DebugL' }
 
-    $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
-    $repositoryRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($directory))
-    $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
+    $repositoryRoot = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($directory))
+    if ([string]::IsNullOrWhiteSpace($nugetPath)) {
+        $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
+        $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
+    }
+    else {
+        # Relative to $PWD (GetFullPath would resolve against the process start directory).
+        $branchNugetPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($nugetPath)
+    }
     if (-not $Json) { Write-Host "Branch NuGet Path: $branchNugetPath" }
 
     # Check if the branch NuGet path exists, if not create it
     if (!(Test-Path $branchNugetPath)) {
         if (-not $Json) { Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow }
-        New-Item -ItemType Directory -Path $branchNugetPath | Out-Null
+        New-Item -ItemType Directory -Force -Path $branchNugetPath | Out-Null
     }
 
     foreach ($binDirectory in $binDirectories) {
@@ -85,7 +97,15 @@ function Copy-NuGetPackages
                     }
                 }
                 if (-not $Json) { Write-Host "Copy $file" -ForegroundColor Green }
-                Copy-Item -Path $file -Destination $branchNugetPath -Force
+                try {
+                    Copy-Item -Path $file -Destination $branchNugetPath -Force -ErrorAction Stop
+                }
+                catch {
+                    # A package that did not land must not count as copied, and the result must say so.
+                    $copyErrors += "$($file.Name): $($_.Exception.Message)"
+                    Write-Error "Could not copy $($file.Name) to ${branchNugetPath}: $($_.Exception.Message)" -ErrorAction Continue
+                    continue
+                }
                 $copiedCount++
                 $copiedFiles += $file.Name
             }
@@ -93,8 +113,15 @@ function Copy-NuGetPackages
     }
 
     if ($Json) {
-        Write-OctoJson -Command 'Copy-NuGetPackages' -Data ([ordered]@{ success = $true; copiedCount = $copiedCount; files = @($copiedFiles); skipped = @($skipped) })
+        Write-OctoJson -Command 'Copy-NuGetPackages' -Data ([ordered]@{ success = ($copyErrors.Count -eq 0); copiedCount = $copiedCount; files = @($copiedFiles); skipped = @($skipped); errors = @($copyErrors); error = if ($copyErrors.Count -gt 0) { $copyErrors -join '; ' } else { $null } })
         return
+    }
+    # Without -Json (Invoke-BuildAll, the terminal): a package that did not land fails the call.
+    if ($copyErrors.Count -gt 0) {
+        $global:LASTEXITCODE = 1
+        # Typed (FullyQualifiedErrorId OctoPackageCopyFailed): Invoke-BuildAll stops the run on exactly this failure.
+        $exception = [System.IO.IOException]::new("Copy-NuGetPackages: $($copyErrors.Count) package(s) not copied to ${branchNugetPath}: $($copyErrors -join '; ')")
+        throw [System.Management.Automation.ErrorRecord]::new($exception, 'OctoPackageCopyFailed', [System.Management.Automation.ErrorCategory]::WriteError, $branchNugetPath)
     }
 }
 

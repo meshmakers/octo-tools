@@ -67,6 +67,8 @@ function Remove-OctoLaneNuGetPackages {
     .PARAMETER WhatIf
         Returns the caches that would be cleaned without deleting anything.
     #>
+    # CmdletBinding: callers collect the purge errors with -ErrorVariable (Invoke-BuildAll stops on them).
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] $laneSettings,
         [switch]$Json,

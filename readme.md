@@ -104,6 +104,17 @@ lane (main) the global cache (`NUGET_PACKAGES` or `~/.nuget/packages`), plus `<l
 when `<lane>/Octo.User.props` sets `RestorePackagesPath`. `-WhatIf` prints the lane, its environment,
 the caches and the per-repo `RestoreSources`.
 
+**Private feeds for library worktrees.** `-repoPaths @{ 'octo-construction-kit-engine' = '<absolute worktree folder>' }`
+builds that repository from the given folder (e.g. a git worktree) instead of `<checkout>/<repo>`, at the same
+position in the build order; the folder must exist and contain a `.sln`/`.slnx` or a `src/` folder.
+`-feedPath <dir>` (DebugL) copies the built packages into `<dir>` instead of `<checkout>/nuget` and purges no
+package cache; the caller provides the isolation (`NUGET_PACKAGES`, `RestoreSources` in its environment - the
+run does not override them). `-WhatIf` shows both, `-Json` reports `feedPath` / `repoPaths`.
+
+**Progress events.** `-EventsFile <file>` (also on `Invoke-Build` and `Invoke-BuildAll`) appends one JSON line per
+event while the run is going: `plan`, per repository `repoStart` / `phase` / `repoDone`, and a closing `done`
+(also when the run refuses or throws). The contract is in `CLAUDE.md` (`-Json` section).
+
 It stops at the first failing repository (fail fast, prints the repository name and the error lines
 of its `Invoke-Build.log`) and prints per-repository timings at the end (`-Json` for a
 machine-readable result). It refuses to start while processes run out of a repository in the range
@@ -196,13 +207,36 @@ Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutpu
 
 Details and examples: [docs/tenant-sweep.md](docs/tenant-sweep.md).
 
+# octo-devstack (local stack daemon)
+
+[octo-devstack](https://github.com/meshmakers/octo-devstack) (private) is a background service that runs the local
+OctoMesh stack for several Claude Code sessions and exposes it as an MCP server. Get it, start it, register it once:
+
+```powershell
+Invoke-CloneMainRepos -devTools         # clone next to octo-tools (e.g. ~/dev/meshmakers/octo-devstack)
+Start-OctoDevStackDaemon                # builds it on first use (Invoke-Build), starts it in the background, waits for /health
+claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:5090/mcp
+```
+
+`Stop-OctoDevStackDaemon` stops the daemon only; the stack services keep running and the next start adopts them.
+On macOS/Linux both cmdlets need `lsof` to find the process on the port.
+
+From then on OctoMesh is managed through the daemon: MCP `http://127.0.0.1:5090/mcp`, status page
+`http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log`, configuration
+`~/.config/octo-devstack/devstack.yaml` (written on the first start).
+
 # Tests
 
 Pester tests for the build tooling live in `tests/` (they run against a fake checkout in `TestDrive`
 and never build or touch the real NuGet folders):
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser   # once
+# once; -MaximumVersion keeps it on Pester 5 - -MinimumVersion alone installs Pester 6
+Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser
+# Windows with Defender "Controlled Folder Access": Install-Module cannot write to Documents\PowerShell\Modules;
+# use Save-Module Pester -MaximumVersion 5.99 -Path <folder> and Import-Module <folder>\Pester instead.
+# every session: load Pester 5 explicitly (if Pester 6 is already loaded, start a fresh pwsh first)
+Import-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99
 Invoke-Pester ./tests
 ```
 
@@ -376,7 +410,7 @@ required sections and the routing markers plus the `CLAUDE.md` shim. A repositor
 from the ruleset; its first step is the start shown above. The checker warns while it exists
 and it is deleted in the migration commit.
 
-Tests, from the `octo-tools` folder (Pester 5 or later): `Invoke-Pester ./tests`.
+Tests, from the `octo-tools` folder (Pester 5, see [Tests](#tests)): `Invoke-Pester ./tests`.
 
 # Support and Feedback
 

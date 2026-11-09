@@ -56,7 +56,8 @@ function Get-Result {
 function Get-RuleFinding { param($Result, [string]$Rule) @($Result.data.findings | Where-Object { $_.rule -eq $Rule }) }
 function Get-Output {
     # The rendered lines of a command, host and warning streams included; -NoNewline host
-    # records are joined into their line the way a console shows them.
+    # records are joined into their line the way a console shows them. AppendLine writes
+    # [Environment]::NewLine (CRLF on Windows), so split on both line endings.
     param([scriptblock]$Command)
     $sb = [System.Text.StringBuilder]::new()
     & $Command 6>&1 3>&1 | ForEach-Object {
@@ -64,6 +65,6 @@ function Get-Output {
         elseif ($_ -is [System.Management.Automation.WarningRecord]) { [void]$sb.AppendLine("WARNING: $($_.Message)") }
         else { [void]$sb.AppendLine([string]$_) }
     }
-    return @($sb.ToString() -split "`n")
+    return @($sb.ToString() -split "`r?`n")
 }
 function Remove-Fixture { foreach ($f in $script:Fixtures) { Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue } }

@@ -30,10 +30,12 @@ function Sync-NuGetPackages {
 
     $restoreExitCode = 0
 
-    # Kill all dotnet processes. This is necessary to avoid file locks.
-    Invoke-KillDotnet
-
     $branchRoot = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
+    # Stop the dotnet processes of this lane (file locks on Windows) - not those of other lanes or a local daemon.
+    [void](Invoke-KillDotnet -branchRootPath $branchRoot -Json:$Json)
+    # A lane process that could not be stopped may keep package files locked: the sync is then not a success,
+    # even if every restore below succeeds.
+    $cleanupExitCode = $LASTEXITCODE
     if ($Json) { Copy-AllNuGetPackages -branch $branch -Json | Out-Null } else { Copy-AllNuGetPackages -branch $branch }
     # Every package cache the lane restores into (lane cache and, on main, the global cache); same
     # JSON contract as Copy-AllNuGetPackages above: forward the switch, discard the nested emit.
@@ -66,8 +68,12 @@ function Sync-NuGetPackages {
     }
 
     if ($Json) {
-        $success = ($restoreExitCode -eq 0)
-        Write-OctoJson -Command 'Sync-NuGetPackages' -Data (New-OctoActionResult -Success $success -ExitCode $restoreExitCode)
+        $exitCode = if ($cleanupExitCode -ne 0) { $cleanupExitCode } else { $restoreExitCode }
+        $success = ($exitCode -eq 0)
+        Write-OctoJson -Command 'Sync-NuGetPackages' -Data (New-OctoActionResult -Success $success -ExitCode $exitCode -Extra @{
+                cleanupExitCode = $cleanupExitCode
+                restoreExitCode = $restoreExitCode
+            })
         return
     }
 }

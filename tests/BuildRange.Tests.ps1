@@ -163,6 +163,13 @@ Describe 'Get-OctoBuildOrder' {
         )
     }
 
+    It 'never builds the developer tools octo-tools and octo-devstack (a folder next to octo-tools used as the lane)' {
+        New-Item -ItemType Directory -Force -Path (Join-Path $fake.Checkout 'octo-devstack'), (Join-Path $fake.Checkout 'octo-tools') | Out-Null
+        $names = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout).Name
+        $names | Should -Not -Contain 'octo-devstack'
+        $names | Should -Not -Contain 'octo-tools'
+    }
+
     It 'honours -excludeFrontend and -excludeAdditional' {
         @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -excludeFrontend $true).Name | Should -Not -Contain 'octo-frontend-libraries'
         $core = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -excludeAdditional $true)
@@ -179,7 +186,11 @@ Describe 'Get-OctoBuildOrder' {
 }
 
 Describe 'Invoke-BuildAll uses the shared build order unchanged' {
-    BeforeEach { $script:fake = New-FakeCheckout }
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        # Never run a real `dotnet build-server shutdown` (Windows, DebugL main lane).
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
+    }
 
     It 'compiles the repositories in the legacy order' {
         $script:compiled = [System.Collections.Generic.List[string]]::new()
@@ -432,6 +443,17 @@ Describe 'Invoke-BuildRange' {
 
 Describe 'Copy-NuGetPackages / Copy-AllNuGetPackages' {
     BeforeEach { $script:fake = New-FakeCheckout }
+
+    It 'Copy-NuGetPackages reports a package it could not copy and does not count it' {
+        Mock -ModuleName Copy-NuGetPackages Copy-Item { throw 'disk full' }
+        $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.copiedCount | Should -Be 0
+        @($json.data.errors).Count | Should -BeGreaterThan 0
+        $json.data.error | Should -Match 'disk full'
+
+        { Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -ErrorAction SilentlyContinue } | Should -Throw '*not copied*disk full*' -ErrorId 'OctoPackageCopyFailed'
+    }
 
     It 'Copy-NuGetPackages -modifiedSince copies only newer packages' {
         $since = (Get-Date).AddMinutes(-1)
@@ -1011,6 +1033,8 @@ Describe 'Range-run lows (T-L3)' {
 Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574)' {
     BeforeEach {
         $script:fake = New-FakeCheckout
+        # Never run a real `dotnet build-server shutdown` (Windows, DebugL main lane).
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
         Mock -ModuleName Invoke-BuildAll Compile-Repo { $true }
         Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
         $script:laneCache = Join-Path $fake.Checkout '.nuget-packages'
@@ -1067,5 +1091,385 @@ Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574
         $doc = ($out -join "`n") | ConvertFrom-Json
         @($doc.data.packageCachesToPurge) | Should -Contain ([IO.Path]::TrimEndingDirectorySeparator($fake.Cache))
         Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
+    }
+}
+
+Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
+    BeforeAll {
+        # A worktree: <folder>/.git is a FILE pointing at <lane>/<repo>/.git/worktrees/<leaf>.
+        function Set-FakeWorktreeGit([string]$folder, [string]$repo) {
+            $gitDir = Join-Path $script:fake.Checkout "$repo/.git/worktrees/$(Split-Path -Leaf $folder)"
+            Set-Content -Path (Join-Path $folder '.git') -Value "gitdir: $gitDir"
+        }
+    }
+
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        $script:seen = [ordered]@{}
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            $script:seen[$entry.Name] = [pscustomobject]@{ Path = $entry.Path; NuGetPackages = $env:NUGET_PACKAGES; RestoreSources = $env:RestoreSources }
+            if ($entry.Name -eq 'octo-construction-kit-engine') {
+                New-Item -ItemType Directory -Force -Path (Join-Path $entry.Path 'bin/DebugL') | Out-Null
+                Set-Content (Join-Path $entry.Path 'bin/DebugL/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') 'from-worktree'
+            }
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+        # A worktree of octo-construction-kit-engine next to the lane's repositories.
+        $script:worktree = Join-Path $fake.Checkout 'wt-8625-octo-construction-kit-engine'
+        New-Item -ItemType Directory -Force -Path $worktree | Out-Null
+        New-FakeSln $worktree 'octo-construction-kit-engine' @('src\Engine\Engine.csproj')
+        Set-FakeWorktreeGit $worktree 'octo-construction-kit-engine'
+        # -feedPath with more than one dotnet repository needs both properties (private feed + private cache).
+        $script:feedProps = @{ RestoreSources = 'feed;https://api.nuget.org/v3/index.json'; RestorePackagesPath = (Join-Path $TestDrive 'private-packages') }
+    }
+
+    It '-repoPaths builds the repository from the given folder at its build-order position' {
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -repoPaths @{ 'construction-kit-engine' = $worktree } -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        @($script:seen.Keys) | Should -Be @('octo-construction-kit-engine', 'octo-sdk')
+        $script:seen['octo-construction-kit-engine'].Path | Should -Be $worktree
+        $script:seen['octo-sdk'].Path | Should -Be (Join-Path $fake.Checkout 'octo-sdk')
+        $json.data.repoPaths.'octo-construction-kit-engine' | Should -Be $worktree
+        (Get-Content (Join-Path $fake.Checkout 'nuget/Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') -Raw).Trim() | Should -Be 'from-worktree'
+    }
+
+    It '-repoPaths refuses a missing folder, a folder without a repository and a relative path' {
+        $empty = Join-Path $TestDrive 'empty-folder'
+        New-Item -ItemType Directory -Force -Path $empty | Out-Null
+        $cases = @(
+            @{ Path = (Join-Path $TestDrive 'does-not-exist'); Message = '*does not exist*' },
+            @{ Path = $empty; Message = '*contains no repository*' },
+            @{ Path = 'relative/folder'; Message = '*absolute path*' }
+        )
+        foreach ($case in $cases) {
+            $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $case.Path } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+            $json.data.success | Should -BeFalse
+            $json.data.error | Should -BeLike $case.Message
+        }
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+    }
+
+    It '-repoPaths accepts a folder that only has a src/ folder' {
+        $srcOnly = Join-Path $TestDrive 'src-only-worktree'
+        New-Item -ItemType Directory -Force -Path (Join-Path $srcOnly 'src') | Out-Null
+        Set-FakeWorktreeGit $srcOnly 'octo-construction-kit-engine'
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $srcOnly } -WhatIf -Json | ConvertFrom-Json
+        $json.data.repositories[0].path | Should -Be $srcOnly
+    }
+
+    It '-WhatIf shows -repoPaths and -feedPath and changes nothing' {
+        $feed = Join-Path $TestDrive 'feeds/session-1'
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -feedPath $feed -msbuildProperties $feedProps -WhatIf -Json | ConvertFrom-Json
+
+        $json.data.whatIf | Should -BeTrue
+        $json.data.feedPath | Should -Be $feed
+        $json.data.nugetPath | Should -Be $feed
+        $json.data.repoPaths.'octo-construction-kit-engine' | Should -Be $worktree
+        $json.data.repositories[0].path | Should -Be $worktree
+        @($json.data.repositories[0].purge).Count | Should -Be 0
+        Test-Path $feed | Should -BeFalse
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+
+        $text = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -feedPath $feed -WhatIf 6>&1 | Out-String
+        $text | Should -Match 'private feed'
+        $text | Should -Match ([regex]::Escape($worktree))
+    }
+
+    It 'a failed package copy fails the repository with failedStep packages' {
+        Mock -ModuleName Invoke-BuildRange Copy-NuGetPackages { '{"schemaVersion":1,"command":"Copy-NuGetPackages","data":{"success":false,"error":"access denied"}}' }
+
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -Json 2>$null | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.failedRepo | Should -Be 'octo-construction-kit-engine'
+        $json.data.failedStep | Should -Be 'packages'
+        $json.data.repositories[0].success | Should -BeFalse
+    }
+
+    It '-feedPath copies into the private feed, skips the purge and keeps the caller''s environment' {
+        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')     # isolated lane: would set NUGET_PACKAGES / RestoreSources
+        $feed = Join-Path $TestDrive 'feeds/session-2'
+        $callerCache = Join-Path $TestDrive 'session-2-packages'
+        $laneCache = Join-Path $fake.Checkout '.nuget-packages'
+        New-Item -ItemType Directory -Force -Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Out-Null
+        $previousRestore = $env:RestoreSources
+        $env:NUGET_PACKAGES = $callerCache
+        $env:RestoreSources = "$feed;https://api.nuget.org/v3/index.json"
+        try {
+            $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -feedPath $feed -msbuildProperties $feedProps -Json | ConvertFrom-Json
+        }
+        finally {
+            $env:NUGET_PACKAGES = $null
+            $env:RestoreSources = $previousRestore
+        }
+
+        $json.data.success | Should -BeTrue
+        $json.data.feedPath | Should -Be $feed
+        Test-Path (Join-Path $feed 'Meshmakers.Octo.Runtime.Engine.999.0.0.nupkg') | Should -BeTrue
+        Test-Path (Join-Path $feed 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+        @(Get-ChildItem (Join-Path $fake.Checkout 'nuget')).Name | Should -Be @('Meshmakers.Common.Shared.999.0.0.nupkg')   # lane feed untouched
+        Test-Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeTrue                         # no purge
+        Test-Path (Join-Path $fake.Cache 'meshmakers.octo.runtime.engine/999.0.0') | Should -BeTrue
+        @($json.data.repositories | ForEach-Object { @($_.purged).Count }) | Should -Be @(0, 0)
+        $script:seen['octo-construction-kit-engine'].NuGetPackages | Should -Be $callerCache
+        $script:seen['octo-construction-kit-engine'].RestoreSources | Should -Be "$feed;https://api.nuget.org/v3/index.json"
+        $json.data.lane.environment.PSObject.Properties.Name | Should -Not -Contain 'NUGET_PACKAGES'
+    }
+
+    It '-feedPath refuses -purgeStaleCache and non-DebugL configurations' {
+        $feed = Join-Path $TestDrive 'feeds/session-3'
+        $json = Invoke-BuildRange -branch main -from octo-sdk -feedPath $feed -purgeStaleCache -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*-purgeStaleCache*'
+
+        $json = Invoke-BuildRange -branch main -from octo-sdk -feedPath $feed -configuration Release -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*DebugL*'
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+    }
+
+    It 'without -feedPath the -Json document reports feedPath null and no repoPaths' {
+        $json = Invoke-BuildRange -branch main -from octo-sdk -Json | ConvertFrom-Json
+        $json.data.feedPath | Should -BeNullOrEmpty
+        @($json.data.repoPaths.PSObject.Properties).Count | Should -Be 0
+    }
+
+    It '-feedPath with several dotnet repositories refuses without RestoreSources and RestorePackagesPath' {
+        $feed = Join-Path $TestDrive 'feeds/session-4'
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*missing: octo-construction-kit-engine: RestoreSources, octo-construction-kit-engine: RestorePackagesPath, octo-sdk: RestoreSources, octo-sdk: RestorePackagesPath.'
+
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*missing: octo-construction-kit-engine: RestorePackagesPath, octo-sdk: RestorePackagesPath.'
+
+        # per-repository overrides count: the run-wide RestoreSources plus RestorePackagesPath for one repo only
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -msbuildPropertiesPerRepo @{ 'octo-sdk' = @{ RestorePackagesPath = 'cache' } } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*missing: octo-construction-kit-engine: RestorePackagesPath.'
+        Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 0
+        Test-Path $feed | Should -BeFalse
+
+        # one dotnet repository: no downstream consumer, no properties needed
+        $json = Invoke-BuildRange -branch main -from octo-sdk -feedPath $feed -Json | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+
+        # both properties given: accepted
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties $feedProps -Json | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+
+        # per-repository keys accept the short name forms of -from/-to
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -msbuildPropertiesPerRepo @{ 'construction-kit-engine' = @{ RestorePackagesPath = 'c1' }; 'sdk' = @{ RestorePackagesPath = 'c2' } } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+
+        # also accepted when the cache comes per repository
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -msbuildPropertiesPerRepo @{ 'octo-construction-kit-engine' = @{ RestorePackagesPath = 'c1' }; 'octo-sdk' = @{ RestorePackagesPath = 'c2' } } -Json | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+    }
+
+    It '-feedPath and Copy-NuGetPackages -nugetPath resolve a relative path against the current location' {
+        $here = Join-Path $TestDrive 'relative-base'
+        New-Item -ItemType Directory -Force -Path $here | Out-Null
+        Push-Location $here
+        try {
+            $json = Invoke-BuildRange -branch main -from octo-sdk -feedPath 'rel-feed' -Json | ConvertFrom-Json
+            Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -nugetPath 'rel-copy' -Json | Out-Null
+        }
+        finally { Pop-Location }
+
+        $json.data.feedPath | Should -Be (Join-Path $here 'rel-feed')
+        Test-Path (Join-Path $here 'rel-feed/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+        Test-Path (Join-Path $here 'rel-copy/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+    }
+
+    It '-repoPaths refuses a worktree of another repository, a clone with another name and a folder without .git' {
+        $otherWorktree = Join-Path $fake.Checkout 'wt-1-octo-sdk'
+        New-Item -ItemType Directory -Force -Path (Join-Path $otherWorktree 'src') | Out-Null
+        Set-FakeWorktreeGit $otherWorktree 'octo-sdk'
+        $wrongClone = Join-Path $fake.Checkout 'engine-clone'
+        New-Item -ItemType Directory -Force -Path (Join-Path $wrongClone 'src'), (Join-Path $wrongClone '.git') | Out-Null
+        $noGit = Join-Path $fake.Checkout 'plain-copy'
+        New-Item -ItemType Directory -Force -Path (Join-Path $noGit 'src') | Out-Null
+        $cases = @(
+            @{ Path = $otherWorktree; Message = "*worktree of 'octo-sdk'*" },
+            @{ Path = $wrongClone; Message = "*clone named 'engine-clone'*" },
+            @{ Path = $noGit; Message = '*no git repository or worktree*' }
+        )
+        foreach ($case in $cases) {
+            $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $case.Path } -WhatIf -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+            $json.data.success | Should -BeFalse
+            $json.data.error | Should -BeLike $case.Message
+        }
+    }
+
+    It '-repoPaths accepts a clone named like the repository and warns when it is not next to the lane''s repositories' {
+        $clone = Join-Path $TestDrive 'elsewhere/octo-construction-kit-engine'
+        New-Item -ItemType Directory -Force -Path (Join-Path $clone 'src'), (Join-Path $clone '.git') | Out-Null
+
+        $out = @(Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $clone } -WhatIf -Json 3>&1)
+        $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+        $json = ($out | Where-Object { $_ -is [string] }) -join "`n" | ConvertFrom-Json
+
+        $json.data.repositories[0].path | Should -Be $clone
+        "$warnings" | Should -Match 'not next to the lane'
+
+        # the sibling worktree of the BeforeEach gives no such warning
+        $out = @(Invoke-BuildRange -branch main -from octo-construction-kit-engine -repoPaths @{ 'octo-construction-kit-engine' = $worktree } -WhatIf -Json 3>&1)
+        "$(@($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }))" | Should -Not -Match 'not next to the lane'
+    }
+
+    It 'Copy-NuGetPackages -nugetPath copies into the given folder (created when missing), not into <checkout>/nuget' {
+        $target = Join-Path $TestDrive 'feeds/copy-target'
+        $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -nugetPath $target -onlyChanged -Json | ConvertFrom-Json
+
+        @($json.data.files) | Should -Be @('Meshmakers.Octo.Sdk.Common.999.0.0.nupkg')
+        Test-Path (Join-Path $target 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg') | Should -BeTrue
+        @(Get-ChildItem (Join-Path $fake.Checkout 'nuget')).Count | Should -Be 1
+
+        # -onlyChanged compares against the target folder
+        $again = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -nugetPath $target -onlyChanged -Json | ConvertFrom-Json
+        $again.data.copiedCount | Should -Be 0
+    }
+}
+
+Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        # Never run a real `dotnet build-server shutdown` (Windows, DebugL main lane).
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 0 }
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
+        $script:seenEnv = @()
+        Mock -ModuleName Invoke-BuildAll Compile-Repo {
+            $script:seenEnv += [pscustomobject]@{ NodeReuse = $env:MSBUILDDISABLENODEREUSE; SharedCompilation = $env:UseSharedCompilation }
+            $true
+        }
+    }
+
+    It 'stops before building when the lane cleanup fails' {
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { $global:LASTEXITCODE = 1 }
+
+        $json = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*lane cleanup*failed*'
+        Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 0
+    }
+
+    It 'passes the lane folder to both Invoke-KillDotnet calls (DebugL)' {
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 2 -Exactly
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 2 -Exactly -ParameterFilter { $branchRootPath -eq $fake.Checkout }
+    }
+
+    It '-skipKill does not call Invoke-KillDotnet' {
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -skipKill -Json | Out-Null
+
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 0
+        Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 10 -Exactly
+    }
+
+    It 'sets MSBUILDDISABLENODEREUSE=1 and UseSharedCompilation=false for the run and restores them' {
+        $previousNodeReuse = $env:MSBUILDDISABLENODEREUSE
+        $previousShared = $env:UseSharedCompilation
+        $env:MSBUILDDISABLENODEREUSE = $null
+        $env:UseSharedCompilation = 'keep-me'
+        try {
+            Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
+
+            @($script:seenEnv.NodeReuse | Sort-Object -Unique) | Should -Be @('1')
+            @($script:seenEnv.SharedCompilation | Sort-Object -Unique) | Should -Be @('false')
+            $env:MSBUILDDISABLENODEREUSE | Should -BeNullOrEmpty
+            $env:UseSharedCompilation | Should -Be 'keep-me'
+        }
+        finally {
+            $env:MSBUILDDISABLENODEREUSE = $previousNodeReuse
+            $env:UseSharedCompilation = $previousShared
+        }
+    }
+
+    It 'on Windows a DebugL run whose purge includes the global cache shuts the build servers down first' {
+        Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
+        $global:LASTEXITCODE = 0
+
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+        Should -Invoke -ModuleName Invoke-BuildAll dotnet -Times 1 -Exactly
+
+        $doc = (Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.buildServerShutdown | Should -BeTrue
+        $text = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun 6>&1 | Out-String
+        $text | Should -Match 'dotnet build-server shutdown before the purge'
+    }
+
+    It 'warns but continues when the build-server shutdown fails' {
+        Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
+        Mock -ModuleName Invoke-BuildAll dotnet { $global:LASTEXITCODE = 3 }
+
+        $warnings = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json 3>&1 |
+            Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        @($warnings | Where-Object { $_.Message -match 'build-server shutdown exited with code 3' }).Count | Should -Be 1
+    }
+
+    It 'no build-server shutdown for an isolated lane, a Release run or another OS' {
+        Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
+        Mock -ModuleName Invoke-BuildAll dotnet { }
+
+        Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
+        Set-FakeLaneFeed (Join-Path $TestDrive 'somewhere-else/nuget')      # isolated lane: only <lane>/.nuget-packages is purged
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+        Should -Invoke -ModuleName Invoke-BuildAll dotnet -Times 0
+
+        Set-FakeLaneFeed (Join-Path $fake.Checkout 'nuget')
+        Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $false }
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+        Should -Invoke -ModuleName Invoke-BuildAll dotnet -Times 0
+        $doc = (Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.buildServerShutdown | Should -BeFalse
+    }
+
+    It '-DryRun shows the run environment and the kill scope' {
+        $doc = (Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.runEnvironment.MSBUILDDISABLENODEREUSE | Should -Be '1'
+        $doc.data.runEnvironment.UseSharedCompilation | Should -Be 'false'
+        $doc.data.killDotnet | Should -Match 'lane processes only'
+
+        $text = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -skipKill 6>&1 | Out-String
+        $text | Should -Match 'UseSharedCompilation=false'
+        $text | Should -Match 'skipped \(-skipKill\)'
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 0
+    }
+}
+
+Describe 'Invoke-Build checks the restore exit code' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Import-Module (Join-Path $PSScriptRoot '../modules/Invoke-Build.psm1') -Force
+        $script:dotnetCalls = [System.Collections.Generic.List[string]]::new()
+    }
+
+    It 'stops after a failed restore with success=false and the restore exit code' {
+        Mock -ModuleName Invoke-Build dotnet {
+            $script:dotnetCalls.Add($args[0])
+            $global:LASTEXITCODE = if ($args[0] -eq 'restore') { 7 } else { 0 }
+        }
+
+        $json = Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -Json | ConvertFrom-Json
+
+        @($script:dotnetCalls) | Should -Be @('restore')
+        $json.data.success | Should -BeFalse
+        $json.data.exitCode | Should -Be 7
+        $global:LASTEXITCODE | Should -Be 7
+    }
+
+    It 'still builds after a successful restore' {
+        Mock -ModuleName Invoke-Build dotnet { $script:dotnetCalls.Add($args[0]); $global:LASTEXITCODE = 0 }
+
+        $json = Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -Json | ConvertFrom-Json
+
+        @($script:dotnetCalls) | Should -Be @('restore', 'build')
+        $json.data.success | Should -BeTrue
     }
 }

@@ -36,7 +36,9 @@ function Compile-Repo {
         # Lane settings from Get-OctoLaneBuildSettings; $null = legacy behaviour.
         $laneSettings = $null,
         # Effective MSBuild properties for this repository (-msbuildProperties merged with -msbuildPropertiesPerRepo).
-        [hashtable]$msbuildProperties = @{}
+        [hashtable]$msbuildProperties = @{},
+        # -EventsFile state of Invoke-BuildAll ($null = no events).
+        $events = $null
     )
 
     # Isolated lane only: repos without their own <RestoreSources> would restore from the user-level
@@ -50,7 +52,7 @@ function Compile-Repo {
         }
     }
     try {
-        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties
+        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties -events $events
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
@@ -64,7 +66,8 @@ function Compile-RepoCore {
         [string]$path,
         [Parameter(Mandatory=$true)]
         [string]$configuration,
-        [hashtable]$msbuildProperties = @{}
+        [hashtable]$msbuildProperties = @{},
+        $events = $null
     )
 
     $builder = Get-RepoBuilder -path $path
@@ -108,6 +111,10 @@ function Compile-RepoCore {
     }
 
     if ($configuration -ieq "DebugL" -And $state -eq $true) {
+        if ($null -ne $events -and $events.Path) {
+            $events.Phase = 'packages'
+            Write-OctoBuildEvent -Path $events.Path -Command 'Invoke-BuildAll' -Event 'phase' -Data ([ordered]@{ repo = (Split-Path -Leaf $path); phase = 'packages' })
+        }
         Copy-NuGetPackages -directory $path -branch $branch
     }
 
@@ -179,6 +186,19 @@ function Get-BuildAllPlan {
 .PARAMETER DryRun
     Print the plan (order, builder, lane environment, restore sources, MSBuild properties) and exit.
 
+.PARAMETER skipKill
+    Do not call Invoke-KillDotnet (for callers that stop the lane's processes themselves).
+    Without it Invoke-BuildAll stops only the dotnet processes of this lane (Invoke-KillDotnet
+    -branchRootPath; Windows only, other OSes report them), never other lanes. On Windows a DebugL run
+    whose purge includes the global package cache (legacy lane, e.g. main) runs `dotnet build-server
+    shutdown` right before the purge (compiler servers can lock 999.0.0 analyzer DLLs there).
+    For the whole run MSBUILDDISABLENODEREUSE=1 and UseSharedCompilation=false are set (restored
+    afterwards), so no reused MSBuild node or compiler server keeps files locked.
+
+.PARAMETER EventsFile
+    Append build progress events (plan, repoStart, phase build/packages, repoDone, done) to this file,
+    see Write-OctoBuildEvent. Not written by -DryRun. The -Json output is not affected.
+
 .PARAMETER Json
     Emit one JSON document with per-repository results.
 
@@ -205,8 +225,71 @@ function Invoke-BuildAll {
         [switch]$DryRun,
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog (DebugL).
         [switch]$skipCkSync,
+        # Do not call Invoke-KillDotnet (the caller stops the lane's processes itself).
+        [switch]$skipKill,
+        # Progress events, one JSON line each (Write-OctoBuildEvent). Not written by -DryRun.
+        [string]$EventsFile = '',
         [switch]$Json
     )
+
+    # The run lives in Invoke-BuildAllCore; this wrapper guarantees the closing `done` event of
+    # -EventsFile, also on an early exit or a throw.
+    $forward = @{}
+    foreach ($key in $PSBoundParameters.Keys) {
+        if ($key -ne 'EventsFile') { $forward[$key] = $PSBoundParameters[$key] }
+    }
+    $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-BuildAll'
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        Invoke-BuildAllCore @forward -events $events
+    }
+    finally {
+        # Also after a throw: repoDone(success=false) of the running repository, then done. Best-effort on Ctrl+C.
+        $watch.Stop()
+        if (-not $DryRun) { Complete-OctoBuildEvents -State $events -ElapsedSeconds $watch.Elapsed.TotalSeconds }
+    }
+}
+
+# Separate so tests can take the Windows path on any OS (Windows PowerShell 5.1: $IsWindows is $null).
+function Test-OctoBuildAllWindows {
+    return ($IsWindows -ne $false)
+}
+
+# The builder of Get-RepoBuilder in the mode vocabulary of Invoke-BuildRange's plan (events).
+function Get-RepoBuildMode {
+    param([string]$builder)
+    switch ($builder) {
+        'build.ps1' { return 'script' }
+        'Invoke-Publish' { return 'frontend' }
+        'Invoke-BuildZenonPlug' { return 'zenon' }
+        'none' { return 'none' }
+        default { return 'dotnet' }
+    }
+}
+
+function Invoke-BuildAllCore {
+    # The body of Invoke-BuildAll (see its help); $events is the -EventsFile state shared with the wrapper.
+    param(
+        [string]$configuration = "Release",
+        [string]$branch = "",
+        [Boolean]$excludeAdditional = $false,
+        [Boolean]$excludeFrontend = $false,
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto',
+        [hashtable]$msbuildProperties = @{},
+        [hashtable]$msbuildPropertiesPerRepo = @{},
+        [switch]$DryRun,
+        [switch]$skipCkSync,
+        [switch]$skipKill,
+        [hashtable]$events = @{},
+        [switch]$Json
+    )
+
+    $eventsPath = [string]$events.Path
+    $emit = {
+        param([string]$name, [System.Collections.IDictionary]$data)
+        Write-OctoBuildEvent -Path $eventsPath -Command 'Invoke-BuildAll' -Event $name -Data $data
+    }
 
     # Validate early so a typo fails before anything is wiped or killed.
     try { [void](ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties) }
@@ -254,6 +337,17 @@ function Invoke-BuildAll {
     $publishWarning = Get-OctoCkPublishDisabledWarning -repoNames @($plan | Where-Object { Test-OctoCkPublishDisabled -properties $repoProperties[$_.name] } | ForEach-Object { $_.name })
     if ($publishWarning) { Write-Warning $publishWarning }
 
+    # Run environment: the lane's plus no node reuse and no shared compiler server for the whole run, so no
+    # MSBuild node or VBCSCompiler of this run keeps files locked (Invoke-KillDotnet no longer kills them).
+    $runEnvironment = [ordered]@{}
+    foreach ($name in @($laneSettings.environment.Keys)) { $runEnvironment[$name] = $laneSettings.environment[$name] }
+    $runEnvironment['MSBUILDDISABLENODEREUSE'] = '1'
+    $runEnvironment['UseSharedCompilation'] = 'false'
+    # Windows, DebugL, purge that includes the global package cache (legacy lane, e.g. main): a running
+    # compiler server / MSBuild node can hold meshmakers.*/999.0.0 analyzer DLLs there and make the purge
+    # fail. Then `dotnet build-server shutdown` runs right before the purge (servers restart on demand).
+    $shutdownBuildServer = ($configuration -ieq "DebugL") -and (Test-OctoBuildAllWindows) -and -not $laneSettings.isolated
+
     if ($DryRun) {
         $planEntries = @(foreach ($entry in $plan) {
             $builder = Get-RepoBuilder -path $entry.path
@@ -273,6 +367,9 @@ function Invoke-BuildAll {
             branchRoot    = $branchRootPath
             configuration = $configuration
             lane          = $laneSettings
+            runEnvironment = $runEnvironment
+            killDotnet    = if ($skipKill) { 'skipped (-skipKill)' } else { "lane processes only ($branchRootPath)" }
+            buildServerShutdown = [bool]$shutdownBuildServer
             packageCachesToPurge = @(if ($configuration -ieq 'DebugL') { Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -WhatIf })
             repositories  = $planEntries
         }
@@ -287,6 +384,9 @@ function Invoke-BuildAll {
         foreach ($name in $laneSettings.environment.Keys) {
             Write-Host "  env $name=$($laneSettings.environment[$name])"
         }
+        Write-Host "Run environment: MSBUILDDISABLENODEREUSE=1, UseSharedCompilation=false (whole run, restored afterwards)"
+        Write-Host "Kill dotnet:     $(if ($skipKill) { 'skipped (-skipKill)' } else { "only processes of this lane ($branchRootPath)" })"
+        if ($shutdownBuildServer) { Write-Host "Build server:    dotnet build-server shutdown before the purge (Windows; the purge includes the global package cache)" }
         if ($configuration -ieq 'DebugL') {
             foreach ($cache in @(Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -WhatIf)) {
                 Write-Host "Purges meshmakers.*/999.0.0 in: $cache"
@@ -310,9 +410,7 @@ function Invoke-BuildAll {
         }
     }
 
-    # kill all dotnet processes. this is necessary to avoid file locks.
-    Invoke-KillDotnet
-
+    # Refusals before the first repository emit only `done` (failedStep preflight) - check before the plan event.
     # Check if any repositories were found
     $octoCount = if ($octoDirectories) { @($octoDirectories).Count } else { 0 }
     $mmCount = if ($mmDirectories) { @($mmDirectories).Count } else { 0 }
@@ -321,15 +419,51 @@ function Invoke-BuildAll {
         return
     }
 
+    $repoModes = @{}
+    foreach ($entry in $plan) { $repoModes[$entry.name] = Get-RepoBuildMode -builder (Get-RepoBuilder -path $entry.path) }
+    $repoCount = $plan.Count
+    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.name; mode = $repoModes[$_.name] } }); count = $repoCount })
+
+    # Stop the dotnet processes of this lane (file locks on Windows) - never other lanes, a local daemon
+    # or the shared build server. -skipKill: the caller stopped them itself.
+    # A failed lane cleanup (a process that could not be stopped, or a refused lane folder) ends the run before
+    # anything is built or purged: done reports failedStep "cleanup", -Json a failed document.
+    # Returns the failure message (and reports it) or $null; the caller emits nothing else and returns.
+    $cleanupFailure = {
+        if ($LASTEXITCODE -eq 0) { return $null }
+        $events.FailedStep = 'cleanup'
+        return "Invoke-BuildAll: the lane cleanup (Invoke-KillDotnet -branchRootPath $branchRootPath) failed with exit code $LASTEXITCODE; nothing was built."
+    }
+    $reportCleanupFailure = {
+        param([string]$message)
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-BuildAll' -Data ([ordered]@{ branch = $branch; configuration = $configuration; success = $false; error = $message; repositories = @() })
+        }
+        Write-Error $message -ErrorAction Continue
+    }
+    if (-not $skipKill) {
+        $global:LASTEXITCODE = 0   # a stale exit code of an earlier native call must not count as a cleanup failure
+        [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json)
+        $failure = & $cleanupFailure
+        if ($failure) { & $reportCleanupFailure $failure; return }
+    }
+
+
     # Create a dictionary that contains the directory name and a status weather the build was successful or not
     $allStatus = [ordered]@{}
 
     # Start a timer
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    $purgeErrors = @()
     if ($configuration -ieq "DebugL"){
-        # Kill all dotnet processes. This is necessary to avoid file locks.
-        Invoke-KillDotnet
+        # Again right before the package folders are wiped (lane processes only, see above).
+        if (-not $skipKill) {
+            $global:LASTEXITCODE = 0   # a stale exit code of an earlier native call must not count as a cleanup failure
+            [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json)
+            $failure = & $cleanupFailure
+            if ($failure) { & $reportCleanupFailure $failure; return }
+        }
 
         # Delete all nuget packages in the octo mesh nuget folder
         $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
@@ -338,36 +472,102 @@ function Invoke-BuildAll {
             Write-Host "Creating directory $branchNugetPath" -ForegroundColor Yellow
             New-Item -ItemType Directory -Path $branchNugetPath | Out-Null
         }
-        Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force
+        # Errors are still shown, and collected so a reset that left locked files behind is not reported as success.
+        Get-ChildItem -Path $branchNugetPath -File | Remove-Item -Force -ErrorVariable +purgeErrors
 
         # Purge the meshmakers.*/999.0.0 folders of every package cache this lane restores into
         # (Get-OctoRangePackageCaches): an isolated lane (dev) only <lane>/.nuget-packages; the main lane
         # also the global cache (NUGET_PACKAGES or ~/.nuget/packages) - it has no <lane>/.nuget-packages
         # unless Octo.User.props sets RestorePackagesPath. Never the whole cache, never another lane's.
         # -Json is forwarded and the nested emits swallowed (one machine-readable document).
-        Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json | Out-Null
+        if ($shutdownBuildServer) {
+            if (-not $Json) { Write-Host "Shutdown the dotnet build servers (they may lock 999.0.0 analyzers in the global package cache; they restart on demand)" -ForegroundColor Yellow }
+            dotnet build-server shutdown *>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                # Not fatal: the servers restart on demand. But the purge below may now fail on locked files.
+                Write-Warning "dotnet build-server shutdown exited with code $LASTEXITCODE; the package purge may fail on locked files."
+            }
+        }
+        # The errors are still shown, and collected (-ErrorVariable) so a purge that left files behind stops the run.
+        Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json -ErrorVariable +purgeErrors | Out-Null
+
+        # A reset that left packages behind (locked files on Windows) would build against stale 999.0.0 packages:
+        # stop before building; done reports failedStep "purge".
+        if ($purgeErrors.Count -gt 0) {
+            $events.FailedStep = 'purge'
+            & $reportCleanupFailure "Invoke-BuildAll: the DebugL package purge failed ($($purgeErrors.Count) error(s), first: $($purgeErrors[0])); nothing was built. Stop the processes that lock the files and run it again."
+            return
+        }
     }
 
     # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run; empty for the legacy
     # lane. Restored afterwards so the session is left as it was found.
     $repoLaneSettings = if ($configuration -ieq "DebugL") { $laneSettings } else { $null }
-    $savedEnvironment = Set-OctoBuildEnvironment -environment $laneSettings.environment
+    $savedEnvironment = Set-OctoBuildEnvironment -environment $runEnvironment
+    $repoIndex = 0
+    $firstFailedRepo = $null
+    $runError = $null
     try {
         foreach ($entry in $plan) {
+            $repoIndex++
+            $events.Repo = $entry.name
+            $events.Index = $repoIndex
+            $events.Count = $repoCount
+            $events.Phase = 'build'
+            $events.RepoDone = $false
+            $events.RepoWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $events.LogFile = if ($repoModes[$entry.name] -eq 'dotnet') { Join-Path $entry.path 'Invoke-Build.log' } else { $null }
+            & $emit 'repoStart' ([ordered]@{ repo = $entry.name; index = $repoIndex; count = $repoCount })
+            # Restore and build are one step here (Invoke-Build); the package copy is the 'packages' phase (DebugL).
+            & $emit 'phase' ([ordered]@{ repo = $entry.name; phase = 'build' })
             $repoStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
             # AB#7974: the private catalog's intermediate versions of the repo's ckLanguage 2 models into the lane's
             # local catalog before its CK compile gate runs (warning + fix command on failure, never a build stop).
             if ($configuration -ieq "DebugL" -and -not $skipCkSync) {
                 [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
             }
-            [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name]
+            # A failed package copy (Copy-NuGetPackages throws) leaves the dependent repositories without the new
+            # packages: the repository counts as failed and the run stops.
+            $copyError = $null
+            try {
+                [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name] -events $events
+            }
+            catch {
+                if ($_.FullyQualifiedErrorId -notlike 'OctoPackageCopyFailed*') { throw }
+                $buildStatus = $false
+                $copyError = "$($entry.name): $($_.Exception.Message)"
+            }
             $repoStopWatch.Stop()
             $allStatus.Add($entry.name, @{ Success = $buildStatus; Duration = $repoStopWatch.Elapsed })
+            # Invoke-BuildAll measures one duration per repository and copies without a per-repository
+            # count: buildSeconds = seconds, copied/purged = null (the lane caches are purged up front).
+            & $emit 'repoDone' ([ordered]@{
+                    repo           = $entry.name
+                    index          = $repoIndex
+                    count          = $repoCount
+                    success        = $buildStatus
+                    seconds        = $repoStopWatch.Elapsed.TotalSeconds
+                    buildSeconds   = $repoStopWatch.Elapsed.TotalSeconds
+                    testSeconds    = 0
+                    packageSeconds = 0
+                    copied         = $null
+                    purged         = $null
+                    logFile        = $events.LogFile
+                })
+            $events.RepoDone = $true
+            if (-not $buildStatus -and -not $firstFailedRepo) { $firstFailedRepo = $entry.name }
+            if ($copyError) { $runError = $copyError; break }
         }
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
     }
+    # Invoke-BuildAll does not stop at a failing repository; done reports the first one. A DebugL reset
+    # whose purge left files behind (locked on Windows) is not a success either: failedStep "purge".
+    $events.Success = ($null -eq $firstFailedRepo)
+    $events.FailedRepo = $firstFailedRepo
+    $events.FailedStep = if ($runError) { 'packages' } elseif ($firstFailedRepo) { 'build' } else { $null }
+    $events.Completed = $true
 
     # Print the status of all builds
     
@@ -389,6 +589,7 @@ function Invoke-BuildAll {
         $data = @{
             branch        = $branch
             configuration = $configuration
+            success       = [bool]$events.Success
             repositories  = $repoEntries
             summary       = [ordered]@{
                 total             = $repositoryCount
@@ -398,10 +599,13 @@ function Invoke-BuildAll {
                 elapsedSeconds    = $stopWatch.Elapsed.TotalSeconds
             }
         }
+        if ($runError) { $data.error = "Package copy failed, the run stopped: $runError" }
         Write-OctoJson -Command 'Invoke-BuildAll' -Data $data
+        if ($runError) { Write-Error $data.error }
         return
     }
 
+    if ($runError) { Write-Error "Package copy failed, the run stopped: $runError" }
     Write-Host "Summary:"
     Write-Host "---------------------------------"
     Write-Host "Build branch $branch with configuration $configuration"

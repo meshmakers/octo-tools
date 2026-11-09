@@ -380,7 +380,9 @@ function New-OctoSolutionFilter {
     )
     # One folder per checkout (hash of the solution's parent directory) so concurrent runs in the
     # main and dev checkouts never overwrite each other's filters.
-    $checkout = [IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $solutionPath)))
+    # The repository folder, not the lane: a worktree and the lane repo of the same solution name must not
+    # share a filter file when they build at the same time.
+    $checkout = [IO.Path]::GetFullPath((Split-Path -Parent $solutionPath))
     $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($checkout.ToLowerInvariant()))).Substring(0, 12)
     $directory = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath "octo-buildrange/$hash"
     if (!(Test-Path $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
@@ -482,16 +484,32 @@ function Write-OctoBuildRangePlan {
         [string[]]$propertyArgs = @(),
         $laneSettings = $null,
         [string[]]$packageCaches = @(),
-        [switch]$verifyTests
+        [switch]$verifyTests,
+        # -feedPath (empty = <checkout>/nuget) and -repoPaths of the run.
+        [string]$feedPath = '',
+        [System.Collections.IDictionary]$repoPaths = $null,
+        # Environment the run sets (the lane's; with -feedPath without NUGET_PACKAGES/RestoreSources). $null = the lane's.
+        [System.Collections.IDictionary]$environment = $null
     )
+    $privateFeed = -not [string]::IsNullOrWhiteSpace($feedPath)
     $purgeEnabled = $configuration -ieq 'DebugL'
     Write-Host "Invoke-BuildRange plan ($configuration) in $branchRootPath" -ForegroundColor Cyan
-    Write-Host "  NuGet folder: $(Join-Path $branchRootPath 'nuget') (not wiped; Copy-NuGetPackages after each repository)" -ForegroundColor DarkGray
-    if ($null -ne $laneSettings) {
-        Write-Host "  Lane isolated: $($laneSettings.isolated) ($($laneSettings.reason))" -ForegroundColor DarkGray
-        foreach ($name in $laneSettings.environment.Keys) { Write-Host "    env $name=$($laneSettings.environment[$name])" -ForegroundColor DarkGray }
+    if ($privateFeed) {
+        Write-Host "  NuGet folder: $feedPath (private feed, -feedPath; Copy-NuGetPackages after each repository, the lane's package caches are NOT purged, the caller's NUGET_PACKAGES / RestoreSources are kept)" -ForegroundColor DarkGray
     }
-    if ($packageCaches.Count -gt 0) {
+    else {
+        Write-Host "  NuGet folder: $(Join-Path $branchRootPath 'nuget') (not wiped; Copy-NuGetPackages after each repository)" -ForegroundColor DarkGray
+    }
+    if ($null -ne $repoPaths -and $repoPaths.Count -gt 0) {
+        Write-Host "  Repository folders (-repoPaths):" -ForegroundColor DarkGray
+        foreach ($name in $repoPaths.Keys) { Write-Host "    $name -> $($repoPaths[$name])" -ForegroundColor DarkGray }
+    }
+    if ($null -ne $laneSettings) {
+        if ($null -eq $environment) { $environment = $laneSettings.environment }
+        Write-Host "  Lane isolated: $($laneSettings.isolated) ($($laneSettings.reason))" -ForegroundColor DarkGray
+        foreach ($name in $environment.Keys) { Write-Host "    env $name=$($environment[$name])" -ForegroundColor DarkGray }
+    }
+    if ($packageCaches.Count -gt 0 -and -not $privateFeed) {
         Write-Host "  Package cache(s) purged per package / checked for stale 999.0.0 folders: $($packageCaches -join ', ')" -ForegroundColor DarkGray
     }
     if ($propertyArgs.Count -gt 0) {
@@ -507,6 +525,7 @@ function Write-OctoBuildRangePlan {
         $index++
         Write-Host ""
         Write-Host ("{0,2}. {1} [{2}] -> {3}" -f $index, $entry.Name, $entry.Group, $entry.Target) -ForegroundColor Green
+        if ($null -ne $repoPaths -and $repoPaths.Contains($entry.Name)) { Write-Host "    path: $($entry.Path) (-repoPaths)" }
         if ($entry.Mode -eq 'dotnet') {
             Write-Host "    solution: $(Split-Path -Leaf $entry.Solution) ($($entry.Projects.Count) project(s))"
             foreach ($project in $entry.Projects) { Write-Host "      - $project" }
@@ -518,7 +537,10 @@ function Write-OctoBuildRangePlan {
         }
         foreach ($note in $entry.Notes) { Write-Host "    note: $note" -ForegroundColor Yellow }
         if ($entry.Mode -ne 'none') {
-            if ($purgeEnabled) {
+            if ($purgeEnabled -and $privateFeed) {
+                Write-Host "    then: Copy-NuGetPackages into $feedPath (no package-cache purge)"
+            }
+            elseif ($purgeEnabled) {
                 Write-Host "    then: Copy-NuGetPackages + purge of the packages this build rewrites; candidates from the previous build output ($($entry.PurgePaths.Count)):"
                 foreach ($path in $entry.PurgePaths) {
                     if ($entry.OlderPaths -contains $path) {
@@ -656,9 +678,39 @@ function Write-OctoBuildRangePlan {
     differs from <checkout>/nuget/<id>.999.0.0.nupkg (e.g. extracted from another lane's build).
     Without the switch they are only reported (warning, -WhatIf, -Json).
 
+.PARAMETER repoPaths
+    Build single repositories from another folder instead of <checkout>/<repo>, keyed by repository
+    name (same name forms as -from/-to), e.g. a git worktree:
+    @{ 'octo-construction-kit-engine' = '/Users/me/meshmakers/branches/main/wt-8625-octo-construction-kit-engine' }.
+    The repository keeps its position in the build order. The folder must be an absolute path, exist,
+    contain a .sln/.slnx in its root or a src/ folder, and be that repository: a git worktree whose
+    .git file points to <repo>/.git/worktrees/<name>, or a clone whose .git folder sits in a folder
+    named like the repository; otherwise the run is refused. A folder that is not next to the lane's
+    repositories gets a warning (repositories with their own <RestoreSources> use ../nuget).
+    A key for a repository outside the selected range is not applied (warning).
+
+.PARAMETER feedPath
+    Private feed: copy the built DebugL packages into this folder (created when missing) instead of
+    <checkout>/nuget, and do NOT purge the lane's package caches. The caller provides the isolation
+    (NUGET_PACKAGES, RestoreSources): with -feedPath the run neither sets the lane's NUGET_PACKAGES nor
+    the per-repository RestoreSources override, the stale-cache check of <checkout>/nuget is skipped
+    and -purgeStaleCache is refused. DebugL only. Reported as `feedPath` in the -Json document. A
+    relative path resolves against $PWD. With more than one dotnet repository in the range the run is
+    refused unless -msbuildProperties contains both RestoreSources and RestorePackagesPath (see below).
+    Note: repositories that declare their own <RestoreSources>, and a lane whose Octo.User.props sets
+    RestorePackagesPath, ignore the environment - pass -msbuildProperties @{ RestoreSources = ..;
+    RestorePackagesPath = .. } (global properties win) when the downstream repositories of the range
+    must restore from the private feed into the private cache.
+
+.PARAMETER EventsFile
+    Append build progress events to this file while the run is going (one JSON object per line,
+    see Write-OctoBuildEvent): plan, then per repository repoStart, phase (build, tests, packages,
+    purge) and repoDone, and finally done - also on an early refusal or a throw (success=false).
+    Nothing is written under -WhatIf. The -Json output is not affected.
+
 .PARAMETER WhatIf
-    Print the plan (repositories, projects, global-cache folders to purge, running processes)
-    and do nothing.
+    Print the plan (repositories, projects, global-cache folders to purge, running processes,
+    -repoPaths and -feedPath) and do nothing.
 
 .PARAMETER Json
     Emit a single JSON document (plan under -WhatIf, per-repository results otherwise).
@@ -700,13 +752,138 @@ function Invoke-BuildRange {
         [string]$laneIsolation = 'Auto',
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog.
         [switch]$skipCkSync,
+        [hashtable]$repoPaths = @{},
+        [string]$feedPath = '',
+        [string]$EventsFile = '',
         [switch]$Json
     )
+
+    # The run itself lives in Invoke-OctoBuildRangeCore; this wrapper guarantees the closing `done`
+    # event of -EventsFile, also when the run refuses early or throws.
+    # The core is a simple function: -WhatIf / -ErrorAction reach it as the preference variables of this
+    # scope, and its Write-Error lands in this cmdlet's error stream (-ErrorVariable) like before.
+    $skip = @([System.Management.Automation.PSCmdlet]::CommonParameters) + @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters) + @('EventsFile')
+    $forward = @{}
+    foreach ($key in $PSBoundParameters.Keys) {
+        if ($key -in $skip) { continue }
+        $forward[$key] = $PSBoundParameters[$key]
+    }
+    $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-BuildRange'
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        Invoke-OctoBuildRangeCore @forward -events $events
+    }
+    finally {
+        # Also after a throw: repoDone(success=false) of the running repository, then done. Best-effort on Ctrl+C.
+        $watch.Stop()
+        if (-not $WhatIfPreference) { Complete-OctoBuildEvents -State $events -ElapsedSeconds $watch.Elapsed.TotalSeconds }
+    }
+}
+
+function Resolve-OctoRepoPathOverrides {
+    # -repoPaths: resolves the keys against the build order and validates the folders. Returns a
+    # map repository name -> absolute folder; throws on an invalid entry.
+    param(
+        [hashtable]$repoPaths = @{},
+        [Parameter(Mandatory = $true)] [object[]]$order,
+        # Lane checkout; a folder that is not next to the lane's repositories gets a warning.
+        [string]$branchRootPath = ""
+    )
+    $map = [ordered]@{}
+    foreach ($key in @($repoPaths.Keys)) {
+        $name = (Resolve-OctoBuildRangeRepo -name ([string]$key) -order $order).Name
+        $folder = [string]$repoPaths[$key]
+        if ([string]::IsNullOrWhiteSpace($folder) -or -not [IO.Path]::IsPathRooted($folder)) {
+            throw "-repoPaths: the folder for $name must be an absolute path (got '$folder')."
+        }
+        $folder = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($folder))
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
+            throw "-repoPaths: folder $folder for $name does not exist."
+        }
+        $hasSolution = @(Get-ChildItem -LiteralPath $folder -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.sln', '.slnx' }).Count -gt 0
+        $hasSrc = Test-Path -LiteralPath (Join-Path $folder 'src') -PathType Container
+        if (-not $hasSolution -and -not $hasSrc) {
+            throw "-repoPaths: folder $folder for $name contains no repository (no .sln/.slnx in its root and no src/ folder)."
+        }
+        # It must be THIS repository: a git worktree (.git file) of <repo>, or a clone (.git folder) named <repo>.
+        $gitPath = Join-Path $folder '.git'
+        if (Test-Path -LiteralPath $gitPath -PathType Leaf) {
+            $gitText = [string](Get-Content -LiteralPath $gitPath -Raw -ErrorAction SilentlyContinue)
+            $gitDir = $null
+            if ($gitText -match '(?m)^[ \t]*gitdir:[ \t]*(\S[^\r\n]*?)[ \t]*\r?$') { $gitDir = $Matches[1] }
+            if (-not $gitDir) {
+                throw "-repoPaths: $gitPath of $name has no gitdir line."
+            }
+            if (-not [IO.Path]::IsPathRooted($gitDir)) { $gitDir = Join-Path $folder $gitDir }
+            # <repo>/.git/worktrees/<name> -> <repo>
+            $gitDir = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($gitDir))
+            $mainRepo = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $gitDir)))
+            if ($mainRepo -ine $name) {
+                throw "-repoPaths: $folder is a worktree of '$mainRepo' (gitdir $gitDir), not of $name."
+            }
+        }
+        elseif (Test-Path -LiteralPath $gitPath -PathType Container) {
+            if ((Split-Path -Leaf $folder) -ine $name) {
+                throw "-repoPaths: $folder is a clone named '$(Split-Path -Leaf $folder)', not $name."
+            }
+        }
+        else {
+            throw "-repoPaths: $folder for $name is no git repository or worktree (no .git) - cannot verify that it holds $name."
+        }
+        # Repos whose own <RestoreSources> use ../nuget resolve the feed next to the folder.
+        if (-not [string]::IsNullOrWhiteSpace($branchRootPath)) {
+            $parent = [IO.Path]::TrimEndingDirectorySeparator((Split-Path -Parent $folder))
+            $lane = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
+            if ($parent -ine $lane) {
+                Write-Warning "-repoPaths: $folder is not next to the lane's repositories ($lane) - a repository whose own <RestoreSources> uses ../nuget restores from $(Join-Path $parent 'nuget') instead of the lane feed."
+            }
+        }
+        $map[$name] = $folder
+    }
+    return $map
+}
+
+function Invoke-OctoBuildRangeCore {
+    # The body of Invoke-BuildRange (see its help). $events is the -EventsFile state shared with the
+    # wrapper: Path (empty = no events), Repo/Phase (what runs now), Success/FailedRepo/FailedStep/Completed.
+    # Deliberately a simple function (no [CmdletBinding()] / [Parameter()]), see Invoke-BuildRange.
+    param(
+        [string]$from,
+        [string]$to = "",
+        [string]$branch = "",
+        [string]$configuration = "DebugL",
+        [string[]]$include = @(),
+        [string[]]$exclude = @(),
+        [switch]$includeTests,
+        [Boolean]$excludeFrontend = $true,
+        [switch]$stopServices,
+        [switch]$ignoreRunningServices,
+        [hashtable]$msbuildProperties = @{},
+        [hashtable]$msbuildPropertiesPerRepo = @{},
+        [switch]$purgeStaleCache,
+        [switch]$verifyTests,
+        [ValidateSet('Auto', 'On', 'Off')]
+        [string]$laneIsolation = 'Auto',
+        [switch]$skipCkSync,
+        [hashtable]$repoPaths = @{},
+        [string]$feedPath = '',
+        [hashtable]$events,
+        [switch]$Json
+    )
+
+    $eventsPath = [string]$events.Path
+    $emit = {
+        param([string]$name, [System.Collections.IDictionary]$data)
+        Write-OctoBuildEvent -Path $eventsPath -Command 'Invoke-BuildRange' -Event $name -Data $data
+    }
 
     # Every early exit reports through the same path: Write-Error, LASTEXITCODE 1 and, with -Json,
     # a JSON document with success=false.
     $fail = {
         param([string]$message)
+        $events.Success = $false
+        $events.FailedStep = 'preflight'
+        $events.Completed = $true
         $global:LASTEXITCODE = 1
         if ($Json) {
             Write-OctoJson -Command 'Invoke-BuildRange' -Data ([ordered]@{ success = $false; error = $message; repositories = @() })
@@ -743,14 +920,80 @@ function Invoke-BuildRange {
         return
     }
 
+    # -repoPaths: build single repositories from another folder (e.g. a git worktree), same position.
+    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $repoPaths -order $order -branchRootPath $branchRootPath }
+    catch { & $fail $_.Exception.Message; return }
+    $repoPathsOutside = @($repoPathMap.Keys | Where-Object { $name = $_; -not ($repos | Where-Object { $_.Name -ieq $name }) } | Sort-Object)
+    if ($repoPathsOutside.Count -gt 0) {
+        Write-Warning "-repoPaths: $($repoPathsOutside -join ', ') not in the selected range - their folders are not built. Add them with -include if they should be built."
+    }
+    $repos = @($repos | ForEach-Object {
+            if ($repoPathMap.Contains($_.Name)) {
+                [pscustomobject]@{ Name = $_.Name; Path = $repoPathMap[$_.Name]; Group = $_.Group; Directory = (Get-Item -LiteralPath $repoPathMap[$_.Name]) }
+            }
+            else { $_ }
+        })
+
+    # -feedPath: private feed instead of <checkout>/nuget, no purge of the lane's package caches.
+    $privateFeed = -not [string]::IsNullOrWhiteSpace($feedPath)
+    $nugetTarget = Join-Path $branchRootPath 'nuget'
+    if ($privateFeed) {
+        if ($configuration -ine 'DebugL') {
+            & $fail "-feedPath needs -configuration DebugL (packages are only copied for DebugL)."
+            return
+        }
+        if ($purgeStaleCache) {
+            & $fail "-feedPath and -purgeStaleCache cannot be combined: a private-feed run never purges the lane's package caches."
+            return
+        }
+        # Relative to $PWD (GetFullPath would resolve against the process start directory).
+        $nugetTarget = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($feedPath))
+    }
+    $repoPathsReport = [ordered]@{}
+    foreach ($name in $repoPathMap.Keys) { $repoPathsReport[$name] = $repoPathMap[$name] }
+
     $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $branchRootPath -laneIsolation $laneIsolation
     $globalPackagesPath = @(Get-OctoRangePackageCaches -laneSettings $laneSettings)
+    # The environment of the run: the lane's, but with -feedPath the caller's NUGET_PACKAGES /
+    # RestoreSources stay in force (only node reuse is still switched off).
+    $runEnvironment = [ordered]@{}
+    foreach ($name in @($laneSettings.environment.Keys)) {
+        if ($privateFeed -and $name -in @('NUGET_PACKAGES', 'RestoreSources')) { continue }
+        $runEnvironment[$name] = $laneSettings.environment[$name]
+    }
     $plan = @(Get-OctoBuildRangePlan -repos $repos -includeTests:$includeTests -globalPackagesPath $globalPackagesPath)
     $verify = [bool]$verifyTests -and -not $includeTests
+
+    # -feedPath with more than one dotnet repository: the downstream repositories must restore the
+    # private packages from the feed into a private cache. The environment is not enough (repos with their
+    # own <RestoreSources>, a lane RestorePackagesPath in Octo.User.props win over it) - only global
+    # MSBuild properties are; without them they build against old lane packages or extract the private
+    # 999.0.0 packages into the lane cache.
+    if ($privateFeed) {
+        $dotnetRepos = @($plan | Where-Object { $_.Mode -eq 'dotnet' })
+        if ($dotnetRepos.Count -gt 1) {
+            # Effective properties per repository: the run-wide ones, overridden by -msbuildPropertiesPerRepo.
+            $missing = @(foreach ($repo in $dotnetRepos) {
+                    # Keys accept the same name forms as -from/-to (e.g. without the octo- prefix): resolve them first.
+                    $perRepo = @{}
+                    foreach ($repoKey in @($msbuildPropertiesPerRepo.Keys)) {
+                        $resolved = try { (Resolve-OctoBuildRangeRepo -name ([string]$repoKey) -order $order).Name } catch { [string]$repoKey }
+                        if ($resolved -eq $repo.Name) { $perRepo = $msbuildPropertiesPerRepo[$repoKey] }
+                    }
+                    foreach ($key in @('RestoreSources', 'RestorePackagesPath')) {
+                        if (-not $msbuildProperties.ContainsKey($key) -and -not $perRepo.ContainsKey($key)) { "$($repo.Name): $key" }
+                    }
+                })
+            if ($missing.Count -gt 0) {
+                & $fail "-feedPath with $($dotnetRepos.Count) dotnet repositories ($(($dotnetRepos.Name) -join ', ')) needs RestoreSources (the private feed first) and RestorePackagesPath (a private package cache) for every one of them, via -msbuildProperties or -msbuildPropertiesPerRepo; missing: $($missing -join ', ')."
+                return
+            }
+        }
+    }
     foreach ($entry in $plan) {
         # Per-repo RestoreSources of an isolated lane (DebugL, repos without their own <RestoreSources>).
         $restoreSources = $null
-        if ($configuration -ieq 'DebugL' -and $entry.Mode -ne 'none') {
+        if ($configuration -ieq 'DebugL' -and $entry.Mode -ne 'none' -and -not $privateFeed) {
             $restoreSources = Get-OctoRepoRestoreSourcesOverride -repositoryPath $entry.Path -laneSettings $laneSettings
         }
         $entry | Add-Member -NotePropertyName RestoreSources -NotePropertyValue $restoreSources -Force
@@ -779,8 +1022,10 @@ function Invoke-BuildRange {
     if ($publishWarning) { Write-Warning $publishWarning }
     $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' }))
     $purgeEnabled = $configuration -ieq 'DebugL'
+    # Purge of the lane's package caches: DebugL, never for a private feed.
+    $purgeCaches = $purgeEnabled -and -not $privateFeed
     $staleCache = @()
-    if ($purgeEnabled) {
+    if ($purgeCaches) {
         $staleCache = @(Get-OctoStaleGlobalPackages -nugetPath (Join-Path $branchRootPath 'nuget') -globalPackagesPath $globalPackagesPath)
     }
 
@@ -789,13 +1034,15 @@ function Invoke-BuildRange {
             Write-OctoJson -Command 'Invoke-BuildRange' -Data ([ordered]@{
                     whatIf           = $true
                     branchRootPath   = $branchRootPath
-                    lane             = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $laneSettings.environment }
+                    lane             = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                     packageCaches    = @($globalPackagesPath)
                     verifyTests      = $verify
                     configuration    = $configuration
-                    nugetPath        = (Join-Path $branchRootPath 'nuget')
+                    nugetPath        = $nugetTarget
+                    feedPath         = if ($privateFeed) { $nugetTarget } else { $null }
+                    repoPaths        = $repoPathsReport
                     repositories     = @($plan | ForEach-Object {
-                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; solution = $_.Solution; projects = @($_.Projects); purge = if ($purgeEnabled) { @($_.PurgePaths) } else { @() }; olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes) }
+                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes) }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
                     msbuildProperties = @($propertyArgs)
@@ -804,7 +1051,7 @@ function Invoke-BuildRange {
                 })
         }
         else {
-            Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -runningProcesses $runningProcesses -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs -laneSettings $laneSettings -packageCaches $globalPackagesPath -verifyTests:$verify
+            Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -runningProcesses $runningProcesses -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs -laneSettings $laneSettings -packageCaches $globalPackagesPath -verifyTests:$verify -feedPath $(if ($privateFeed) { $nugetTarget } else { '' }) -repoPaths $repoPathsReport -environment $runEnvironment
             Write-Host ""
             Write-Host "WhatIf: nothing was built, copied or purged." -ForegroundColor Cyan
         }
@@ -836,8 +1083,14 @@ function Invoke-BuildRange {
     }
 
     if (-not $Json) {
-        Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs -laneSettings $laneSettings -packageCaches $globalPackagesPath -verifyTests:$verify
+        Write-OctoBuildRangePlan -plan $plan -branchRootPath $branchRootPath -configuration $configuration -staleCache $staleCache -purgeStaleCache:$purgeStaleCache -propertyArgs $propertyArgs -laneSettings $laneSettings -packageCaches $globalPackagesPath -verifyTests:$verify -feedPath $(if ($privateFeed) { $nugetTarget } else { '' }) -repoPaths $repoPathsReport -environment $runEnvironment
         Write-Host ""
+    }
+
+    $repoCount = $plan.Count
+    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.Name; mode = $_.Mode } }); count = $repoCount })
+    if ($privateFeed -and !(Test-Path -LiteralPath $nugetTarget)) {
+        New-Item -ItemType Directory -Force -Path $nugetTarget | Out-Null
     }
 
     $stalePurged = @()
@@ -856,11 +1109,43 @@ function Invoke-BuildRange {
     $totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run, empty for the
-    # legacy lane; restored afterwards so the session is left as it was found.
-    $savedLaneEnvironment = Set-OctoBuildEnvironment -environment $laneSettings.environment
+    # legacy lane; restored afterwards so the session is left as it was found. -feedPath keeps the
+    # caller's NUGET_PACKAGES / RestoreSources ($runEnvironment).
+    $savedLaneEnvironment = Set-OctoBuildEnvironment -environment $runEnvironment
+    # -EventsFile: repoDone of one repository (also for the failing one).
+    $emitRepoDone = {
+        param($result, [int]$index, [TimeSpan]$elapsed)
+        & $emit 'repoDone' ([ordered]@{
+                repo           = $result.repo
+                index          = $index
+                count          = $repoCount
+                success        = [bool]$result.success
+                seconds        = $elapsed.TotalSeconds
+                buildSeconds   = $result.buildDuration.TotalSeconds
+                testSeconds    = $result.testDuration.TotalSeconds
+                packageSeconds = $result.packageDuration.TotalSeconds
+                copied         = [int]$result.copiedCount
+                purged         = @($result.purged).Count
+                logFile        = $result.logFile
+            })
+        $events.RepoDone = $true
+    }
+    $repoIndex = 0
     try {
     foreach ($entry in $plan) {
+        $repoIndex++
+        $repoWatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $events.Repo = $entry.Name
+        $events.Index = $repoIndex
+        $events.Count = $repoCount
+        $events.Phase = $null
+        $events.RepoDone = $false
+        $events.RepoWatch = $repoWatch
+        $events.LogFile = $null
+        & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
         if (-not $Json) { Write-Host "==> $($entry.Name)" -ForegroundColor Cyan }
+        $events.Phase = 'build'
+        & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
         $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $savedRepoEnvironment = $null
         if ($entry.RestoreSources) {
@@ -877,6 +1162,8 @@ function Invoke-BuildRange {
             $tests = $null
             $testWatch = [System.Diagnostics.Stopwatch]::new()
             if ($build.Success -and $verify) {
+                $events.Phase = 'tests'
+                & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'tests' })
                 $testWatch.Start()
                 $tests = Invoke-OctoBuildRangeTests -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
                 $testWatch.Stop()
@@ -904,6 +1191,7 @@ function Invoke-BuildRange {
             $results.Add($result)
             $failed = $entry
             $failedStep = 'build'
+            & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
             break
         }
         if ($null -ne $tests -and -not $tests.Success) {
@@ -912,35 +1200,72 @@ function Invoke-BuildRange {
             $results.Add($result)
             $failed = $entry
             $failedStep = 'tests'
+            & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
             break
         }
 
         if ($purgeEnabled -and $entry.Mode -ne 'none') {
+            $events.Phase = 'packages'
+            & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'packages' })
             $packageWatch = [System.Diagnostics.Stopwatch]::StartNew()
             # T-M1: not "written since this build started" - pack is incremental, so a package from an
             # earlier, interrupted run (e.g. a -verifyTests failure) or an IDE build would be missed.
             # -onlyChanged copies what nuget/ lacks or holds in another (older) version.
-            $copy = Copy-NuGetPackages -directory $entry.Path -branch $branch -onlyChanged -Json | ConvertFrom-Json
+            $copyArgs = @{ directory = $entry.Path; branch = $branch; onlyChanged = $true; Json = $true }
+            if ($privateFeed) { $copyArgs['nugetPath'] = $nugetTarget }
+            $copy = Copy-NuGetPackages @copyArgs | ConvertFrom-Json
+            if ($null -eq $copy -or $copy.data.success -ne $true) {
+                # e.g. an unwritable -feedPath: a repository whose packages did not land is not a success.
+                # Packages that did land are purged from the lane caches as usual, so no cache keeps an old copy
+                # of a package that changed in <lane>/nuget.
+                $partialFiles = @($copy.data.files | Where-Object { $_ })
+                $result.copiedCount = $partialFiles.Count
+                if ($purgeCaches -and $partialFiles.Count -gt 0) {
+                    $packageIds = @($partialFiles | ForEach-Object { Get-OctoPackageIdFromFile -fileName $_ })
+                    $purgeDirectories = @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath)
+                    $result.purged = @(Remove-OctoGlobalPackageVersions -directories $purgeDirectories)
+                }
+                $packageWatch.Stop()
+                $result.packageDuration = $packageWatch.Elapsed
+                $result.success = $false
+                $results.Add($result)
+                $failed = $entry
+                $failedStep = 'packages'
+                Write-Error "Copy-NuGetPackages failed for $($entry.Name)$(if ($copy.data.error) { ": $($copy.data.error)" })"
+                & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
+                break
+            }
             $copiedFiles = @($copy.data.files | Where-Object { $_ })
             $result.copiedCount = $copiedFiles.Count
-            # Purge list = what this build actually produced (and was just copied), not the prediction.
-            $packageIds = @($copiedFiles | ForEach-Object { Get-OctoPackageIdFromFile -fileName $_ })
-            $purgeDirectories = @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath)
-            $result.purged = @(Remove-OctoGlobalPackageVersions -directories $purgeDirectories)
+            if ($purgeCaches) {
+                $events.Phase = 'purge'
+                & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'purge' })
+                # Purge list = what this build actually produced (and was just copied), not the prediction.
+                $packageIds = @($copiedFiles | ForEach-Object { Get-OctoPackageIdFromFile -fileName $_ })
+                $purgeDirectories = @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath)
+                $result.purged = @(Remove-OctoGlobalPackageVersions -directories $purgeDirectories)
+            }
             $result.staleSkipped = @($copy.data.skipped | Where-Object { $_ } | ForEach-Object { "$($_.file) ($($_.reason))" } | Sort-Object -Unique)
             $packageWatch.Stop()
             $result.packageDuration = $packageWatch.Elapsed
             if (-not $Json) {
-                Write-Host "    copied $($result.copiedCount) package(s), purged $($result.purged.Count) global-cache folder(s), left $($result.staleSkipped.Count) unchanged/stale package(s) untouched" -ForegroundColor DarkGray
+                $target = if ($privateFeed) { " into $nugetTarget (private feed, no cache purge)" } else { '' }
+                Write-Host "    copied $($result.copiedCount) package(s)$target, purged $($result.purged.Count) global-cache folder(s), left $($result.staleSkipped.Count) unchanged/stale package(s) untouched" -ForegroundColor DarkGray
             }
         }
         $results.Add($result)
+        & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
     }
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedLaneEnvironment
     }
     $totalWatch.Stop()
+    # For the closing `done` event written by the Invoke-BuildRange wrapper.
+    $events.Success = ($null -eq $failed)
+    $events.FailedRepo = if ($failed) { $failed.Name } else { $null }
+    $events.FailedStep = $failedStep
+    $events.Completed = $true
 
     # R2-5: a src-only run never compiled the test projects - say so instead of implying "all green".
     $testsHint = $null
@@ -955,8 +1280,10 @@ function Invoke-BuildRange {
                 success        = ($null -eq $failed)
                 failedRepo     = if ($failed) { $failed.Name } else { $null }
                 failedStep     = $failedStep
-                lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $laneSettings.environment }
+                lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                 packageCaches  = @($globalPackagesPath)
+                feedPath       = if ($privateFeed) { $nugetTarget } else { $null }
+                repoPaths      = $repoPathsReport
                 testsCompiled  = [bool]($includeTests -or $verify)
                 hint           = $testsHint
                 repositories   = @($results | ForEach-Object {

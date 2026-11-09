@@ -123,7 +123,9 @@ function Get-OctoBuildOrder {
         [Boolean]$excludeAdditional = $false
     )
 
-    $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*")
+    # octo-tools and octo-devstack are developer tools, not OctoMesh repositories: they sit next to octo-tools,
+    # and when that folder is used as a lane (Invoke-BuildAll without -branch) they must not be built.
+    $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*" | Where-Object { $_.Name -notin @('octo-tools', 'octo-devstack') })
     $mmDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*")
 
     if ($excludeFrontend -eq $true) {
