@@ -8,10 +8,17 @@ OctoMesh from GitHub
  Invoke-CloneMainRepos
 .Example
  Invoke-CloneMainRepos -branch "branches/queries"
+.Example
+ Invoke-CloneMainRepos -devTools
+ Clones only the developer tools next to octo-tools (octo-devstack, the local MCP stack daemon), not into a
+ lane: Invoke-BuildAll and the lane-scoped Invoke-KillDotnet must never pick them up.
 #>
 function Global:Invoke-CloneMainRepos {
     param(
         [string]$branch = "",
+        # Clone the developer tools (octo-devstack) into $rootPath, next to octo-tools, instead of the
+        # OctoMesh repositories into the lane.
+        [switch]$devTools,
         [switch]$Json
     )
 
@@ -21,6 +28,8 @@ function Global:Invoke-CloneMainRepos {
         return;
     }
 
+    if ($devTools -and $branch) { Write-Error "-devTools clones next to octo-tools; it does not take -branch."; return }
+    if ($devTools) { $repoNames = @('octo-devstack') }
     $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
 
     # Ensure the branch directory exists
@@ -31,7 +40,7 @@ function Global:Invoke-CloneMainRepos {
 
     if (-not $Json) { Write-Host "Cloning repositories to $branchRootPath" -ForegroundColor Green }
 
-    $repoNames = @(
+    if (-not $devTools) { $repoNames = @(
         "mm-common"
         "octo-distributedEventHub"
         "octo-construction-kit-engine"
@@ -58,7 +67,7 @@ function Global:Invoke-CloneMainRepos {
         "octo-helm-core"
         "octo-frontend-libraries"
         "octo-frontend-refinery-studio"
-    )
+    ) }
 
     $repoResults = [System.Collections.Generic.List[object]]::new()
     $allOk = $true
