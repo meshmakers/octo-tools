@@ -689,6 +689,14 @@ function Write-OctoBuildRangePlan {
     repositories gets a warning (repositories with their own <RestoreSources> use ../nuget).
     A key for a repository outside the selected range is not applied (warning).
 
+.PARAMETER externalRepoPaths
+    Repositories that are NOT folders of the lane, keyed by their exact repository name, with the folder
+    to build them from (e.g. an in-place worktree adopted by a feature environment). They are placed in
+    the build order like a lane folder of that name (Get-OctoBuildOrder -additionalRepos), validated like
+    -repoPaths, and built from that folder. The caller provides their isolation through
+    -msbuildPropertiesPerRepo (RestoreSources, RestorePackagesPath): the folder's ../nuget is not the
+    lane feed, so no "not next to the lane" warning is printed for them.
+
 .PARAMETER feedPath
     Private feed: copy the built DebugL packages into this folder (created when missing) instead of
     <checkout>/nuget, and do NOT purge the lane's package caches. The caller provides the isolation
@@ -757,6 +765,7 @@ function Invoke-BuildRange {
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog.
         [switch]$skipCkSync,
         [hashtable]$repoPaths = @{},
+        [hashtable]$externalRepoPaths = @{},
         [string]$feedPath = '',
         [string]$EventsFile = '',
         [string]$EventsCommand = 'Invoke-BuildRange',
@@ -792,7 +801,9 @@ function Resolve-OctoRepoPathOverrides {
         [hashtable]$repoPaths = @{},
         [Parameter(Mandatory = $true)] [object[]]$order,
         # Lane checkout; a folder that is not next to the lane's repositories gets a warning.
-        [string]$branchRootPath = ""
+        [string]$branchRootPath = "",
+        # Repositories whose folder is outside the lane on purpose (-externalRepoPaths): no warning.
+        [string[]]$noLaneWarning = @()
     )
     $map = [ordered]@{}
     foreach ($key in @($repoPaths.Keys)) {
@@ -836,7 +847,7 @@ function Resolve-OctoRepoPathOverrides {
             throw "-repoPaths: $folder for $name is no git repository or worktree (no .git) - cannot verify that it holds $name."
         }
         # Repos whose own <RestoreSources> use ../nuget resolve the feed next to the folder.
-        if (-not [string]::IsNullOrWhiteSpace($branchRootPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($branchRootPath) -and $noLaneWarning -notcontains $name) {
             $parent = [IO.Path]::TrimEndingDirectorySeparator((Split-Path -Parent $folder))
             $lane = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
             if ($parent -ine $lane) {
@@ -871,6 +882,7 @@ function Invoke-OctoBuildRangeCore {
         [string]$laneIsolation = 'Auto',
         [switch]$skipCkSync,
         [hashtable]$repoPaths = @{},
+        [hashtable]$externalRepoPaths = @{},
         [string]$feedPath = '',
         [hashtable]$events,
         [switch]$Json
@@ -912,7 +924,14 @@ function Invoke-OctoBuildRangeCore {
         return
     }
 
-    $order = @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $excludeFrontend -excludeAdditional $false)
+    try { $order = @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $excludeFrontend -excludeAdditional $false -additionalRepos $externalRepoPaths) }
+    catch { & $fail $_.Exception.Message; return }
+    foreach ($name in @($externalRepoPaths.Keys)) {
+        if (Test-Path -LiteralPath (Join-Path $branchRootPath $name) -PathType Container) {
+            & $fail "-externalRepoPaths: $name is a folder of the lane $branchRootPath - use -repoPaths."
+            return
+        }
+    }
     try {
         $repos = @(Get-OctoBuildRangeRepos -order $order -from $from -to $to -include $include -exclude $exclude)
     }
@@ -926,7 +945,10 @@ function Invoke-OctoBuildRangeCore {
     }
 
     # -repoPaths: build single repositories from another folder (e.g. a git worktree), same position.
-    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $repoPaths -order $order -branchRootPath $branchRootPath }
+    $allRepoPaths = @{}
+    foreach ($key in @($repoPaths.Keys)) { $allRepoPaths[$key] = $repoPaths[$key] }
+    foreach ($key in @($externalRepoPaths.Keys)) { $allRepoPaths[$key] = $externalRepoPaths[$key] }
+    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $allRepoPaths -order $order -branchRootPath $branchRootPath -noLaneWarning @($externalRepoPaths.Keys) }
     catch { & $fail $_.Exception.Message; return }
     $repoPathsOutside = @($repoPathMap.Keys | Where-Object { $name = $_; -not ($repos | Where-Object { $_.Name -ieq $name }) } | Sort-Object)
     if ($repoPathsOutside.Count -gt 0) {

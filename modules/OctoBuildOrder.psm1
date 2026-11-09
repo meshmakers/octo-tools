@@ -113,6 +113,11 @@ function Get-OctoBuildOrder {
     .PARAMETER excludeAdditional
         Drop both additional phases (same as Invoke-BuildAll).
 
+    .PARAMETER additionalRepos
+        Repositories that are not folders of the lane, keyed by repository name (mm-* / octo-*) with the folder
+        they live in, e.g. an in-place worktree of a feature environment. They are ordered like a lane folder of
+        that name; a lane folder of the same name wins.
+
     .EXAMPLE
         Get-OctoBuildOrder -branchRootPath (Join-Path $rootPath dev) | Format-Table Name, Group
     #>
@@ -120,13 +125,29 @@ function Get-OctoBuildOrder {
         [Parameter(Mandatory = $true)]
         [string]$branchRootPath,
         [Boolean]$excludeFrontend = $false,
-        [Boolean]$excludeAdditional = $false
+        [Boolean]$excludeAdditional = $false,
+        [hashtable]$additionalRepos = @{}
     )
 
     # octo-tools and octo-devstack are developer tools, not OctoMesh repositories: they sit next to octo-tools,
     # and when that folder is used as a lane (Invoke-BuildAll without -branch) they must not be built.
-    $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*" | Where-Object { $_.Name -notin @('octo-tools', 'octo-devstack') })
-    $mmDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*")
+    # Candidates as { Name; Info }: Name is the repository name, Info the folder (for -additionalRepos the folder
+    # name may differ from the repository name, e.g. wt-<lane>-octo-sdk).
+    $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*" | Where-Object { $_.Name -notin @('octo-tools', 'octo-devstack') } |
+        ForEach-Object { [pscustomobject]@{ Name = $_.Name; Info = $_ } })
+    $mmDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*" | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Info = $_ } })
+    foreach ($name in @($additionalRepos.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+        if ($name -in @('octo-tools', 'octo-devstack')) { continue }
+        if (@($octoDirectories + $mmDirectories | Where-Object { $_.Name -ieq $name }).Count -gt 0) { continue }
+        $folder = [string]$additionalRepos[$name]
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { throw "Get-OctoBuildOrder: folder $folder of $name does not exist." }
+        $candidate = [pscustomobject]@{ Name = $name; Info = (Get-Item -LiteralPath $folder) }
+        if ($name -like 'mm-*') { $mmDirectories += $candidate }
+        elseif ($name -like 'octo-*') { $octoDirectories += $candidate }
+        else { throw "Get-OctoBuildOrder: -additionalRepos key '$name' is not an mm-* or octo-* repository name." }
+    }
+    $octoDirectories = @($octoDirectories | Sort-Object Name)
+    $mmDirectories = @($mmDirectories | Sort-Object Name)
 
     if ($excludeFrontend -eq $true) {
         $octoDirectories = @($octoDirectories | Where-Object { $_.Name -notlike "octo-frontend-*" })
@@ -135,9 +156,9 @@ function Get-OctoBuildOrder {
     $result = [System.Collections.Generic.List[object]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $add = {
-        param($directory, [string]$group)
-        if ($directory -and $seen.Add($directory.Name)) {
-            $result.Add([pscustomobject]@{ Name = $directory.Name; Path = $directory.FullName; Group = $group; Directory = $directory })
+        param($candidate, [string]$group)
+        if ($candidate -and $seen.Add($candidate.Name)) {
+            $result.Add([pscustomobject]@{ Name = $candidate.Name; Path = $candidate.Info.FullName; Group = $group; Directory = $candidate.Info })
         }
     }
 
@@ -145,7 +166,9 @@ function Get-OctoBuildOrder {
 
     foreach ($name in $script:OctoPinnedBuildOrder) {
         # Looked up independently of -excludeFrontend (none of them is a frontend).
-        & $add (Get-ChildItem -Directory -Path $branchRootPath -Filter $name | Select-Object -First 1) 'ordered'
+        $pinned = Get-ChildItem -Directory -Path $branchRootPath -Filter $name | Select-Object -First 1
+        $candidate = if ($pinned) { [pscustomobject]@{ Name = $pinned.Name; Info = $pinned } } else { @($octoDirectories | Where-Object { $_.Name -ieq $name }) | Select-Object -First 1 }
+        & $add $candidate 'ordered'
     }
 
     if ($excludeAdditional -eq $false) {
