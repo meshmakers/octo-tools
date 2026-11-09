@@ -281,46 +281,6 @@ function Get-OctoWorktreeInfo {
     }
 }
 
-function Get-OctoProcessRecords {
-    # Every process as { Pid; Command; Cwd }. Cwd from lsof on macOS/Linux (null on Windows, where the working
-    # directory is not readable). A wrapper so tests never look at real processes.
-    $records = @{}
-    if ($IsWindows) {
-        foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
-            $records[[int]$process.ProcessId] = [pscustomobject]@{ Pid = [int]$process.ProcessId; Command = [string]$process.CommandLine; Cwd = $null }
-        }
-        return @($records.Values)
-    }
-    foreach ($line in @(& ps -axo 'pid=,command=' 2>$null)) {
-        if ($line -match '^\s*(\d+)\s+(.*)$') { $records[[int]$Matches[1]] = [pscustomobject]@{ Pid = [int]$Matches[1]; Command = $Matches[2]; Cwd = $null } }
-    }
-    if (Get-Command lsof -ErrorAction SilentlyContinue) {
-        $currentPid = $null
-        foreach ($line in @(& lsof -d cwd -Fpn 2>$null)) {
-            if ($line -like 'p*') { $currentPid = [int]$line.Substring(1) }
-            elseif ($line -like 'n*' -and $null -ne $currentPid -and $records.ContainsKey($currentPid)) { $records[$currentPid].Cwd = $line.Substring(1) }
-        }
-    }
-    return @($records.Values)
-}
-
-function Get-OctoProcessesUnderPath {
-    # Processes whose working directory lies in $path or whose command line names a path in it (shells, IDEs,
-    # Claude Code sessions, services started from its bin/). Moving the folder under them would break them.
-    param([Parameter(Mandatory = $true)] [string]$path)
-    $prefix = ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path)) -replace '\\', '/') + '/'
-    $found = @()
-    foreach ($record in @(Get-OctoProcessRecords)) {
-        $cwd = if ($record.Cwd) { ([IO.Path]::TrimEndingDirectorySeparator([string]$record.Cwd) -replace '\\', '/') + '/' } else { $null }
-        $command = ([string]$record.Command) -replace '\\', '/'
-        if (($cwd -and $cwd.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) -or
-            ($command -and ($command + '/').IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-            $found += [pscustomobject]@{ pid = $record.Pid; command = $record.Command; cwd = $record.Cwd }
-        }
-    }
-    return $found
-}
-
 function Get-OctoAdoptedWorktreeEntry {
     # Manifest entry of an adopted worktree at $path (after the move, or in place).
     param([Parameter(Mandatory = $true)] $info, [Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string]$role)
@@ -707,10 +667,10 @@ function Get-OctoEnvironmentAffected {
     RestorePackagesPath=<env>/.nuget-packages plus OctoEnvironment/OctoEnvironmentBase (the base lane's own
     Octo.User.props is imported for its other settings), and .octo/environment.json (schemaVersion 1).
 
-    An existing lane folder without a manifest (octo-claude-pm lane) becomes the environment; its other content is
-    left alone. Refuses an existing environment, an invalid name, a base lane that does not exist, an existing
-    Octo.User.props or <repo> folder in the lane folder, and an environment folder inside the base lane (the kill
-    scope and cache logic of the base would match it). Existing worktrees are adopted with Add-OctoEnvironmentRepo -path. -addAffected adds every
+    Refuses an existing environment, an invalid name, a name whose wt-<name> already exists without a manifest (an
+    octo-claude-pm lane folder or a flat worktree wt-<lane>-<repo>), a base lane that does not exist, and an
+    environment folder inside the base lane (the kill scope and cache logic of the base would match it). Existing
+    worktrees are adopted with Add-OctoEnvironmentRepo -path. -addAffected adds every
     transitive consumer of the feature repositories as a consumer worktree (Get-OctoAffectedRepos); for a single
     service use Add-OctoEnvironmentRepo -role consumer -addAffected instead.
 
@@ -749,9 +709,11 @@ function New-OctoEnvironment {
         return
     }
     if (Test-Path -LiteralPath (Get-OctoEnvironmentManifestPath -environmentPath $environmentPath) -PathType Leaf) { & $fail "Environment $env already exists ($environmentPath). Use Add-OctoEnvironmentRepo, or Remove-OctoEnvironment first."; return }
-    # An existing octo-claude-pm lane folder (wt-<lane>, no manifest) becomes the environment; its other content
-    # (claims, worktrees of the sweep layout) stays untouched. A repo folder that is already there is refused.
-    $existingLaneFolder = Test-Path -LiteralPath $environmentPath -PathType Container
+    # wt-<env> without a manifest is an octo-claude-pm lane folder or a flat worktree wt-<lane>-<repo>: not ours.
+    if (Test-Path -LiteralPath $environmentPath) {
+        & $fail "$environmentPath already exists and is no feature environment (an octo-claude-pm lane folder or a flat worktree wt-<lane>-<repo>). Choose another name; adopt existing worktrees with Add-OctoEnvironmentRepo -path."
+        return
+    }
     try { $repoNames = @($repos | ForEach-Object { $_ -split ',' } | Where-Object { $_ } | ForEach-Object { Resolve-OctoEnvironmentRepoName -repo $_.Trim() -basePath $basePath } | Select-Object -Unique) }
     catch { & $fail $_.Exception.Message; return }
     if ($repoNames.Count -eq 0) { & $fail "-repos names no repository."; return }
@@ -768,12 +730,8 @@ function New-OctoEnvironment {
         slot     = $env
     }
 
-    if (Test-Path -LiteralPath (Join-Path $environmentPath 'Octo.User.props')) { & $fail "$(Join-Path $environmentPath 'Octo.User.props') already exists without an environment manifest - not overwritten. Move it away first."; return }
-    foreach ($repo in $repoNames) {
-        if (Test-Path -LiteralPath (Join-Path $environmentPath $repo)) { & $fail "$(Join-Path $environmentPath $repo) already exists - adopt it with Add-OctoEnvironmentRepo -path after creating the environment with other repositories, or move it away."; return }
-    }
     if (-not $PSCmdlet.ShouldProcess($environmentPath, "Create environment with feature worktree(s) $($repoNames -join ', ') on $branchName")) {
-        $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames; existingLaneFolder = $existingLaneFolder }
+        $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames }
         if ($Json) { Write-OctoJson -Command 'New-OctoEnvironment' -Data $plan }
         return
     }
@@ -812,7 +770,7 @@ function New-OctoEnvironment {
     if ($Json) {
         Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{
                 environment = $env; path = $environmentPath; branch = $branchName; manifest = $manifest
-                consumersAdded = $addedConsumers; sync = $sync; errors = $errors; existingLaneFolder = $existingLaneFolder
+                consumersAdded = $addedConsumers; sync = $sync; errors = $errors
             })
         return
     }
@@ -909,13 +867,14 @@ function Get-OctoEnvironment {
     or a Claude Code worktree <repo>/.claude/worktrees/<name>. The repository is the main checkout that owns it, the
     branch its current branch, baseCommit the merge base with the main checkout's HEAD. By default it is moved with
     `git worktree move` to <env>/<repo>, so plain dotnet builds and Rider there are isolated like any environment repo;
-    the move is refused when git has the worktree locked or a process runs from it (working directory or command
-    line, e.g. a shell, an IDE or a Claude Code session - Windows cannot see working directories, stop them there
-    first). Uncommitted changes move with it. The old and the new path are reported.
+    the move is refused when git has the worktree locked or a process runs from it (Get-OctoProcessesUnderFolder:
+    Invoke-KillDotnet's lane matching - working directory, entry assembly, modules - list-only over every process, e.g.
+    a shell, an IDE or a Claude Code session; Windows cannot see working directories, stop them there first). Uncommitted changes move with it. The old and the new path are reported.
     -inPlace only records the worktree in the manifest. Invoke-BuildEnvironment then builds it from where it is and
     passes the environment's feed, package cache and CK catalog as global properties (RestoreSources,
     RestorePackagesPath, OctoLocalCatalogRootPath); a plain dotnet build or Rider in that folder is NOT isolated (it
-    restores from the ../nuget next to it). Remove-OctoEnvironment never deletes an in-place worktree.
+    restores from the ../nuget next to it). Remove-OctoEnvironment only unregisters an in-place worktree, it never
+    deletes it (it belongs to its original owner). The manifest's path is authoritative for every repository.
 .EXAMPLE
     Add-OctoEnvironmentRepo -env ab8625-enum-null -repo octo-asset-repo-services -role consumer -addAffected
 .EXAMPLE
@@ -1032,9 +991,10 @@ function Add-OctoEnvironmentExistingWorktree {
     else {
         if (Test-Path -LiteralPath $target) { & $fail "$target already exists."; return }
         if ($info.Locked) { & $fail "git has the worktree $oldPath locked - unlock it (git worktree unlock) or use -inPlace." @{ oldPath = $oldPath }; return }
-        $processes = @(Get-OctoProcessesUnderPath -path $oldPath)
+        # Invoke-KillDotnet's lane matching, list-only, over every process (shells, IDEs, Claude Code sessions too).
+        $processes = @(Get-OctoProcessesUnderFolder -path $oldPath)
         if ($processes.Count -gt 0) {
-            $list = @($processes | ForEach-Object { "pid $($_.pid) ($(if ($_.cwd) { "cwd $($_.cwd)" } else { $_.command }))" })
+            $list = @($processes | ForEach-Object { "pid $($_.pid) $($_.name) ($($_.reason))" })
             & $fail "Processes run from $oldPath - stop them (or leave the folder) before moving it, or use -inPlace: $($list -join '; ')." @{ oldPath = $oldPath; processes = $processes }
             return
         }

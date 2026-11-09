@@ -223,3 +223,26 @@ Describe 'Invoke-KillDotnet on Windows' {
         Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process
     }
 }
+
+Describe 'Get-OctoProcessesUnderFolder (list-only, every process)' {
+    It 'matches shells and other processes by working directory or entry assembly, never stops anything' {
+        $folder = Join-Path $TestDrive 'wt-lane-octo-sdk'
+        Mock -ModuleName Invoke-KillDotnet Test-OctoKillDotnetWindows { $false }
+        Mock -ModuleName Invoke-KillDotnet Get-Process {
+            @(
+                [pscustomobject]@{ Id = 11; Name = 'zsh'; CommandLine = '-zsh'; Modules = @() },
+                [pscustomobject]@{ Id = 12; Name = 'dotnet'; CommandLine = "dotnet $(Join-Path $folder 'bin/DebugL/net10.0/Svc.dll')"; Modules = @() },
+                [pscustomobject]@{ Id = 13; Name = 'zsh'; CommandLine = '-zsh'; Modules = @() },
+                [pscustomobject]@{ Id = 14; Name = 'node'; CommandLine = 'node x.js'; Modules = @() }
+            )
+        }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords { @('p11', "n$folder/src", 'p13', "n$folder-other", 'p14', 'n/tmp') }
+        Mock -ModuleName Invoke-KillDotnet Stop-Process { throw 'must not stop' }
+
+        $found = @(Get-OctoProcessesUnderFolder -path $folder)
+        @($found.pid) | Should -Be @(11, 12)
+        @($found.reason) | Should -Be @('cwd', 'commandLine')
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 0
+    }
+}
+

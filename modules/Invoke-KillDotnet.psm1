@@ -256,4 +256,41 @@ function Select-OctoLaneProcesses {
     return $found
 }
 
-Export-ModuleMember -Function @('Invoke-KillDotnet')
+function Get-OctoProcessesUnderFolder {
+    <#
+    .SYNOPSIS
+        List-only: the processes that run from a folder, with the lane matching of Invoke-KillDotnet.
+    .DESCRIPTION
+        Same rule as Invoke-KillDotnet's lane mode (Select-OctoLaneProcesses): a process belongs to the folder when its
+        working directory (macOS/Linux, lsof), its entry assembly or (Windows, dotnet processes) one of its module paths
+        lies under it - prefix with a trailing separator, case-insensitive; the octo-devstack daemon never counts. Unlike
+        the lane mode it looks at EVERY process (a shell, an IDE or a Claude Code session in the folder counts, not only
+        dotnet), accepts any folder (no lane check) and never stops anything. Used before a worktree is moved
+        (Add-OctoEnvironmentRepo -path). Returns { pid, name, reason }.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $folder = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path))
+    $windows = Test-OctoKillDotnetWindows
+    $candidates = @()
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $modules = @()
+        if ($windows -and $process.Name -eq 'dotnet') {
+            try { $modules = @($process.Modules | ForEach-Object { $_.FileName } | Where-Object { $_ }) } catch { $modules = @() }
+        }
+        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = [string]$process.CommandLine; Cwd = $null; Modules = $modules }
+    }
+    if (-not $windows -and $candidates.Count -gt 0) {
+        $currentPid = $null
+        # Processes of other users are not readable; that is expected here, so no warning.
+        foreach ($line in @(Get-OctoProcessCwdRecords -processIds $candidates.Pid -WarningAction SilentlyContinue)) {
+            if ($line -like 'p*') { $currentPid = [int]$line.Substring(1) }
+            elseif ($line -like 'n*' -and $null -ne $currentPid) {
+                $candidate = $candidates | Where-Object { $_.Pid -eq $currentPid } | Select-Object -First 1
+                if ($candidate) { $candidate.Cwd = $line.Substring(1) }
+            }
+        }
+    }
+    return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder)
+}
+
+Export-ModuleMember -Function @('Invoke-KillDotnet', 'Get-OctoProcessesUnderFolder')

@@ -560,16 +560,13 @@ Describe 'Kill scope and CK sync in environments' {
 Describe 'Environments are octo-claude-pm lanes (wt-<env>)' {
     BeforeEach { $script:ws = New-FakeWorkspace }
 
-    It 'accepts lane names and turns an existing lane folder into an environment; Remove keeps the lane''s own content' {
+    It 'accepts lane names; Remove deletes only what the environment owns (lane content such as claims stays)' {
         $lane = Join-Path $ws.Root 'wt-odysseus-kind'
-        New-Item -ItemType Directory -Force -Path (Join-Path $lane '.octo/claims') | Out-Null
-        Set-Content -Path (Join-Path $lane '.octo/claims/octo-sdk.md') -Value 'claim'
-
         $doc = Get-Doc (New-OctoEnvironment -env odysseus-kind -repos octo-sdk -branchName 'reimar/AB#1_x' -Json)
         $doc.data.success | Should -BeTrue
-        $doc.data.existingLaneFolder | Should -BeTrue
         Test-Path (Join-Path $lane 'octo-sdk/.git') -PathType Leaf | Should -BeTrue
-        Test-Path (Join-Path $lane '.octo/claims/octo-sdk.md') | Should -BeTrue
+        New-Item -ItemType Directory -Force -Path (Join-Path $lane '.octo/claims') | Out-Null
+        Set-Content -Path (Join-Path $lane '.octo/claims/octo-sdk.md') -Value 'claim'
 
         $removed = Get-Doc (Remove-OctoEnvironment -env odysseus-kind -Json)
         $removed.data.success | Should -BeTrue
@@ -580,13 +577,17 @@ Describe 'Environments are octo-claude-pm lanes (wt-<env>)' {
         }
     }
 
-    It 'refuses a lane folder that already holds the repository or an Octo.User.props' {
-        $lane = Join-Path $ws.Root 'wt-busy'
-        New-Item -ItemType Directory -Force -Path (Join-Path $lane 'octo-sdk') | Out-Null
-        (Get-Doc (New-OctoEnvironment -env busy -repos octo-sdk -Json)).data.error | Should -Match 'already exists'
-        Remove-Item (Join-Path $lane 'octo-sdk') -Recurse -Force
-        Set-Content -Path (Join-Path $lane 'Octo.User.props') -Value '<Project />'
-        (Get-Doc (New-OctoEnvironment -env busy -repos octo-sdk -Json)).data.error | Should -Match 'Octo.User.props already exists'
+    It 'refuses a name whose wt-<name> is an existing lane folder or flat worktree, and changes nothing there' {
+        $lane = Join-Path $ws.Root 'wt-plain-lane'
+        New-Item -ItemType Directory -Force -Path (Join-Path $lane '.octo/claims') | Out-Null
+        $doc = Get-Doc (New-OctoEnvironment -env plain-lane -repos octo-sdk -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'is no feature environment'
+        @(Get-ChildItem $lane -Force).Name | Should -Be @('.octo')
+
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree add -q -b 'lane/flat' (Join-Path $ws.Root 'wt-odysseus-kind-octo-sdk') | Out-Null
+        (Get-Doc (New-OctoEnvironment -env odysseus-kind-octo-sdk -repos mm-common -Json)).data.error | Should -Match 'is no feature environment'
+        Test-Path (Join-Path $ws.Root 'wt-odysseus-kind-octo-sdk/.octo') | Should -BeFalse
     }
 
     It 'discovers environments by wt-*/.octo/environment.json and ignores flat worktrees and plain lane folders' {
@@ -609,7 +610,7 @@ Describe 'Add-OctoEnvironmentRepo -path (adopting existing worktrees)' {
         # Claude Code worktree inside a repository
         $script:claude = Join-Path $ws.Main 'octo-identity-services/.claude/worktrees/feature-x'
         Invoke-TestGit (Join-Path $ws.Main 'octo-identity-services') worktree add -q -b 'reimar/feature-x' $claude | Out-Null
-        Mock -ModuleName OctoEnvironment Get-OctoProcessRecords { @() }
+        Mock -ModuleName OctoEnvironment Get-OctoProcessesUnderFolder { @() }
     }
 
     It 'moves a flat octo-claude-pm worktree into the environment, uncommitted work included, and reports both paths' {
@@ -644,13 +645,14 @@ Describe 'Add-OctoEnvironmentRepo -path (adopting existing worktrees)' {
         $doc.data.error | Should -Match 'locked'
         Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree unlock $flat | Out-Null
 
-        Mock -ModuleName OctoEnvironment Get-OctoProcessRecords { @([pscustomobject]@{ Pid = 4711; Command = '-zsh'; Cwd = (Join-Path $flat 'src') }) }
+        $script:running = @([pscustomobject]@{ pid = 4711; name = 'zsh'; reason = 'cwd' })
+        Mock -ModuleName OctoEnvironment Get-OctoProcessesUnderFolder { if ($path -eq $flat) { $script:running } else { @() } }
         $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -Json)
         $doc.data.success | Should -BeFalse
-        $doc.data.error | Should -Match 'pid 4711'
+        $doc.data.error | Should -Match 'pid 4711 zsh \(cwd\)'
         Test-Path $flat | Should -BeTrue
 
-        Mock -ModuleName OctoEnvironment Get-OctoProcessRecords { @([pscustomobject]@{ Pid = 1; Command = 'dotnet build'; Cwd = "$flat-other" }) }
+        $script:running = @()
         (Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -WhatIf -Json)).data.dryRun | Should -BeTrue
         Test-Path $flat | Should -BeTrue
     }

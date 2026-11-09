@@ -231,16 +231,18 @@ Remove-OctoEnvironment -env ab8625-enum-null
 - **Existing worktrees** are adopted with `Add-OctoEnvironmentRepo -env <env> -path <worktree>`: an octo-claude-pm
   flat worktree `wt-<lane>-<repo>` or a Claude Code worktree `<repo>/.claude/worktrees/<name>` is moved
   (`git worktree move`, uncommitted work included) to `wt-<env>/<repo>`; refused while git has it locked or a process
-  runs from it (a shell, an IDE or a Claude Code session in that folder). `-inPlace` leaves it where it is:
-  `Invoke-BuildEnvironment` builds it with the environment's feed, cache and CK catalog as global properties, but a
-  plain `dotnet build` or Rider in that folder is **not** isolated, and `Remove-OctoEnvironment` never deletes it.
+  runs from it (a shell, an IDE or a Claude Code session in that folder; same matching as `Invoke-KillDotnet`,
+  list-only). `-inPlace` leaves it where it is: `Invoke-BuildEnvironment` builds it with the environment's feed,
+  cache and CK catalog as global properties, but a plain `dotnet build` or Rider in that folder is **not** isolated,
+  and `Remove-OctoEnvironment` only unregisters it (it belongs to its original owner).
 - **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/wt-<env>`; a main build never
   touches environment processes.
 - **Running** the environment's services is octo-devstack's job (own stack slot per environment, fallback to main's
   binaries for the services the environment does not build). `Start-Octo` stays for main.
 - Load the profile from the `octo-tools` checkout next to `branches/` (`$rootPath` = the workspace root). Environment
-  folders inside `branches/main` are refused. An existing octo-claude-pm lane folder becomes the environment; its
-  claims (`.octo/claims`) stay, also after `Remove-OctoEnvironment`.
+  folders inside `branches/main` are refused, and so is a name whose `wt-<name>` already exists as an octo-claude-pm
+  lane folder or flat worktree. `Remove-OctoEnvironment` deletes only what the environment owns (claims in
+  `wt-<env>/.octo/claims` stay).
 
 # Working on many tenants
 
