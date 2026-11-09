@@ -119,7 +119,9 @@ function Copy-NuGetPackages
     # Without -Json (Invoke-BuildAll, the terminal): a package that did not land fails the call.
     if ($copyErrors.Count -gt 0) {
         $global:LASTEXITCODE = 1
-        throw "Copy-NuGetPackages: $($copyErrors.Count) package(s) not copied to ${branchNugetPath}: $($copyErrors -join '; ')"
+        # Typed (FullyQualifiedErrorId OctoPackageCopyFailed): Invoke-BuildAll stops the run on exactly this failure.
+        $exception = [System.IO.IOException]::new("Copy-NuGetPackages: $($copyErrors.Count) package(s) not copied to ${branchNugetPath}: $($copyErrors -join '; ')")
+        throw [System.Management.Automation.ErrorRecord]::new($exception, 'OctoPackageCopyFailed', [System.Management.Automation.ErrorCategory]::WriteError, $branchNugetPath)
     }
 }
 

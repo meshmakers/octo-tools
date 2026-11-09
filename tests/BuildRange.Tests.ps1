@@ -452,7 +452,7 @@ Describe 'Copy-NuGetPackages / Copy-AllNuGetPackages' {
         @($json.data.errors).Count | Should -BeGreaterThan 0
         $json.data.error | Should -Match 'disk full'
 
-        { Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -ErrorAction SilentlyContinue } | Should -Throw '*not copied*disk full*'
+        { Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -ErrorAction SilentlyContinue } | Should -Throw '*not copied*disk full*' -ErrorId 'OctoPackageCopyFailed'
     }
 
     It 'Copy-NuGetPackages -modifiedSince copies only newer packages' {

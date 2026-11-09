@@ -367,7 +367,12 @@ Describe 'Invoke-BuildAll -EventsFile' {
     }
 
     It 'a failed package copy stops the run and reports failedStep packages' {
-        Mock -ModuleName Invoke-BuildAll Compile-Repo { if ((Split-Path -Leaf $path) -eq 'octo-sdk') { throw 'Copy-NuGetPackages: 1 package(s) not copied' }; $true }
+        Mock -ModuleName Invoke-BuildAll Compile-Repo {
+            if ((Split-Path -Leaf $path) -eq 'octo-sdk') {
+                throw [System.Management.Automation.ErrorRecord]::new([System.IO.IOException]::new('Copy-NuGetPackages: 1 package(s) not copied'), 'OctoPackageCopyFailed', 'WriteError', $null)
+            }
+            $true
+        }
         Mock -ModuleName Invoke-BuildAll Remove-OctoLaneNuGetPackages { }
 
         $json = Invoke-BuildAll -branch main -configuration DebugL -skipKill -EventsFile $events -Json 2>$null | ConvertFrom-Json

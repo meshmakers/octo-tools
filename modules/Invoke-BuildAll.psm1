@@ -488,10 +488,8 @@ function Invoke-BuildAllCore {
                 Write-Warning "dotnet build-server shutdown exited with code $LASTEXITCODE; the package purge may fail on locked files."
             }
         }
-        # Plain function (no -ErrorVariable): collect the errors it wrote through $Error.
-        $errorsBefore = $global:Error.Count
-        Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json | Out-Null
-        if ($global:Error.Count -gt $errorsBefore) { $purgeErrors += @($global:Error[0..($global:Error.Count - $errorsBefore - 1)]) }
+        # The errors are still shown, and collected (-ErrorVariable) so a purge that left files behind stops the run.
+        Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -Json:$Json -ErrorVariable +purgeErrors | Out-Null
 
         # A reset that left packages behind (locked files on Windows) would build against stale 999.0.0 packages:
         # stop before building; done reports failedStep "purge".
@@ -535,7 +533,7 @@ function Invoke-BuildAllCore {
                 [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name] -events $events
             }
             catch {
-                if ($_.Exception.Message -notlike 'Copy-NuGetPackages:*') { throw }
+                if ($_.FullyQualifiedErrorId -notlike 'OctoPackageCopyFailed*') { throw }
                 $buildStatus = $false
                 $copyError = "$($entry.name): $($_.Exception.Message)"
             }
