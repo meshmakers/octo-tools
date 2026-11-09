@@ -93,16 +93,17 @@ Per repository, in build order:
    them fresh from `<checkout>/nuget`. Nothing else in the cache and nothing else in
    `<checkout>/nuget` is touched.
 
-**Lanes (main / dev).** `Invoke-BuildRange` uses the same lane isolation as `Invoke-BuildAll`
-(`Get-OctoLaneBuildSettings`, `-laneIsolation Auto|On|Off`). A lane whose `<lane>/nuget` is not the
-local feed of the user-level `NuGet.Config` (e.g. `dev` while `local-nuget` points at `main/nuget`)
-builds with `NUGET_PACKAGES=<lane>/.nuget-packages` and `MSBUILDDISABLENODEREUSE=1`; in DebugL, repos
-whose `Directory.Build.props` declares no `<RestoreSources>` also get `RestoreSources=<lane>/nuget;nuget.org`
-for their build. The environment is restored afterwards. The package cache that is purged and checked
-for stale packages follows the lane: `<lane>/.nuget-packages` for an isolated lane; for the legacy
-lane (main) the global cache (`NUGET_PACKAGES` or `~/.nuget/packages`), plus `<lane>/.nuget-packages`
-when `<lane>/Octo.User.props` sets `RestorePackagesPath`. `-WhatIf` prints the lane, its environment,
-the caches and the per-repo `RestoreSources`.
+**Lanes (main, feature environments).** `Invoke-BuildRange` uses the same lane isolation as `Invoke-BuildAll`
+(`Get-OctoLaneBuildSettings`, `-laneIsolation Auto|On|Off`). A lane is isolated exactly when its
+`<lane>/Octo.User.props` declares `<RestorePackagesPath>` - every feature environment does, and main does after a
+one-time `Initialize-OctoLaneUserProps -branch branches/main -AddRestorePackagesPath` (adds the line, keeps the rest
+of the file, writes `Octo.User.props.bak`). The user-level `NuGet.Config` plays no role. An isolated lane builds with
+`NUGET_PACKAGES=<lane>/.nuget-packages` and `MSBUILDDISABLENODEREUSE=1`; in DebugL, repos whose
+`Directory.Build.props` declares no `<RestoreSources>` also get `RestoreSources=<lane>/nuget;nuget.org` for their
+build. The environment is restored afterwards. The package cache that is purged and checked for stale packages
+follows the lane: `<lane>/.nuget-packages` for an isolated lane; for a legacy lane (no `RestorePackagesPath`) the
+global cache (`NUGET_PACKAGES` or `~/.nuget/packages`). `-WhatIf` prints the lane, its environment, the caches and
+the per-repo `RestoreSources`.
 
 **Private feeds for library worktrees.** `-repoPaths @{ 'octo-construction-kit-engine' = '<absolute worktree folder>' }`
 builds that repository from the given folder (e.g. a git worktree) instead of `<checkout>/<repo>`, at the same
@@ -186,10 +187,52 @@ Pages mirror `https://meshmakers.github.io/construction-kit-libraries-build/`, n
 byte, ascending, with `octo-ckc -c Publish -f <file> -c LocalFileSystemCatalog -lcr <lane>/.octo/local-catalog` (index
 updated). Only published versions are copied; a local catalog without a version of that major gets nothing. An
 unreachable mirror is a warning and changes nothing; a failed publish prints a warning with the exact command. octo-ckc
-is the lane's `octo-construction-kit-engine/bin/DebugL/net10.0/publish/octo-ckc`, else the one on `PATH` (`-ckc`).
+is the lane's `octo-construction-kit-engine/bin/DebugL/net10.0/publish/octo-ckc` (in a feature environment without the
+engine: the base lane's), else the one on `PATH` (`-ckc`).
 The logic is the script block of `octo-pipeline-templates/templates/steps/ck-sync-intermediate-versions.yml` (the same
 rule the r* tag builds use to fill the public catalog), vendored verbatim as `modules/scripts/Sync-CkIntermediateVersions.ps1`;
 `tests/CkIntermediateSync.Tests.ps1` checks the copy when a templates checkout is found (`OCTO_PIPELINE_TEMPLATES_PATH`).
+
+# Feature environments
+
+A feature environment is a small lane of its own at `<rootPath>/envs/<env>` for one work item: git worktrees of the
+repositories you change, its own NuGet feed and package cache, its own CK and blueprint catalogs and a manifest
+(`.octo/environment.json`) that octo-devstack reads to run the environment's services in their own stack slot. Work
+on several features at the same time without one build overwriting another's `999.0.0` packages, and without
+touching `branches/main/nuget`.
+
+```powershell
+# 1. Create it: feature worktree(s) on <user>/AB#8625_enum-null, feed and catalogs copied from branches/main
+New-OctoEnvironment -env ab8625-enum-null -repos octo-construction-kit-engine -workItem AB#8625
+
+# 2. Which repositories does the change reach? Add the ones between the library and the service you run
+Get-OctoAffectedRepos -env ab8625-enum-null
+Add-OctoEnvironmentRepo -env ab8625-enum-null -repo octo-asset-repo-services -role consumer -addAffected
+
+# 3. Work in envs/ab8625-enum-null/octo-construction-kit-engine (Rider, dotnet build: isolated by Octo.User.props)
+#    and build the environment incrementally; compile the tests before every hand-off
+Invoke-BuildEnvironment -env ab8625-enum-null -verifyTests
+
+# 4. main moved on? Take its new packages and catalog entries (yours keep winning)
+Invoke-BuildEnvironment -env ab8625-enum-null -syncMain        # or Sync-OctoEnvironment -env ab8625-enum-null
+
+# 5. Status, and clean-up after the PR is merged (refuses dirty or unpushed worktrees; branches are kept)
+Get-OctoEnvironment -env ab8625-enum-null
+Remove-OctoEnvironment -env ab8625-enum-null
+```
+
+- **Consumers** are detached worktrees at the commit `branches/main/<repo>` is on; treat them as read-only. A library
+  change reaches a service only if every repository between them is rebuilt in the environment, otherwise main's
+  prebuilt packages bind to the new library at runtime (`MissingMethodException`).
+- **Snapshot, not live.** Main's packages and catalogs are copied when the environment is created and refreshed only
+  on request (`Sync-OctoEnvironment`, `-syncMain`). Packages built in the environment always win; catalog indexes
+  changed on both sides are merged. Main's feed is never added as a second NuGet source.
+- **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/envs/<env>`; a main build never
+  touches environment processes.
+- **Running** the environment's services is octo-devstack's job (own stack slot per environment, fallback to main's
+  binaries for the services the environment does not build). `Start-Octo` stays for main.
+- Load the profile from the `octo-tools` checkout next to `branches/` (`$rootPath` = the workspace root). Environment
+  folders inside `branches/main` are refused.
 
 # Working on many tenants
 
