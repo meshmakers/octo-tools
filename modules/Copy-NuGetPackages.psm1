@@ -116,6 +116,11 @@ function Copy-NuGetPackages
         Write-OctoJson -Command 'Copy-NuGetPackages' -Data ([ordered]@{ success = ($copyErrors.Count -eq 0); copiedCount = $copiedCount; files = @($copiedFiles); skipped = @($skipped); errors = @($copyErrors); error = if ($copyErrors.Count -gt 0) { $copyErrors -join '; ' } else { $null } })
         return
     }
+    # Without -Json (Invoke-BuildAll, the terminal): a package that did not land fails the call.
+    if ($copyErrors.Count -gt 0) {
+        $global:LASTEXITCODE = 1
+        throw "Copy-NuGetPackages: $($copyErrors.Count) package(s) not copied to ${branchNugetPath}: $($copyErrors -join '; ')"
+    }
 }
 
 function Get-OctoFileSha512 {

@@ -974,7 +974,12 @@ function Invoke-OctoBuildRangeCore {
         if ($dotnetRepos.Count -gt 1) {
             # Effective properties per repository: the run-wide ones, overridden by -msbuildPropertiesPerRepo.
             $missing = @(foreach ($repo in $dotnetRepos) {
-                    $perRepo = if ($msbuildPropertiesPerRepo.ContainsKey($repo.Name)) { $msbuildPropertiesPerRepo[$repo.Name] } else { @{} }
+                    # Keys accept the same name forms as -from/-to (e.g. without the octo- prefix): resolve them first.
+                    $perRepo = @{}
+                    foreach ($repoKey in @($msbuildPropertiesPerRepo.Keys)) {
+                        $resolved = try { (Resolve-OctoBuildRangeRepo -name ([string]$repoKey) -order $order).Name } catch { [string]$repoKey }
+                        if ($resolved -eq $repo.Name) { $perRepo = $msbuildPropertiesPerRepo[$repoKey] }
+                    }
                     foreach ($key in @('RestoreSources', 'RestorePackagesPath')) {
                         if (-not $msbuildProperties.ContainsKey($key) -and -not $perRepo.ContainsKey($key)) { "$($repo.Name): $key" }
                     }
@@ -1211,6 +1216,15 @@ function Invoke-OctoBuildRangeCore {
             $copy = Copy-NuGetPackages @copyArgs | ConvertFrom-Json
             if ($null -eq $copy -or $copy.data.success -ne $true) {
                 # e.g. an unwritable -feedPath: a repository whose packages did not land is not a success.
+                # Packages that did land are purged from the lane caches as usual, so no cache keeps an old copy
+                # of a package that changed in <lane>/nuget.
+                $partialFiles = @($copy.data.files | Where-Object { $_ })
+                $result.copiedCount = $partialFiles.Count
+                if ($purgeCaches -and $partialFiles.Count -gt 0) {
+                    $packageIds = @($partialFiles | ForEach-Object { Get-OctoPackageIdFromFile -fileName $_ })
+                    $purgeDirectories = @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath)
+                    $result.purged = @(Remove-OctoGlobalPackageVersions -directories $purgeDirectories)
+                }
                 $packageWatch.Stop()
                 $result.packageDuration = $packageWatch.Elapsed
                 $result.success = $false

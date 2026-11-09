@@ -444,6 +444,8 @@ Describe 'Copy-NuGetPackages / Copy-AllNuGetPackages' {
         $json.data.copiedCount | Should -Be 0
         @($json.data.errors).Count | Should -BeGreaterThan 0
         $json.data.error | Should -Match 'disk full'
+
+        { Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -ErrorAction SilentlyContinue } | Should -Throw '*not copied*disk full*'
     }
 
     It 'Copy-NuGetPackages -modifiedSince copies only newer packages' {
@@ -1250,6 +1252,10 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
 
         # both properties given: accepted
         $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties $feedProps -Json | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+
+        # per-repository keys accept the short name forms of -from/-to
+        $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -feedPath $feed -msbuildProperties @{ RestoreSources = 'feed' } -msbuildPropertiesPerRepo @{ 'construction-kit-engine' = @{ RestorePackagesPath = 'c1' }; 'sdk' = @{ RestorePackagesPath = 'c2' } } -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeTrue
 
         # also accepted when the cache comes per repository
