@@ -296,6 +296,18 @@ Describe 'Stop-OctoDevStackDaemon' {
         $script:KillCalls | Should -HaveCount 0
     }
 
+    It 'names http.sys for a port owned by PID 4 on Windows, stops nothing' {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
+        Mock -ModuleName OctoDevStack Get-NetTCPConnection { [pscustomobject]@{ OwningProcess = 4 } }
+        Mock -ModuleName OctoDevStack Get-CimInstance { }
+
+        $json = Stop-OctoDevStackDaemon -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*PID 4 (http.sys*netsh http show servicestate*'
+        Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 0
+    }
+
     It 'stops by PID with Stop-Process on Windows' {
         Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
         Mock -ModuleName OctoDevStack Get-NetTCPConnection { [pscustomobject]@{ OwningProcess = 1234 } }
@@ -328,6 +340,7 @@ Describe 'Invoke-CloneMainRepos -devTools' {
 
         $json.data.success | Should -BeTrue
         $json.data.repositories.repo | Should -Be @('octo-devstack')
+        $json.data.repositories[0].PSObject.Properties.Name | Should -Contain 'alreadyExists'
         $expected = InModuleScope OctoDevStack { Split-Path -Parent (Get-OctoDevStackDefaultPath) }
         Should -Invoke -ModuleName Invoke-CloneMainRepos Clone-Repo -Times 1 -Exactly -ParameterFilter {
             $repositoryName -eq 'octo-devstack' -and $basePath -eq $expected

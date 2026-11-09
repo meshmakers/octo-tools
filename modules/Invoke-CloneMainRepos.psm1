@@ -92,11 +92,13 @@ function Global:Invoke-CloneMainRepos {
         # Reset so an already-exists early-return (no git run) counts as success
         # rather than inheriting a stale exit code from a previous clone.
         $global:LASTEXITCODE = 0
+        $repoPath = Join-Path -Path $branchRootPath -ChildPath $repoName
+        $alreadyExists = [bool](Test-Path $repoPath)
         Clone-Repo -branch $branch -basePath $basePath $repoName
         $repoSuccess = ($LASTEXITCODE -eq 0)
         if (-not $repoSuccess) { $allOk = $false }
         if ($Json) {
-            $repoResults.Add([ordered]@{ repo = $repoName; success = [bool]$repoSuccess }) | Out-Null
+            $repoResults.Add([ordered]@{ repo = $repoName; success = [bool]$repoSuccess; alreadyExists = $alreadyExists; path = $repoPath }) | Out-Null
         }
     }
 

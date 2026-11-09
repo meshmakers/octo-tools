@@ -62,7 +62,11 @@ function Get-OctoDevStackListener([int]$Port) {
         $pids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
                 Select-Object -ExpandProperty OwningProcess -Unique)
         foreach ($processId in $pids) {
-            $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue).CommandLine
+            $commandLine = if ([int]$processId -eq 4) {
+                # PID 4 (System) owns ports of http.sys: an HttpListener/IIS/WinRM URL reservation of some process.
+                'http.sys (System) - the real owner is listed by: netsh http show servicestate'
+            }
+            else { (Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue).CommandLine }
             $result += [pscustomobject]@{ pid = [int]$processId; commandLine = [string]$commandLine }
         }
         return $result

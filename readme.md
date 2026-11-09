@@ -233,6 +233,8 @@ and never build or touch the real NuGet folders):
 ```powershell
 # once; -MaximumVersion keeps it on Pester 5 - -MinimumVersion alone installs Pester 6
 Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser
+# Windows with Defender "Controlled Folder Access": Install-Module cannot write to Documents\PowerShell\Modules;
+# use Save-Module Pester -MaximumVersion 5.99 -Path <folder> and Import-Module <folder>\Pester instead.
 # every session: load Pester 5 explicitly (if Pester 6 is already loaded, start a fresh pwsh first)
 Import-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99
 Invoke-Pester ./tests
