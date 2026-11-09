@@ -505,6 +505,39 @@ Describe 'OctoDevStack with the macOS LaunchAgent' {
         Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 0
     }
 
+    It 'Stop leaves the LaunchAgent loaded when a foreign program holds the port' {
+        Mock -ModuleName OctoDevStack lsof { '555' }
+        Mock -ModuleName OctoDevStack ps { 'node /tmp/other.js' }
+
+        $json = Stop-OctoDevStack -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.stopped | Should -BeFalse
+        $script:Launchctl | Should -HaveCount 0
+    }
+
+    It 'Stop leaves the LaunchAgent loaded when nothing listens on the port' {
+        Mock -ModuleName OctoDevStack lsof { }
+
+        $json = Stop-OctoDevStack -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.stopped | Should -BeFalse
+        $script:Launchctl | Should -HaveCount 0
+    }
+
+    It 'Stop reports a failure when the daemon survives bootout and Stop-Process' {
+        Mock -ModuleName OctoDevStack lsof { '902' }
+        Mock -ModuleName OctoDevStack ps { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $true }
+
+        $json = Stop-OctoDevStack -TimeoutSeconds 0 -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.stopped | Should -BeFalse
+        $json.data.error | Should -BeLike '*still running*'
+    }
+
     It 'Start loads the LaunchAgent instead of starting a second daemon' {
         $script:Health = 0
         Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:Health++; $script:Health -gt 2 }

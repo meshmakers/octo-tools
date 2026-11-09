@@ -379,8 +379,10 @@ function Start-OctoDevStack {
         Starts the octo-devstack daemon on http://127.0.0.1:<Port> (default in the background).
 
     .DESCRIPTION
-        - Something already answers /health on the port: reports "already running" (PID of the listener) and
-          starts nothing.
+        - octo-devstack already answers /health on the port: reports "already running" (PID of the listener)
+          and starts nothing. Another program answering /health on the port is refused.
+        - The macOS LaunchAgent is installed: launchd starts it (`launchctl bootstrap`, `kickstart` when already
+          loaded) instead of a second, hand-started daemon.
         - Another process listens on the port without answering /health: refused, the process is named.
         - The build is missing: refused with a hint to run Install-OctoDevStack (or builds with -Build).
         - Default: started detached. macOS/Linux: in its own process group with SIGHUP ignored, so neither
@@ -390,12 +392,14 @@ function Start-OctoDevStack {
         - -Foreground: runs in this console (Ctrl+C stops the daemon and, same process group, its services).
           -Json is not supported with -Foreground.
         - -RegisterClaude: adds the MCP server to Claude Code (`claude mcp add --transport http --scope user
-          octo-devstack <url>/mcp`) unless `claude mcp list` already names it; without claude on PATH the
-          command is printed. No secret is passed.
+          octo-devstack <url>/mcp`) unless `claude mcp list` already has octo-devstack with this URL. Registered
+          with another URL: reported as `mismatch` with the commands to fix it, nothing is changed. Without claude
+          on PATH the command is printed. No secret is passed.
 
     .PARAMETER Json
         { success, exitCode, alreadyRunning, started, pid, port, url, mcpUrl, statusPage, logPath, dll,
-          claudeRegistration[, error, logTail] }. claudeRegistration: added | present | notFound | failed | null.
+          claudeRegistration, launchAgent[, error, logTail] }. claudeRegistration: added | present | mismatch |
+          notFound | failed | null. launchAgent: true when started through the macOS LaunchAgent.
 
     .EXAMPLE
         Start-OctoDevStack -RegisterClaude
@@ -583,7 +587,8 @@ function Stop-OctoDevStack {
         Another process on the port is refused. macOS/Linux: SIGTERM, after -TimeoutSeconds SIGKILL;
         Windows: Stop-Process. The services the daemon started keep running and are adopted by the next
         start. With the macOS LaunchAgent installed the daemon is stopped through launchd (`launchctl bootout`),
-        so launchd does not start it again; Start-OctoDevStack loads it again (`launchctl bootstrap`).
+        so launchd does not start it again; Start-OctoDevStack loads it again (`launchctl bootstrap`). -Port must
+        be the port the agent's daemon listens on: a foreign listener is refused and nothing is unloaded.
 
     .PARAMETER Json
         { success, exitCode, stopped, pid, port, launchAgent, note[, error] }.
@@ -608,24 +613,35 @@ function Stop-OctoDevStack {
     }
 
     if ($launchAgent) {
-        # Managed by launchd: unload the job, so KeepAlive does not start it again.
-        $target = @(Get-OctoDevStackListener -Port $Port | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
-        $result.pid = if ($target) { $target.pid } else { $null }
+        # Managed by launchd: unload the job, so KeepAlive does not start it again - but only when the listener on
+        # -Port (which must be the agent's port) is octo-devstack.
+        $agentListeners = @(Get-OctoDevStackListener -Port $Port)
+        $target = @($agentListeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
+        if (-not $target) {
+            if ($agentListeners.Count -gt 0) {
+                $who = ($agentListeners | ForEach-Object { "PID $($_.pid) ($($_.commandLine))" }) -join ', '
+                & $finish $false "Port $Port is used by $who, not by octo-devstack.dll; nothing stopped, the LaunchAgent stays loaded."
+                return
+            }
+            if (-not $Json) { Write-Host "octo-devstack is not running on port $Port; the LaunchAgent was left as it is." -ForegroundColor DarkGray }
+            & $finish $true $null
+            return
+        }
+        $result.pid = $target.pid
         $out = Invoke-OctoDevStackLaunchctl -Arguments @('bootout', "$(Get-OctoDevStackLaunchdDomain)/$($script:LaunchAgentLabel)")
-        if ($out.ExitCode -ne 0 -and $target) {
+        if ($out.ExitCode -ne 0) {
             & $finish $false "launchctl bootout $($script:LaunchAgentLabel) failed: $($out.Output)"
             return
         }
-        if ($target) {
-            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-            while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-            if (Test-OctoDevStackProcessAlive -ProcessId $target.pid) { Stop-Process -Id $target.pid -Force -ErrorAction SilentlyContinue }
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        if (Test-OctoDevStackProcessAlive -ProcessId $target.pid) { Stop-Process -Id $target.pid -Force -ErrorAction SilentlyContinue }
+        if (Test-OctoDevStackProcessAlive -ProcessId $target.pid) {
+            & $finish $false "octo-devstack (PID $($target.pid)) is still running after launchctl bootout and Stop-Process."
+            return
         }
-        $result.stopped = [bool]$target
-        if (-not $Json) {
-            if ($target) { Write-Host "octo-devstack stopped (LaunchAgent unloaded). $note" -ForegroundColor Green }
-            else { Write-Host "octo-devstack was not running on port $Port (LaunchAgent unloaded)." -ForegroundColor DarkGray }
-        }
+        $result.stopped = $true
+        if (-not $Json) { Write-Host "octo-devstack stopped (LaunchAgent unloaded). $note" -ForegroundColor Green }
         & $finish $true $null
         return
     }
