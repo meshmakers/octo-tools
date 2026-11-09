@@ -244,7 +244,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
 - Load the profile from the `octo-tools` checkout next to `branches/` (`$rootPath` = the workspace root). Environment
   folders inside `branches/main` are refused, and so is a name whose `wt-<name>` already exists as an octo-claude-pm
   lane folder or flat worktree. `Remove-OctoEnvironment` deletes only what the environment owns. Claims stay in
-  `branches/main/.octo/claims/<repo>.md` (with `Environment:` / `Worktree:` lines), not in the environment folder.
+  `branches/main/.octo/claims/<repo>.md` (with `Environment:` / `Worktree:` lines, format documented by octo-claude-pm), never in the environment folder.
 
 # Working on many tenants
 
