@@ -50,8 +50,13 @@ BeforeAll {
 
     $script:Old = [DateTime]'2020-01-01'
 
-    function Set-FakeLaneFeed([string]$feed) {
-        Set-Content -Path $script:FakeNuGetConfig -Value "<configuration><packageSources><add key=""local-nuget"" value=""$feed"" /></packageSources></configuration>"
+    # Lane isolation is decided by <lane>/Octo.User.props declaring RestorePackagesPath (Get-OctoLaneBuildSettings).
+    function Set-FakeLaneIsolated([string]$lane) {
+        Set-Content -Path (Join-Path $lane 'Octo.User.props') -Value '<Project><PropertyGroup><RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath></PropertyGroup></Project>'
+    }
+
+    function Clear-FakeLaneIsolation([string]$lane) {
+        Remove-Item -Path (Join-Path $lane 'Octo.User.props') -Force -ErrorAction SilentlyContinue
     }
 
     function Set-FakeCacheHash([string]$cache, [string]$id, [string]$nupkg) {
@@ -115,10 +120,7 @@ BeforeAll {
         # The cache copy of Common.Shared matches <checkout>/nuget (NuGet records the nupkg SHA-512).
         Set-FakeCacheHash $cache 'Meshmakers.Common.Shared' (Join-Path $checkout 'nuget/Meshmakers.Common.Shared.999.0.0.nupkg')
 
-        # User-level NuGet.Config used by the lane isolation (Get-OctoLaneBuildSettings): its local feed is
-        # the fake main lane's nuget/ folder, so 'main' is the legacy (non-isolated) lane like on a
-        # developer machine. Set-FakeLaneFeed points it elsewhere to make 'main' an isolated lane.
-        Set-FakeLaneFeed (Join-Path $checkout 'nuget')
+        # No Octo.User.props: 'main' is a legacy (non-isolated) lane. Set-FakeLaneIsolated makes it isolated.
 
         $global:rootPath = $root
         $global:GLOBALNUGETPACKAGESPATH = $cache
@@ -127,10 +129,6 @@ BeforeAll {
 
     # The tests point the profile globals at TestDrive; remember and restore them (they are real
     # values when the tests run inside a session that loaded profile.ps1).
-    # Never read the developer's real ~/.nuget/NuGet/NuGet.Config from tests (a root BeforeAll mock
-    # applies to every test of this file; New-FakeCheckout writes the file).
-    $script:FakeNuGetConfig = Join-Path $TestDrive 'NuGet.Config'
-    Mock -ModuleName Get-OctoLaneBuildSettings Get-OctoUserNuGetConfigPath { $script:FakeNuGetConfig }
 
     $script:PreviousNugetPackages = $env:NUGET_PACKAGES
     $script:PreviousRootPath = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue
@@ -831,7 +829,7 @@ Describe 'Lane isolation in Invoke-BuildRange (AB#4924)' {
     }
 
     It 'isolated lane (dev): NUGET_PACKAGES + node reuse off + RestoreSources per repo, lane cache purged, environment restored' {
-        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')
+        Set-FakeLaneIsolated $fake.Checkout
         $laneCache = Join-Path $fake.Checkout '.nuget-packages'
         New-Item -ItemType Directory -Force -Path (Join-Path $laneCache 'meshmakers.octo.runtime.engine/999.0.0') | Out-Null
         $beforePackages = $env:NUGET_PACKAGES
@@ -852,7 +850,7 @@ Describe 'Lane isolation in Invoke-BuildRange (AB#4924)' {
     }
 
     It '-WhatIf shows the lane, the caches and the per-repo RestoreSources' {
-        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')
+        Set-FakeLaneIsolated $fake.Checkout
         $json = Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -WhatIf -Json | ConvertFrom-Json
 
         $json.data.lane.isolated | Should -BeTrue
@@ -1055,10 +1053,10 @@ Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574
         Test-Path (Join-Path $script:laneCache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeTrue
     }
 
-    It 'main lane with RestorePackagesPath: purges lane cache and global cache' {
-        Set-Content -Path (Join-Path $fake.Checkout 'Octo.User.props') -Value '<Project><PropertyGroup><RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath></PropertyGroup></Project>'
+    It '-laneIsolation Off with RestorePackagesPath: purges lane cache and global cache' {
+        Set-FakeLaneIsolated $fake.Checkout
 
-        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -laneIsolation Off -Json | Out-Null
 
         Test-Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse
         Test-Path (Join-Path $script:laneCache 'meshmakers.octo.sdk.common/999.0.0') | Should -BeFalse
@@ -1066,8 +1064,8 @@ Describe 'Invoke-BuildAll DebugL purges every package cache of the lane (AB#6574
         Test-Path (Join-Path $script:laneCache 'newtonsoft.json/999.0.0') | Should -BeTrue
     }
 
-    It 'isolated lane: purges only the lane cache, never the global cache' {
-        Set-FakeLaneFeed (Join-Path $TestDrive 'somewhere-else/nuget')
+    It 'lane with RestorePackagesPath (main after the switch, environments) is isolated: purges only the lane cache, never the global cache' {
+        Set-FakeLaneIsolated $fake.Checkout
 
         Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
 
@@ -1189,7 +1187,7 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
     }
 
     It '-feedPath copies into the private feed, skips the purge and keeps the caller''s environment' {
-        Set-FakeLaneFeed (Join-Path $fake.Root 'other-lane/nuget')     # isolated lane: would set NUGET_PACKAGES / RestoreSources
+        Set-FakeLaneIsolated $fake.Checkout     # isolated lane: would set NUGET_PACKAGES / RestoreSources
         $feed = Join-Path $TestDrive 'feeds/session-2'
         $callerCache = Join-Path $TestDrive 'session-2-packages'
         $laneCache = Join-Path $fake.Checkout '.nuget-packages'
@@ -1418,11 +1416,11 @@ Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
         Mock -ModuleName Invoke-BuildAll dotnet { }
 
         Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
-        Set-FakeLaneFeed (Join-Path $TestDrive 'somewhere-else/nuget')      # isolated lane: only <lane>/.nuget-packages is purged
+        Set-FakeLaneIsolated $fake.Checkout      # isolated lane: only <lane>/.nuget-packages is purged
         Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
         Should -Invoke -ModuleName Invoke-BuildAll dotnet -Times 0
 
-        Set-FakeLaneFeed (Join-Path $fake.Checkout 'nuget')
+        Clear-FakeLaneIsolation $fake.Checkout
         Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $false }
         Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
         Should -Invoke -ModuleName Invoke-BuildAll dotnet -Times 0

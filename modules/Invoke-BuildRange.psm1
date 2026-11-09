@@ -588,13 +588,13 @@ function Write-OctoBuildRangePlan {
          repository in the range restores the fresh ones from <checkout>/nuget.
 
     Lane isolation (AB#4924) is the same as Invoke-BuildAll's (Get-OctoLaneBuildSettings): an
-    isolated lane (e.g. dev, whose nuget/ is not the local feed of the user-level NuGet.Config)
+    isolated lane (its Octo.User.props declares RestorePackagesPath: every feature environment)
     builds with NUGET_PACKAGES=<lane>/.nuget-packages and MSBUILDDISABLENODEREUSE=1, and in DebugL
     repositories without their own <RestoreSources> get RestoreSources=<lane>/nuget;nuget.org.
     The environment is restored afterwards. The package cache that is purged and checked follows
     the lane (Get-OctoRangePackageCaches): <lane>/.nuget-packages for an isolated lane; for the
-    legacy lane (main) the global cache (NUGET_PACKAGES or ~/.nuget/packages), plus
-    <lane>/.nuget-packages if <lane>/Octo.User.props sets RestorePackagesPath.
+    legacy lane (no RestorePackagesPath, or -laneIsolation Off) the global cache (NUGET_PACKAGES or
+    ~/.nuget/packages), plus <lane>/.nuget-packages if <lane>/Octo.User.props sets RestorePackagesPath.
 
     Unlike Invoke-BuildAll it does NOT wipe <checkout>/nuget, does NOT delete every
     meshmakers.* package from the package cache and does NOT kill dotnet processes.
