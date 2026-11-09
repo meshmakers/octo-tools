@@ -78,7 +78,7 @@ function Initialize-OctoAgentDocs {
     }
     else {
         $state = 'created'
-        $skeleton = (Format-EntryStart -Repo $repoName -Config $config) + "`n" + (@(foreach ($s in $sections) { "## $s`n`n" + $(if ($s -eq $routingSection) { "$(Get-OctoAgentDocsConstant RoutingStart)`n$(Get-OctoAgentDocsConstant RoutingEnd)`n`n" }) }) -join '')
+        $skeleton = (Format-EntryStart -Config $config) + "`n" + (@(foreach ($s in $sections) { "## $s`n`n" + $(if ($s -eq $routingSection) { "$(Get-OctoAgentDocsConstant RoutingStart)`n$(Get-OctoAgentDocsConstant RoutingEnd)`n`n" }) }) -join '')
         if ($PSCmdlet.ShouldProcess('AGENTS.md', 'Write the entry point with the required sections and routing markers')) { Write-OctoAgentDocsText $agentsPath $skeleton; $written.Add('AGENTS.md') }
         # A thin existing CLAUDE.md is still somebody's pointer; replacing it is what
         # Test-OctoAgentDocs -Fix is for, with its guard and its -WhatIf.
@@ -218,11 +218,12 @@ function Write-InitReport {
 
 function Format-EntryStart {
     # Title, opening sentence and, with -Headings, the required headings: the start every
-    # AGENTS.md shares. The skeleton and the brief both render it from the ruleset.
-    param([string]$Repo, [hashtable]$Config, [switch]$Headings)
+    # AGENTS.md shares, so the title names the file, not the repository. The skeleton and
+    # the brief both render it from the ruleset.
+    param([hashtable]$Config, [switch]$Headings)
     $options = $Config.rules['required-sections'][1]
     $opening = Format-OctoAgentDocsOpening -Sentence $options['opening'] -Width $Config.rules['line-length'][1]['max']
-    $text = "# $Repo`n`n$opening`n"
+    $text = "# AGENTS.md`n`n$opening`n"
     if ($Headings) { $text += "`n" + (@($options['sections'] | ForEach-Object { "## $_" }) -join "`n") + "`n" }
     return $text
 }
@@ -265,7 +266,7 @@ function Format-MigrationBrief {
         START_MARKER = Get-OctoAgentDocsConstant RoutingStart
         END_MARKER   = Get-OctoAgentDocsConstant RoutingEnd
         SHIM         = (@($Config.rules['shim-valid'][1]['content']) | ForEach-Object { "                   $_" }) -join "`n"
-        START        = (Format-EntryStart -Repo $Repo -Config $Config -Headings).TrimEnd("`n")
+        START        = (Format-EntryStart -Config $Config -Headings).TrimEnd("`n")
         ROUTING      = $Config.rules['required-sections'][1]['routingSection']
         BUDGETS      = $budgets -join "`n"
         RULES        = ($rules -join "`n").TrimEnd("`n")

@@ -333,7 +333,7 @@ paragraph below the `# ` title is the opening sentence, and that the level-2 hea
 exactly these five, in this order:
 
 ```markdown
-# <repository>
+# AGENTS.md
 
 Instructions for coding agents in this repository. Detail lives in `docs/`; read the matching file before changing the
 code it covers.
