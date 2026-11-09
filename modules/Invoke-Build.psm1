@@ -51,41 +51,18 @@ function Invoke-Build {
         return
     }
 
-    $repoName = Split-Path -Leaf ([IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($repositoryPath)))
-    # Shared with Invoke-BuildCore, which records the current phase and the result.
-    $events = @{ Path = $EventsFile; Command = 'Invoke-Build'; Repo = $repoName; Phase = $null; Result = $null }
+    # Shared with Invoke-BuildCore, which writes plan/repoStart/phase/repoDone once the repository is
+    # found and records the result; a run that stops before (missing folder, invalid arguments) gets
+    # only `done` with failedStep "preflight" (Complete-OctoBuildEvents).
+    $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-Build'
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-Build' -Event 'plan' -Data ([ordered]@{ repos = @([ordered]@{ repo = $repoName; mode = 'dotnet' }); count = 1 })
-    Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-Build' -Event 'repoStart' -Data ([ordered]@{ repo = $repoName; index = 1; count = 1 })
     try {
         Invoke-BuildMain -configuration $configuration -repositoryPath $repositoryPath -laneIsolation $laneIsolation -msbuildProperties $msbuildProperties -events $events -Json:$Json
     }
     finally {
-        # Also reached when the build throws: repoDone and done with success=false.
+        # Also after a throw: repoDone(success=false) once the repository had started, then done. Best-effort on Ctrl+C.
         $watch.Stop()
-        $result = $events.Result
-        $success = ($null -ne $result) -and [bool]$result.Success
-        $failedStep = if ($success) { $null } elseif ($null -ne $result) { $result.FailedStep } elseif ($events.Phase) { $events.Phase } else { 'restore' }
-        $buildSeconds = if ($null -ne $result) { $result.BuildSeconds } else { $watch.Elapsed.TotalSeconds }
-        Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-Build' -Event 'repoDone' -Data ([ordered]@{
-                repo           = $repoName
-                index          = 1
-                count          = 1
-                success        = $success
-                seconds        = $watch.Elapsed.TotalSeconds
-                buildSeconds   = $buildSeconds
-                testSeconds    = 0
-                packageSeconds = 0
-                copied         = 0
-                purged         = 0
-                logFile        = if ($null -ne $result) { $result.LogFile } else { $null }
-            })
-        Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-Build' -Event 'done' -Data ([ordered]@{
-                success        = $success
-                failedRepo     = if ($success) { $null } else { $repoName }
-                failedStep     = $failedStep
-                elapsedSeconds = $watch.Elapsed.TotalSeconds
-            })
+        Complete-OctoBuildEvents -State $events -ElapsedSeconds $watch.Elapsed.TotalSeconds
     }
 }
 
@@ -99,6 +76,17 @@ function Invoke-BuildMain {
         $events = $null,
         [switch]$Json
     )
+
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $repositoryPath -PathType Container)) {
+        # Refused before anything runs (events: only `done` with failedStep "preflight").
+        $message = "Invoke-Build: repository folder $repositoryPath does not exist."
+        $Global:LASTEXITCODE = 1
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-Build' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ configuration = $configuration; error = $message })
+        }
+        Write-Error $message
+        return
+    }
 
     $propertyArgs = @(ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties)
     $buildEnvironment = Get-OctoRepositoryBuildEnvironment -repositoryPath $repositoryPath -configuration $configuration -laneIsolation $laneIsolation
@@ -122,7 +110,7 @@ function Invoke-BuildCore {
         [string]$configuration = "Release",
         [string]$repositoryPath = ".\",
         [string[]]$propertyArgs = @(),
-        # Event state of Invoke-Build -EventsFile (Path, Command, Repo); Phase and Result are set here. $null = no events.
+        # -EventsFile state (New-OctoBuildEventState); this function writes plan/repoStart/phase/repoDone and the result. $null = no events.
         $events = $null,
         [switch]$Json
     )
@@ -133,9 +121,22 @@ function Invoke-BuildCore {
 
     $repositoryPath = $(Resolve-Path -Path $repositoryPath).Path
 
+    $eventsOn = ($null -ne $events) -and -not [string]::IsNullOrWhiteSpace([string]$events.Path)
+    if ($eventsOn) {
+        $repoName = Split-Path -Leaf ([IO.Path]::TrimEndingDirectorySeparator($repositoryPath))
+        Write-OctoBuildEvent -Path $events.Path -Command $events.Command -Event 'plan' -Data ([ordered]@{ repos = @([ordered]@{ repo = $repoName; mode = 'dotnet' }); count = 1 })
+        $events.Repo = $repoName
+        $events.Index = 1
+        $events.Count = 1
+        $events.RepoDone = $false
+        $events.RepoWatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $events.LogFile = $logFile
+        Write-OctoBuildEvent -Path $events.Path -Command $events.Command -Event 'repoStart' -Data ([ordered]@{ repo = $repoName; index = 1; count = 1 })
+    }
+
     $setPhase = {
         param([string]$phase)
-        if ($null -ne $events) {
+        if ($eventsOn) {
             $events.Phase = $phase
             Write-OctoBuildEvent -Path $events.Path -Command $events.Command -Event 'phase' -Data ([ordered]@{ repo = $events.Repo; phase = $phase })
         }
@@ -176,8 +177,26 @@ function Invoke-BuildCore {
     $buildWatch.Stop()
     $state = $exitCode -eq 0
     $Global:LASTEXITCODE = $exitCode
-    if ($null -ne $events) {
-        $events.Result = [pscustomobject]@{ Success = $state; FailedStep = $failedStep; LogFile = $logFile; BuildSeconds = $buildWatch.Elapsed.TotalSeconds }
+    if ($eventsOn) {
+        $events.RepoWatch.Stop()
+        Write-OctoBuildEvent -Path $events.Path -Command $events.Command -Event 'repoDone' -Data ([ordered]@{
+                repo           = $events.Repo
+                index          = 1
+                count          = 1
+                success        = $state
+                seconds        = $events.RepoWatch.Elapsed.TotalSeconds
+                buildSeconds   = $buildWatch.Elapsed.TotalSeconds
+                testSeconds    = 0
+                packageSeconds = 0
+                copied         = 0
+                purged         = 0
+                logFile        = $logFile
+            })
+        $events.RepoDone = $true
+        $events.Success = $state
+        $events.FailedRepo = if ($state) { $null } else { $events.Repo }
+        $events.FailedStep = $failedStep
+        $events.Completed = $true
     }
 
     if ($Json) {

@@ -59,13 +59,14 @@ function Copy-NuGetPackages
     if (-not $Json) { Write-Host "Searching at $directory" }
     $binDirectories = Get-ChildItem -Path $directory -Filter 'DebugL' -Recurse -Directory | Where-Object { $_.FullName -like '*[/\]bin[/\]DebugL' }
 
-    $repositoryRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($directory))
+    $repositoryRoot = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($directory))
     if ([string]::IsNullOrWhiteSpace($nugetPath)) {
         $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
         $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
     }
     else {
-        $branchNugetPath = [IO.Path]::GetFullPath($nugetPath)
+        # Relative to $PWD (GetFullPath would resolve against the process start directory).
+        $branchNugetPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($nugetPath)
     }
     if (-not $Json) { Write-Host "Branch NuGet Path: $branchNugetPath" }
 

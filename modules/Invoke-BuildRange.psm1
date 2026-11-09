@@ -680,8 +680,11 @@ function Write-OctoBuildRangePlan {
     Build single repositories from another folder instead of <checkout>/<repo>, keyed by repository
     name (same name forms as -from/-to), e.g. a git worktree:
     @{ 'octo-construction-kit-engine' = '/Users/me/meshmakers/branches/main/wt-8625-octo-construction-kit-engine' }.
-    The repository keeps its position in the build order. The folder must be an absolute path, exist and
-    contain the repository (a .sln/.slnx in its root or a src/ folder); otherwise the run is refused.
+    The repository keeps its position in the build order. The folder must be an absolute path, exist,
+    contain a .sln/.slnx in its root or a src/ folder, and be that repository: a git worktree whose
+    .git file points to <repo>/.git/worktrees/<name>, or a clone whose .git folder sits in a folder
+    named like the repository; otherwise the run is refused. A folder that is not next to the lane's
+    repositories gets a warning (repositories with their own <RestoreSources> use ../nuget).
     A key for a repository outside the selected range is not applied (warning).
 
 .PARAMETER feedPath
@@ -689,7 +692,9 @@ function Write-OctoBuildRangePlan {
     <checkout>/nuget, and do NOT purge the lane's package caches. The caller provides the isolation
     (NUGET_PACKAGES, RestoreSources): with -feedPath the run neither sets the lane's NUGET_PACKAGES nor
     the per-repository RestoreSources override, the stale-cache check of <checkout>/nuget is skipped
-    and -purgeStaleCache is refused. DebugL only. Reported as `feedPath` in the -Json document.
+    and -purgeStaleCache is refused. DebugL only. Reported as `feedPath` in the -Json document. A
+    relative path resolves against $PWD. With more than one dotnet repository in the range the run is
+    refused unless -msbuildProperties contains both RestoreSources and RestorePackagesPath (see below).
     Note: repositories that declare their own <RestoreSources>, and a lane whose Octo.User.props sets
     RestorePackagesPath, ignore the environment - pass -msbuildProperties @{ RestoreSources = ..;
     RestorePackagesPath = .. } (global properties win) when the downstream repositories of the range
@@ -761,27 +766,15 @@ function Invoke-BuildRange {
         if ($key -in $skip) { continue }
         $forward[$key] = $PSBoundParameters[$key]
     }
-    $events = @{ Path = $EventsFile; Repo = $null; Phase = $null; Success = $false; FailedRepo = $null; FailedStep = $null; Completed = $false }
+    $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-BuildRange'
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         Invoke-OctoBuildRangeCore @forward -events $events
     }
     finally {
+        # Also after a throw: repoDone(success=false) of the running repository, then done. Best-effort on Ctrl+C.
         $watch.Stop()
-        if (-not $WhatIfPreference -and -not [string]::IsNullOrWhiteSpace($EventsFile)) {
-            if (-not $events.Completed) {
-                # Threw: report the repository and step that were running.
-                $events.Success = $false
-                if (-not $events.FailedRepo) { $events.FailedRepo = $events.Repo }
-                if (-not $events.FailedStep) { $events.FailedStep = if ($events.Phase) { $events.Phase } else { 'preflight' } }
-            }
-            Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-BuildRange' -Event 'done' -Data ([ordered]@{
-                    success        = [bool]$events.Success
-                    failedRepo     = if ($events.Success) { $null } else { $events.FailedRepo }
-                    failedStep     = if ($events.Success) { $null } else { $events.FailedStep }
-                    elapsedSeconds = $watch.Elapsed.TotalSeconds
-                })
-        }
+        if (-not $WhatIfPreference) { Complete-OctoBuildEvents -State $events -ElapsedSeconds $watch.Elapsed.TotalSeconds }
     }
 }
 
@@ -790,7 +783,9 @@ function Resolve-OctoRepoPathOverrides {
     # map repository name -> absolute folder; throws on an invalid entry.
     param(
         [hashtable]$repoPaths = @{},
-        [Parameter(Mandatory = $true)] [object[]]$order
+        [Parameter(Mandatory = $true)] [object[]]$order,
+        # Lane checkout; a folder that is not next to the lane's repositories gets a warning.
+        [string]$branchRootPath = ""
     )
     $map = [ordered]@{}
     foreach ($key in @($repoPaths.Keys)) {
@@ -807,6 +802,39 @@ function Resolve-OctoRepoPathOverrides {
         $hasSrc = Test-Path -LiteralPath (Join-Path $folder 'src') -PathType Container
         if (-not $hasSolution -and -not $hasSrc) {
             throw "-repoPaths: folder $folder for $name contains no repository (no .sln/.slnx in its root and no src/ folder)."
+        }
+        # It must be THIS repository: a git worktree (.git file) of <repo>, or a clone (.git folder) named <repo>.
+        $gitPath = Join-Path $folder '.git'
+        if (Test-Path -LiteralPath $gitPath -PathType Leaf) {
+            $gitText = [string](Get-Content -LiteralPath $gitPath -Raw -ErrorAction SilentlyContinue)
+            $gitDir = $null
+            if ($gitText -match '(?m)^[ \t]*gitdir:[ \t]*(\S[^\r\n]*?)[ \t]*\r?$') { $gitDir = $Matches[1] }
+            if (-not $gitDir) {
+                throw "-repoPaths: $gitPath of $name has no gitdir line."
+            }
+            if (-not [IO.Path]::IsPathRooted($gitDir)) { $gitDir = Join-Path $folder $gitDir }
+            # <repo>/.git/worktrees/<name> -> <repo>
+            $gitDir = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($gitDir))
+            $mainRepo = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $gitDir)))
+            if ($mainRepo -ine $name) {
+                throw "-repoPaths: $folder is a worktree of '$mainRepo' (gitdir $gitDir), not of $name."
+            }
+        }
+        elseif (Test-Path -LiteralPath $gitPath -PathType Container) {
+            if ((Split-Path -Leaf $folder) -ine $name) {
+                throw "-repoPaths: $folder is a clone named '$(Split-Path -Leaf $folder)', not $name."
+            }
+        }
+        else {
+            throw "-repoPaths: $folder for $name is no git repository or worktree (no .git) - cannot verify that it holds $name."
+        }
+        # Repos whose own <RestoreSources> use ../nuget resolve the feed next to the folder.
+        if (-not [string]::IsNullOrWhiteSpace($branchRootPath)) {
+            $parent = [IO.Path]::TrimEndingDirectorySeparator((Split-Path -Parent $folder))
+            $lane = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
+            if ($parent -ine $lane) {
+                Write-Warning "-repoPaths: $folder is not next to the lane's repositories ($lane) - a repository whose own <RestoreSources> uses ../nuget restores from $(Join-Path $parent 'nuget') instead of the lane feed."
+            }
         }
         $map[$name] = $folder
     }
@@ -891,7 +919,7 @@ function Invoke-OctoBuildRangeCore {
     }
 
     # -repoPaths: build single repositories from another folder (e.g. a git worktree), same position.
-    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $repoPaths -order $order }
+    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $repoPaths -order $order -branchRootPath $branchRootPath }
     catch { & $fail $_.Exception.Message; return }
     $repoPathsOutside = @($repoPathMap.Keys | Where-Object { $name = $_; -not ($repos | Where-Object { $_.Name -ieq $name }) } | Sort-Object)
     if ($repoPathsOutside.Count -gt 0) {
@@ -916,7 +944,8 @@ function Invoke-OctoBuildRangeCore {
             & $fail "-feedPath and -purgeStaleCache cannot be combined: a private-feed run never purges the lane's package caches."
             return
         }
-        $nugetTarget = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($feedPath))
+        # Relative to $PWD (GetFullPath would resolve against the process start directory).
+        $nugetTarget = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($feedPath))
     }
     $repoPathsReport = [ordered]@{}
     foreach ($name in $repoPathMap.Keys) { $repoPathsReport[$name] = $repoPathMap[$name] }
@@ -932,6 +961,22 @@ function Invoke-OctoBuildRangeCore {
     }
     $plan = @(Get-OctoBuildRangePlan -repos $repos -includeTests:$includeTests -globalPackagesPath $globalPackagesPath)
     $verify = [bool]$verifyTests -and -not $includeTests
+
+    # -feedPath with more than one dotnet repository: the downstream repositories must restore the
+    # private packages from the feed into a private cache. The environment is not enough (repos with their
+    # own <RestoreSources>, a lane RestorePackagesPath in Octo.User.props win over it) - only global
+    # MSBuild properties are; without them they build against old lane packages or extract the private
+    # 999.0.0 packages into the lane cache.
+    if ($privateFeed) {
+        $dotnetRepos = @($plan | Where-Object { $_.Mode -eq 'dotnet' })
+        if ($dotnetRepos.Count -gt 1) {
+            $missing = @(@('RestoreSources', 'RestorePackagesPath') | Where-Object { -not $msbuildProperties.ContainsKey($_) })
+            if ($missing.Count -gt 0) {
+                & $fail "-feedPath with $($dotnetRepos.Count) dotnet repositories ($(($dotnetRepos.Name) -join ', ')) needs -msbuildProperties with RestoreSources (the private feed first) and RestorePackagesPath (a private package cache); missing: $($missing -join ', ')."
+                return
+            }
+        }
+    }
     foreach ($entry in $plan) {
         # Per-repo RestoreSources of an isolated lane (DebugL, repos without their own <RestoreSources>).
         $restoreSources = $null
@@ -1070,14 +1115,20 @@ function Invoke-OctoBuildRangeCore {
                 purged         = @($result.purged).Count
                 logFile        = $result.logFile
             })
+        $events.RepoDone = $true
     }
     $repoIndex = 0
     try {
     foreach ($entry in $plan) {
         $repoIndex++
-        $events.Repo = $entry.Name
-        $events.Phase = $null
         $repoWatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $events.Repo = $entry.Name
+        $events.Index = $repoIndex
+        $events.Count = $repoCount
+        $events.Phase = $null
+        $events.RepoDone = $false
+        $events.RepoWatch = $repoWatch
+        $events.LogFile = $null
         & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
         if (-not $Json) { Write-Host "==> $($entry.Name)" -ForegroundColor Cyan }
         $events.Phase = 'build'

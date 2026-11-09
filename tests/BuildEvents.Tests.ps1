@@ -180,16 +180,45 @@ Describe 'Invoke-BuildRange -EventsFile' {
         $all[0].failedStep | Should -Be 'preflight'
     }
 
-    It 'writes done with the running repository and step when the build throws' {
+    It 'writes repoDone(success=false) and done with the running repository and step when the build throws' {
         Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { throw 'boom' }
 
         { Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -EventsFile $events -Json } | Should -Throw '*boom*'
 
         $all = Read-Events $events
-        $all[-1].event | Should -Be 'done'
+        @($all.event) | Should -Be @('plan', 'repoStart', 'phase', 'repoDone', 'done')
+        $all[3].repo | Should -Be 'octo-construction-kit-engine'
+        $all[3].success | Should -BeFalse
+        $all[3].index | Should -Be 1
+        $all[3].count | Should -Be 2
         $all[-1].success | Should -BeFalse
         $all[-1].failedRepo | Should -Be 'octo-construction-kit-engine'
         $all[-1].failedStep | Should -Be 'build'
+    }
+
+    It 'a refusal because of running services writes only done (preflight)' {
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses {
+            @([pscustomobject]@{ Repo = 'octo-sdk'; Pid = 4711; Command = 'dotnet Meshmakers.Octo.Fake.dll' })
+        }
+
+        Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-sdk -EventsFile $events -Json -ErrorAction SilentlyContinue | Out-Null
+
+        $all = Read-Events $events
+        @($all.event) | Should -Be @('done')
+        $all[0].success | Should -BeFalse
+        $all[0].failedRepo | Should -BeNullOrEmpty
+        $all[0].failedStep | Should -Be 'preflight'
+    }
+
+    It 'resolves a relative -EventsFile against the current location' {
+        $folder = Join-Path $TestDrive 'relative-events'
+        New-Item -ItemType Directory -Force -Path $folder | Out-Null
+        Push-Location $folder
+        try { Invoke-BuildRange -branch main -from octo-sdk -EventsFile 'run.jsonl' -Json | Out-Null }
+        finally { Pop-Location }
+
+        $all = Read-Events (Join-Path $folder 'run.jsonl')
+        $all[-1].event | Should -Be 'done'
     }
 
     It 'writes no events under -WhatIf and no file without -EventsFile' {
@@ -255,6 +284,32 @@ Describe 'Invoke-Build -EventsFile' {
         Invoke-Build -repositoryPath $repo -configuration DebugL -EventsFile $events -DryRun -Json | Out-Null
         Test-Path $events | Should -BeFalse
     }
+
+    It 'a missing repository folder writes only done with failedStep preflight and starts no dotnet' {
+        Mock -ModuleName Invoke-Build dotnet { $global:LASTEXITCODE = 0 }
+
+        $json = Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-missing') -configuration DebugL -EventsFile $events -Json 2>$null | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        Should -Invoke -ModuleName Invoke-Build dotnet -Times 0
+        $all = Read-Events $events
+        @($all.event) | Should -Be @('done')
+        $all[0].success | Should -BeFalse
+        $all[0].failedRepo | Should -BeNullOrEmpty
+        $all[0].failedStep | Should -Be 'preflight'
+    }
+
+    It 'a throw during the build writes repoDone(success=false) and done with the running phase' {
+        Mock -ModuleName Invoke-Build dotnet { if ($args[0] -eq 'build') { throw 'boom' }; $global:LASTEXITCODE = 0 }
+
+        { Invoke-Build -repositoryPath $repo -configuration DebugL -EventsFile $events -Json } | Should -Throw '*boom*'
+
+        $all = Read-Events $events
+        @($all.event) | Should -Be @('plan', 'repoStart', 'phase', 'phase', 'repoDone', 'done')
+        $all[4].success | Should -BeFalse
+        $all[5].failedRepo | Should -Be 'octo-sdk'
+        $all[5].failedStep | Should -Be 'build'
+    }
 }
 
 Describe 'Invoke-BuildAll -EventsFile' {
@@ -291,5 +346,19 @@ Describe 'Invoke-BuildAll -EventsFile' {
         $dry = Join-Path $TestDrive 'dry.jsonl'
         Invoke-BuildAll -branch main -configuration DebugL -DryRun -EventsFile $dry -Json | Out-Null
         Test-Path $dry | Should -BeFalse
+    }
+
+    It 'a throw in a repository writes its repoDone(success=false) before done' {
+        Mock -ModuleName Invoke-BuildAll Compile-Repo { if ((Split-Path -Leaf $path) -eq 'octo-sdk') { throw 'boom' }; $true }
+
+        { Invoke-BuildAll -branch main -configuration Release -EventsFile $events -Json } | Should -Throw '*boom*'
+
+        $all = Read-Events $events
+        @($all.event) | Should -Be @('plan', 'repoStart', 'phase', 'repoDone', 'repoStart', 'phase', 'repoDone', 'done')
+        $all[6].repo | Should -Be 'octo-sdk'
+        $all[6].success | Should -BeFalse
+        $all[6].index | Should -Be 2
+        $all[-1].failedRepo | Should -Be 'octo-sdk'
+        $all[-1].failedStep | Should -Be 'build'
     }
 }

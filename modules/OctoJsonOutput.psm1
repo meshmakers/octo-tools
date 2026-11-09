@@ -142,7 +142,8 @@ function Write-OctoBuildEvent {
             }
         }
         $line = ($record | ConvertTo-Json -Depth 12 -Compress) + "`n"
-        $fullPath = [IO.Path]::GetFullPath($Path)
+        # Relative paths resolve against $PWD (GetFullPath would use the process start directory).
+        $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
         $directory = [IO.Path]::GetDirectoryName($fullPath)
         if ($directory -and -not [IO.Directory]::Exists($directory)) { [void][IO.Directory]::CreateDirectory($directory) }
         # AppendAllText opens, writes and closes the file: the line is flushed when this returns.
@@ -153,4 +154,67 @@ function Write-OctoBuildEvent {
     }
 }
 
-Export-ModuleMember -Function @('Write-OctoJson', 'New-OctoActionResult', 'Write-OctoBuildEvent')
+function New-OctoBuildEventState {
+    <#
+    .SYNOPSIS
+        The mutable -EventsFile state a build cmdlet shares with its inner run (see Complete-OctoBuildEvents).
+    #>
+    param(
+        [AllowEmptyString()] [AllowNull()] [string]$Path,
+        [Parameter(Mandatory)] [string]$Command
+    )
+    return @{
+        Path = $Path; Command = $Command
+        Repo = $null; Index = $null; Count = $null; Phase = $null; RepoDone = $false; RepoWatch = $null; LogFile = $null
+        Success = $false; FailedRepo = $null; FailedStep = $null; Completed = $false
+    }
+}
+
+function Complete-OctoBuildEvents {
+    <#
+    .SYNOPSIS
+        Writes the closing events of a build run: called from the cmdlet's finally block.
+    .DESCRIPTION
+        When the run did not complete (it threw) and a repository had started without its repoDone, a
+        repoDone with success=false is written first (durations/counts null), then `done`. A run that
+        stopped before its first repoStart (refusal, invalid arguments) only gets `done` with failedStep
+        "preflight". A no-op without an events path.
+    #>
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$State,
+        [double]$ElapsedSeconds = 0
+    )
+    $path = [string]$State.Path
+    if ([string]::IsNullOrWhiteSpace($path)) { return }
+    $command = [string]$State.Command
+    if (-not $State.Completed) {
+        $State.Success = $false
+        if (-not $State.FailedRepo) { $State.FailedRepo = $State.Repo }
+        if (-not $State.FailedStep) { $State.FailedStep = if ($State.Repo -and $State.Phase) { $State.Phase } else { 'preflight' } }
+        if ($State.Repo -and -not $State.RepoDone) {
+            $seconds = if ($null -ne $State.RepoWatch) { $State.RepoWatch.Elapsed.TotalSeconds } else { $null }
+            Write-OctoBuildEvent -Path $path -Command $command -Event 'repoDone' -Data ([ordered]@{
+                    repo           = $State.Repo
+                    index          = $State.Index
+                    count          = $State.Count
+                    success        = $false
+                    seconds        = $seconds
+                    buildSeconds   = $null
+                    testSeconds    = $null
+                    packageSeconds = $null
+                    copied         = $null
+                    purged         = $null
+                    logFile        = $State.LogFile
+                })
+            $State.RepoDone = $true
+        }
+    }
+    Write-OctoBuildEvent -Path $path -Command $command -Event 'done' -Data ([ordered]@{
+            success        = [bool]$State.Success
+            failedRepo     = if ($State.Success) { $null } else { $State.FailedRepo }
+            failedStep     = if ($State.Success) { $null } else { $State.FailedStep }
+            elapsedSeconds = $ElapsedSeconds
+        })
+}
+
+Export-ModuleMember -Function @('Write-OctoJson', 'New-OctoActionResult', 'Write-OctoBuildEvent', 'New-OctoBuildEventState', 'Complete-OctoBuildEvents')

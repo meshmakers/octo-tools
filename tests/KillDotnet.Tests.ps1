@@ -17,6 +17,8 @@ BeforeAll {
     # Same prefix without the separator: must NOT count as the lane.
     $script:OtherLane = Join-Path $TestDrive 'meshmakers/main2'
     $script:Daemon = Join-Path $TestDrive 'dev/meshmakers/octo-devstack'
+    # Lane mode refuses folders that do not look like a lane: give the fake lane a repository folder.
+    New-Item -ItemType Directory -Force -Path (Join-Path $script:Lane 'octo-sdk'), $script:Daemon | Out-Null
 
     function New-FakeProcess([int]$id, [string]$name = 'dotnet', [string]$command = '', [string[]]$modules = @()) {
         [pscustomobject]@{ Id = $id; Name = $name; CommandLine = $command; Modules = @($modules | ForEach-Object { [pscustomobject]@{ FileName = $_ } }) }
@@ -33,18 +35,21 @@ Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
                 (New-FakeProcess 101 -command 'dotnet Meshmakers.Octo.Sdk.dll'),
                 (New-FakeProcess 102 -command 'dotnet octo-devstack.dll'),
                 (New-FakeProcess 103 -command 'dotnet Meshmakers.Octo.Sdk.dll'),
-                (New-FakeProcess 104 -command "dotnet $(Join-Path $script:Lane 'octo-cli/bin/DebugL/net10.0/octo-cli.dll')")
+                (New-FakeProcess 104 -command "dotnet $(Join-Path $script:Lane 'octo-cli/bin/DebugL/net10.0/octo-cli.dll')"),
+                # the daemon only mentions a lane path in an ARGUMENT - not the lane's
+                (New-FakeProcess 105 -command "dotnet $(Join-Path $script:Daemon 'octo-devstack.dll') --events $(Join-Path $script:Lane 'x.jsonl')")
             )
         }
         Mock -ModuleName Invoke-KillDotnet lsof {
             @('p101', "n$(Join-Path $script:Lane 'octo-sdk/bin/DebugL/net10.0')",
                 'p102', "n$script:Daemon",
                 'p103', "n$(Join-Path $script:OtherLane 'octo-sdk/bin/DebugL/net10.0')",
-                'p104', 'n/tmp')
+                'p104', 'n/tmp',
+                'p105', "n$script:Daemon")
         }
     }
 
-    It 'matches lane processes by working directory and command line, stops nothing, reports them' {
+    It 'matches lane processes by working directory and entry assembly, stops nothing, reports them' {
         $json = Invoke-KillDotnet -branchRootPath $script:Lane -Json | ConvertFrom-Json
 
         $json.data.success | Should -BeTrue
@@ -59,9 +64,55 @@ Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
         Should -Invoke -ModuleName Invoke-KillDotnet lsof -Times 1 -Exactly
     }
 
-    It 'returns the matched processes without -Json and matches case-insensitively' {
-        $found = @(Invoke-KillDotnet -branchRootPath $script:Lane.ToUpperInvariant() 6>$null)
+    It 'returns the matched processes without -Json' {
+        $found = @(Invoke-KillDotnet -branchRootPath $script:Lane 6>$null)
         @($found.pid) | Should -Be @(101, 104)
+    }
+
+    It 'resolves a relative -branchRootPath against the current location' {
+        Push-Location (Join-Path $TestDrive 'meshmakers')
+        try { $json = Invoke-KillDotnet -branchRootPath 'main' -Json | ConvertFrom-Json }
+        finally { Pop-Location }
+        @($json.data.processes.pid) | Should -Be @(101, 104)
+
+        Push-Location $script:Lane
+        try { $json = Invoke-KillDotnet -branchRootPath '.' -Json | ConvertFrom-Json }
+        finally { Pop-Location }
+        @($json.data.processes.pid) | Should -Be @(101, 104)
+    }
+
+    It 'refuses a folder that is no lane or does not exist, without looking at any process' {
+        $plain = Join-Path $TestDrive 'plain-folder'
+        New-Item -ItemType Directory -Force -Path (Join-Path $plain 'something') | Out-Null
+        foreach ($case in @(@{ Path = $plain; Message = '*does not look like a lane*' }, @{ Path = (Join-Path $TestDrive 'missing'); Message = '*does not exist*' })) {
+            $json = Invoke-KillDotnet -branchRootPath $case.Path -Json 2>$null | ConvertFrom-Json
+            $json.data.success | Should -BeFalse
+            $json.data.error | Should -BeLike $case.Message
+        }
+        Should -Invoke -ModuleName Invoke-KillDotnet Get-Process -Times 0
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 0
+    }
+
+    It 'matching is case-insensitive and needs the separator after the lane folder' {
+        InModuleScope Invoke-KillDotnet -Parameters @{ lane = $script:Lane; other = $script:OtherLane } {
+            $candidates = @(
+                [pscustomobject]@{ Pid = 1; Name = 'dotnet'; Command = ''; Cwd = (Join-Path $lane 'octo-sdk').ToUpperInvariant(); Modules = @() },
+                [pscustomobject]@{ Pid = 2; Name = 'dotnet'; Command = ''; Cwd = (Join-Path $other 'octo-sdk'); Modules = @() },
+                [pscustomobject]@{ Pid = 3; Name = 'dotnet'; Command = 'dotnet Relative.dll'; Cwd = $null; Modules = @() }
+            )
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $lane).pid | Should -Be @(1)
+        }
+    }
+
+    It 'takes the entry assembly, not other arguments, from the command line' {
+        InModuleScope Invoke-KillDotnet {
+            Get-OctoEntryAssemblyPath -command 'dotnet /a/b/App.dll --events /lane/x.jsonl --plugin /lane/p.dll' | Should -Be '/a/b/App.dll'
+            Get-OctoEntryAssemblyPath -command '"C:\Program Files\dotnet\dotnet.exe" exec --depsfile x.json C:\lane\App.dll' | Should -Be 'C:\lane\App.dll'
+            Get-OctoEntryAssemblyPath -command '/lane/octo-sdk/bin/Meshmakers.Apphost.exe --x /other/y.dll' | Should -Be '/lane/octo-sdk/bin/Meshmakers.Apphost.exe'
+            Get-OctoEntryAssemblyPath -command 'dotnet App.dll' -cwd '/lane/octo-sdk/bin' | Should -Be (Join-Path '/lane/octo-sdk/bin' 'App.dll')
+            Get-OctoEntryAssemblyPath -command 'dotnet App.dll' | Should -BeNullOrEmpty
+            Get-OctoEntryAssemblyPath -command 'pwsh -c x.dll' | Should -BeNullOrEmpty
+        }
     }
 
     It 'without -branchRootPath it stays the legacy no-op' {
