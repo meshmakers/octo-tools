@@ -30,10 +30,9 @@ function Sync-NuGetPackages {
 
     $restoreExitCode = 0
 
-    # Kill all dotnet processes. This is necessary to avoid file locks.
-    Invoke-KillDotnet
-
     $branchRoot = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath
+    # Stop the dotnet processes of this lane (file locks on Windows) - not those of other lanes or a local daemon.
+    [void](Invoke-KillDotnet -branchRootPath $branchRoot -Json:$Json)
     if ($Json) { Copy-AllNuGetPackages -branch $branch -Json | Out-Null } else { Copy-AllNuGetPackages -branch $branch }
     # Every package cache the lane restores into (lane cache and, on main, the global cache); same
     # JSON contract as Copy-AllNuGetPackages above: forward the switch, discard the nested emit.

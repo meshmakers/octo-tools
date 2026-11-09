@@ -1203,6 +1203,63 @@ Describe 'Private feeds for library worktrees (-repoPaths / -feedPath)' {
     }
 }
 
+Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
+        $script:seenEnv = @()
+        Mock -ModuleName Invoke-BuildAll Compile-Repo {
+            $script:seenEnv += [pscustomobject]@{ NodeReuse = $env:MSBUILDDISABLENODEREUSE; SharedCompilation = $env:UseSharedCompilation }
+            $true
+        }
+    }
+
+    It 'passes the lane folder to both Invoke-KillDotnet calls (DebugL)' {
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -Json | Out-Null
+
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 2 -Exactly
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 2 -Exactly -ParameterFilter { $branchRootPath -eq $fake.Checkout }
+    }
+
+    It '-skipKill does not call Invoke-KillDotnet' {
+        Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -skipKill -Json | Out-Null
+
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 0
+        Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 10 -Exactly
+    }
+
+    It 'sets MSBUILDDISABLENODEREUSE=1 and UseSharedCompilation=false for the run and restores them' {
+        $previousNodeReuse = $env:MSBUILDDISABLENODEREUSE
+        $previousShared = $env:UseSharedCompilation
+        $env:MSBUILDDISABLENODEREUSE = $null
+        $env:UseSharedCompilation = 'keep-me'
+        try {
+            Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
+
+            @($script:seenEnv.NodeReuse | Sort-Object -Unique) | Should -Be @('1')
+            @($script:seenEnv.SharedCompilation | Sort-Object -Unique) | Should -Be @('false')
+            $env:MSBUILDDISABLENODEREUSE | Should -BeNullOrEmpty
+            $env:UseSharedCompilation | Should -Be 'keep-me'
+        }
+        finally {
+            $env:MSBUILDDISABLENODEREUSE = $previousNodeReuse
+            $env:UseSharedCompilation = $previousShared
+        }
+    }
+
+    It '-DryRun shows the run environment and the kill scope' {
+        $doc = (Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.runEnvironment.MSBUILDDISABLENODEREUSE | Should -Be '1'
+        $doc.data.runEnvironment.UseSharedCompilation | Should -Be 'false'
+        $doc.data.killDotnet | Should -Match 'lane processes only'
+
+        $text = Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -skipKill 6>&1 | Out-String
+        $text | Should -Match 'UseSharedCompilation=false'
+        $text | Should -Match 'skipped \(-skipKill\)'
+        Should -Invoke -ModuleName Invoke-BuildAll Invoke-KillDotnet -Times 0
+    }
+}
+
 Describe 'Invoke-Build checks the restore exit code' {
     BeforeEach {
         $script:fake = New-FakeCheckout

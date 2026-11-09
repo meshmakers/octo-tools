@@ -186,6 +186,17 @@ function Get-BuildAllPlan {
 .PARAMETER DryRun
     Print the plan (order, builder, lane environment, restore sources, MSBuild properties) and exit.
 
+.PARAMETER skipKill
+    Do not call Invoke-KillDotnet (for callers that stop the lane's processes themselves).
+    Without it Invoke-BuildAll stops only the dotnet processes of this lane (Invoke-KillDotnet
+    -branchRootPath; Windows only, other OSes report them), never the build server or other lanes.
+    For the whole run MSBUILDDISABLENODEREUSE=1 and UseSharedCompilation=false are set (restored
+    afterwards), so no reused MSBuild node or compiler server keeps files locked.
+
+.PARAMETER EventsFile
+    Append build progress events (plan, repoStart, phase build/packages, repoDone, done) to this file,
+    see Write-OctoBuildEvent. Not written by -DryRun. The -Json output is not affected.
+
 .PARAMETER Json
     Emit one JSON document with per-repository results.
 
@@ -212,6 +223,8 @@ function Invoke-BuildAll {
         [switch]$DryRun,
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog (DebugL).
         [switch]$skipCkSync,
+        # Do not call Invoke-KillDotnet (the caller stops the lane's processes itself).
+        [switch]$skipKill,
         # Progress events, one JSON line each (Write-OctoBuildEvent). Not written by -DryRun.
         [string]$EventsFile = '',
         [switch]$Json
@@ -271,6 +284,7 @@ function Invoke-BuildAllCore {
         [hashtable]$msbuildPropertiesPerRepo = @{},
         [switch]$DryRun,
         [switch]$skipCkSync,
+        [switch]$skipKill,
         [hashtable]$events = @{},
         [switch]$Json
     )
@@ -327,6 +341,13 @@ function Invoke-BuildAllCore {
     $publishWarning = Get-OctoCkPublishDisabledWarning -repoNames @($plan | Where-Object { Test-OctoCkPublishDisabled -properties $repoProperties[$_.name] } | ForEach-Object { $_.name })
     if ($publishWarning) { Write-Warning $publishWarning }
 
+    # Run environment: the lane's plus no node reuse and no shared compiler server for the whole run, so no
+    # MSBuild node or VBCSCompiler of this run keeps files locked (Invoke-KillDotnet no longer kills them).
+    $runEnvironment = [ordered]@{}
+    foreach ($name in @($laneSettings.environment.Keys)) { $runEnvironment[$name] = $laneSettings.environment[$name] }
+    $runEnvironment['MSBUILDDISABLENODEREUSE'] = '1'
+    $runEnvironment['UseSharedCompilation'] = 'false'
+
     if ($DryRun) {
         $planEntries = @(foreach ($entry in $plan) {
             $builder = Get-RepoBuilder -path $entry.path
@@ -346,6 +367,8 @@ function Invoke-BuildAllCore {
             branchRoot    = $branchRootPath
             configuration = $configuration
             lane          = $laneSettings
+            runEnvironment = $runEnvironment
+            killDotnet    = if ($skipKill) { 'skipped (-skipKill)' } else { "lane processes only ($branchRootPath)" }
             packageCachesToPurge = @(if ($configuration -ieq 'DebugL') { Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -WhatIf })
             repositories  = $planEntries
         }
@@ -360,6 +383,8 @@ function Invoke-BuildAllCore {
         foreach ($name in $laneSettings.environment.Keys) {
             Write-Host "  env $name=$($laneSettings.environment[$name])"
         }
+        Write-Host "Run environment: MSBUILDDISABLENODEREUSE=1, UseSharedCompilation=false (whole run, restored afterwards)"
+        Write-Host "Kill dotnet:     $(if ($skipKill) { 'skipped (-skipKill)' } else { "only processes of this lane ($branchRootPath)" })"
         if ($configuration -ieq 'DebugL') {
             foreach ($cache in @(Remove-OctoLaneNuGetPackages -laneSettings $laneSettings -WhatIf)) {
                 Write-Host "Purges meshmakers.*/999.0.0 in: $cache"
@@ -388,8 +413,9 @@ function Invoke-BuildAllCore {
     $repoCount = $plan.Count
     & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.name; mode = $repoModes[$_.name] } }); count = $repoCount })
 
-    # kill all dotnet processes. this is necessary to avoid file locks.
-    Invoke-KillDotnet
+    # Stop the dotnet processes of this lane (file locks on Windows) - never other lanes, a local daemon
+    # or the shared build server. -skipKill: the caller stopped them itself.
+    if (-not $skipKill) { [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json) }
 
     # Check if any repositories were found
     $octoCount = if ($octoDirectories) { @($octoDirectories).Count } else { 0 }
@@ -406,8 +432,8 @@ function Invoke-BuildAllCore {
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     if ($configuration -ieq "DebugL"){
-        # Kill all dotnet processes. This is necessary to avoid file locks.
-        Invoke-KillDotnet
+        # Again right before the package folders are wiped (lane processes only, see above).
+        if (-not $skipKill) { [void](Invoke-KillDotnet -branchRootPath $branchRootPath -Json:$Json) }
 
         # Delete all nuget packages in the octo mesh nuget folder
         $branchNugetPath = Join-Path -Path $branchRootPath -ChildPath "nuget"
@@ -429,7 +455,7 @@ function Invoke-BuildAllCore {
     # Lane environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE) for the whole run; empty for the legacy
     # lane. Restored afterwards so the session is left as it was found.
     $repoLaneSettings = if ($configuration -ieq "DebugL") { $laneSettings } else { $null }
-    $savedEnvironment = Set-OctoBuildEnvironment -environment $laneSettings.environment
+    $savedEnvironment = Set-OctoBuildEnvironment -environment $runEnvironment
     $repoIndex = 0
     try {
         foreach ($entry in $plan) {
