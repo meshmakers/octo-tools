@@ -414,6 +414,12 @@ function Set-OctoOwnerOnlyAccess {
     [IO.File]::SetUnixFileMode($path, $mode)
 }
 
+function Write-OctoRestoreConfigText {
+    # A wrapper so tests can force a write failure.
+    param([Parameter(Mandatory = $true)] [string]$path, [AllowEmptyString()] [string]$text)
+    [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+}
+
 function New-OctoRestoreConfigFile {
     <#
         Writes an owner-only NuGet.Config in a new temporary folder that carries the credentials of the given sources, so
@@ -470,24 +476,41 @@ function New-OctoRestoreConfigFile {
 
     $folder = Join-Path ([IO.Path]::GetTempPath()) ("octo-restore-" + [guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($folder)
-    Set-OctoOwnerOnlyAccess -path $folder -directory
-    $file = Join-Path $folder 'NuGet.Config'
-    # Create empty and restrict it before any credential is written.
-    [IO.File]::WriteAllText($file, '')
-    Set-OctoOwnerOnlyAccess -path $file
-    [IO.File]::WriteAllText($file, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+    try {
+        Set-OctoOwnerOnlyAccess -path $folder -directory
+        $file = Join-Path $folder 'NuGet.Config'
+        # Create empty and restrict it before any credential is written.
+        Write-OctoRestoreConfigText -path $file -text ''
+        Set-OctoOwnerOnlyAccess -path $file
+        Write-OctoRestoreConfigText -path $file -text (($lines -join "`n") + "`n")
+    }
+    catch {
+        # Never leave a (partial) credentials file behind: the caller gets no path to clean up.
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
     return $file
 }
 
 function Get-OctoAdoptedWorktreeEntry {
     # Manifest entry of an adopted worktree at $path (after the move, or in place).
     param([Parameter(Mandatory = $true)] $info, [Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string]$role)
-    # baseCommit: where the work in this worktree started relative to its main checkout's HEAD.
+    # baseCommit: where the work in this worktree started - the unpushed count (Remove-OctoEnvironment) ignores the
+    # commits up to it. Never the adopted worktree's own HEAD: that would hide its unpushed commits.
+    #   1. merge base of the worktree's HEAD and the main checkout's HEAD;
+    #   2. the main checkout's HEAD when there is no merge base (or the lookup fails);
+    #   3. origin's default branch (refs/remotes/origin/HEAD) when the main checkout's HEAD cannot be read;
+    #   4. none ($null): only commits that a remote has are excluded - everything else counts as unpushed.
+    $baseCommit = $null
     $mainHead = Invoke-OctoEnvironmentGit -path $info.MainCheckout -arguments @('rev-parse', 'HEAD')
-    $baseCommit = $info.Head
     if ($mainHead.ExitCode -eq 0) {
-        $mergeBase = Invoke-OctoEnvironmentGit -path $path -arguments @('merge-base', 'HEAD', [string]($mainHead.Output | Select-Object -Last 1))
-        if ($mergeBase.ExitCode -eq 0) { $baseCommit = [string]($mergeBase.Output | Select-Object -Last 1) }
+        $mainHeadCommit = [string]($mainHead.Output | Select-Object -Last 1)
+        $mergeBase = Invoke-OctoEnvironmentGit -path $path -arguments @('merge-base', 'HEAD', $mainHeadCommit)
+        $baseCommit = if ($mergeBase.ExitCode -eq 0) { [string]($mergeBase.Output | Select-Object -Last 1) } else { $mainHeadCommit }
+    }
+    else {
+        $originHead = Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', '--verify', '--quiet', 'refs/remotes/origin/HEAD^{commit}')
+        if ($originHead.ExitCode -eq 0) { $baseCommit = [string]($originHead.Output | Select-Object -Last 1) }
     }
     return [ordered]@{ name = $info.Repo; role = $role; path = [IO.Path]::GetFullPath($path); branch = $info.Branch; baseCommit = $baseCommit }
 }
@@ -765,31 +788,25 @@ function Write-OctoEnvironmentSyncSummary {
 # Package graph
 # ---------------------------------------------------------------------------------------------------------------
 
-$script:PackageScanSkippedFolders = [System.Collections.Generic.HashSet[string]]::new([string[]]@('node_modules', 'bin', 'obj', '.git', '.vs', '.idea', 'TestResults', 'packages', '.nuget-packages', 'dist', '.angular'), [StringComparer]::OrdinalIgnoreCase)
+$script:PackageScanSkippedFolders = [System.Collections.Generic.HashSet[string]]::new([string[]]@('node_modules', 'bin', 'obj', '.git', '.vs', '.idea', 'TestResults', 'packages', '.nuget-packages', 'dist', '.angular', 'artifacts', 'coverage', '.nx', '.cache'), [StringComparer]::OrdinalIgnoreCase)
 
 function Get-OctoPackageScanFiles {
     <#
-        The files the package graph reads for one repository: *.csproj and *.props below src/ (the repository root when
-        it has no src/), plus Directory.Build.props / Directory.Packages.props in the repository root. The walk never
-        enters node_modules, bin, obj, .git and similar folders, nor symbolic links (a plain recursive Get-ChildItem
-        enumerates node_modules completely before any filter applies - minutes for the frontend repositories).
+        The files the package graph reads for one repository: every *.csproj and *.props below the repository root
+        (src/, tests/, tools, samples - projects outside src/ count too). The walk never enters node_modules, bin, obj,
+        .git, generated output (dist, .angular, artifacts, coverage, .nx, .cache, TestResults, packages) or symbolic
+        links: a plain recursive Get-ChildItem enumerates node_modules completely before any filter applies (90 s for
+        branches/main), this walk about half a second.
     #>
     param([Parameter(Mandatory = $true)] [string]$path)
     $files = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in @('Directory.Build.props', 'Directory.Packages.props')) {
-        $rootFile = Join-Path $path $name
-        if ([IO.File]::Exists($rootFile)) { $files.Add($rootFile) }
-    }
-    $src = Join-Path $path 'src'
-    $start = if ([IO.Directory]::Exists($src)) { $src } else { $path }
     $stack = [System.Collections.Generic.Stack[string]]::new()
-    $stack.Push($start)
+    $stack.Push($path)
     while ($stack.Count -gt 0) {
         $directory = $stack.Pop()
         try {
             foreach ($file in [IO.Directory]::EnumerateFiles($directory)) {
-                if ($file.EndsWith('.csproj', [StringComparison]::OrdinalIgnoreCase) -or
-                    ($file.EndsWith('.props', [StringComparison]::OrdinalIgnoreCase) -and -not $files.Contains($file))) { $files.Add($file) }
+                if ($file.EndsWith('.csproj', [StringComparison]::OrdinalIgnoreCase) -or $file.EndsWith('.props', [StringComparison]::OrdinalIgnoreCase)) { $files.Add($file) }
             }
             foreach ($child in [IO.Directory]::EnumerateDirectories($directory)) {
                 if ($script:PackageScanSkippedFolders.Contains([IO.Path]::GetFileName($child))) { continue }
@@ -805,7 +822,7 @@ function Get-OctoPackageScanFiles {
 
 function Get-OctoRepoPackageInfo {
     # Produced package ids and Meshmakers.* references of one repository, from its csproj (and props) files
-    # (Get-OctoPackageScanFiles: src/ plus the root props, never node_modules/bin/obj/.git).
+    # (Get-OctoPackageScanFiles: the whole repository, never node_modules/bin/obj/.git or generated output).
     param([Parameter(Mandatory = $true)] [string]$path)
     $produces = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $references = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)

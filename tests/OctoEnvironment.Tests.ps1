@@ -947,27 +947,28 @@ Describe 'Invoke-BuildEnvironment keeps private feed credentials off the command
 }
 
 Describe 'Package graph scan stays out of node_modules, bin, obj and .git' {
-    It 'reads src/**/*.csproj and the root props only, pruning heavy folders' {
+    It 'reads every csproj/props of the repository (also outside src/), pruning heavy and generated folders' {
         InModuleScope OctoEnvironment -Parameters @{ root = (Join-Path $TestDrive 'scan') } {
             if (Test-Path $root) { Remove-Item $root -Recurse -Force }
             $repo = Join-Path $root 'octo-frontend-x'
-            foreach ($folder in @('src/Lib', 'src/web/node_modules/pkg', 'src/Lib/bin/DebugL', 'src/Lib/obj', '.git/x', 'node_modules/y', 'tests/Lib.Tests')) {
+            foreach ($folder in @('src/Lib', 'src/web/node_modules/pkg', 'src/Lib/bin/DebugL', 'src/Lib/obj', '.git/x', 'node_modules/y', 'tests/Lib.Tests', 'dist/d', 'src/web/.angular/cache', 'artifacts/a')) {
                 New-Item -ItemType Directory -Force -Path (Join-Path $repo $folder) | Out-Null
             }
             $csproj = '<Project><PropertyGroup><PackageId>{0}</PackageId></PropertyGroup></Project>'
             Set-Content -Path (Join-Path $repo 'src/Lib/Lib.csproj') -Value ($csproj -f 'Meshmakers.Real')
-            foreach ($hidden in @('src/web/node_modules/pkg/Hidden.csproj', 'src/Lib/bin/DebugL/Bin.csproj', 'src/Lib/obj/Obj.csproj', '.git/x/Git.csproj', 'node_modules/y/Root.csproj', 'tests/Lib.Tests/Lib.Tests.csproj')) {
+            Set-Content -Path (Join-Path $repo 'tests/Lib.Tests/Lib.Tests.csproj') -Value '<Project><ItemGroup><PackageReference Include="Meshmakers.Octo.Sdk.Common" Version="1" /></ItemGroup><PropertyGroup><IsPackable>false</IsPackable></PropertyGroup></Project>'
+            foreach ($hidden in @('src/web/node_modules/pkg/Hidden.csproj', 'src/Lib/bin/DebugL/Bin.csproj', 'src/Lib/obj/Obj.csproj', '.git/x/Git.csproj', 'node_modules/y/Root.csproj', 'dist/d/Dist.csproj', 'src/web/.angular/cache/Ng.csproj', 'artifacts/a/Art.csproj')) {
                 Set-Content -Path (Join-Path $repo $hidden) -Value ($csproj -f "Meshmakers.$([IO.Path]::GetFileNameWithoutExtension($hidden))")
             }
             Set-Content -Path (Join-Path $repo 'Directory.Build.props') -Value '<Project><ItemGroup><PackageReference Include="Meshmakers.Common.Shared" Version="1" /></ItemGroup></Project>'
 
             $files = @(Get-OctoPackageScanFiles -path $repo | ForEach-Object { [IO.Path]::GetRelativePath($repo, $_) -replace '\\', '/' } | Sort-Object)
-            $files | Should -Be @('Directory.Build.props', 'src/Lib/Lib.csproj')
+            $files | Should -Be @('Directory.Build.props', 'src/Lib/Lib.csproj', 'tests/Lib.Tests/Lib.Tests.csproj')
             $info = Get-OctoRepoPackageInfo -path $repo
             @($info.Produces) | Should -Be @('Meshmakers.Real')
-            @($info.References) | Should -Be @('Meshmakers.Common.Shared')
+            @($info.References) | Should -Be @('Meshmakers.Common.Shared', 'Meshmakers.Octo.Sdk.Common')   # tests/ outside src/ counts
 
-            # a repository without src/ is scanned from its root, still pruned
+            # a repository without src/ is scanned the same way
             $flat = Join-Path $root 'octo-flat'
             New-Item -ItemType Directory -Force -Path (Join-Path $flat 'Tool'), (Join-Path $flat 'node_modules/z') | Out-Null
             Set-Content -Path (Join-Path $flat 'Tool/Tool.csproj') -Value ($csproj -f 'Meshmakers.Tool')
@@ -1004,3 +1005,55 @@ Describe 'Sync reports stay small' {
         $full.data.detailed | Should -BeTrue
     }
 }
+
+Describe 'Credentials file and adoption base commit (CodeRabbit on 7328531)' {
+    It 'New-OctoRestoreConfigFile removes its folder and rethrows when writing the credentials fails' {
+        InModuleScope OctoEnvironment {
+            $before = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'octo-restore-*' -ErrorAction SilentlyContinue).FullName
+            Mock Write-OctoRestoreConfigText { if ($text) { throw 'disk full' } else { [IO.File]::WriteAllText($path, '') } }
+            { New-OctoRestoreConfigFile -sources @('https://a.invalid/v3') -credentials @{ 'https://a.invalid/v3' = @{ User = 'u'; Password = 'secret' } } -userConfigPath '' } | Should -Throw '*disk full*'
+            $after = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'octo-restore-*' -ErrorAction SilentlyContinue).FullName
+            @($after | Where-Object { $before -notcontains $_ }) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'baseCommit: merge base, else the main checkout''s HEAD, else origin''s default branch, else none - never the adopted HEAD' {
+        InModuleScope OctoEnvironment {
+            $info = [pscustomobject]@{ Repo = 'octo-sdk'; MainCheckout = '/main/octo-sdk'; Branch = 'b'; Head = 'adoptedhead' }
+            $script:gitCase = 'merge-base'
+            Mock Invoke-OctoEnvironmentGit {
+                $joined = $arguments -join ' '
+                $ok = { param($out) [pscustomobject]@{ ExitCode = 0; Output = @($out) } }
+                $bad = [pscustomobject]@{ ExitCode = 128; Output = @('fatal') }
+                if ($joined -eq 'rev-parse HEAD') { if ($script:gitCase -eq 'no-main-head' -or $script:gitCase -eq 'nothing') { return $bad }; return & $ok 'mainhead' }
+                if ($joined -like 'merge-base*') { if ($script:gitCase -eq 'merge-base') { return & $ok 'mergebase' }; return $bad }
+                if ($joined -like '*refs/remotes/origin/HEAD*') { if ($script:gitCase -eq 'nothing') { return $bad }; return & $ok 'originhead' }
+                return $bad
+            }
+            (Get-OctoAdoptedWorktreeEntry -info $info -path '/wt' -role feature).baseCommit | Should -Be 'mergebase'
+            $script:gitCase = 'no-merge-base'
+            (Get-OctoAdoptedWorktreeEntry -info $info -path '/wt' -role feature).baseCommit | Should -Be 'mainhead'
+            $script:gitCase = 'no-main-head'
+            (Get-OctoAdoptedWorktreeEntry -info $info -path '/wt' -role feature).baseCommit | Should -Be 'originhead'
+            $script:gitCase = 'nothing'
+            (Get-OctoAdoptedWorktreeEntry -info $info -path '/wt' -role feature).baseCommit | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'without a base commit every commit no remote has counts as unpushed, so Remove refuses' {
+        $script:ws = New-FakeWorkspace
+        New-OctoEnvironment -env env-nb -repos octo-sdk -branchName 'feature/nb' -Json | Out-Null
+        $wt = Join-Path $ws.Root 'wt-env-nb/octo-sdk'
+        Set-Content -Path (Join-Path $wt 'adopted.txt') -Value 'x'
+        Invoke-TestGit $wt add -A | Out-Null
+        Invoke-TestGit $wt commit -q -m 'adopted work' | Out-Null
+        $manifestPath = Join-Path $ws.Root 'wt-env-nb/.octo/environment.json'
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        $manifest.repos[0].baseCommit = $null
+        Set-Content -Path $manifestPath -Value ($manifest | ConvertTo-Json -Depth 6)
+        $doc = Get-Doc (Remove-OctoEnvironment -env env-nb -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'octo-sdk: 1 unpushed commit'
+    }
+}
+
