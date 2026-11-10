@@ -2,7 +2,6 @@
 # Behaviour of Test-OctoAgentDocs, grouped by feature. Fixtures are built under the temp
 # folder by the helpers and removed in AfterAll.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the profile contract under test')]
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test fixtures under the temp folder; -WhatIf has no meaning here')]
 param()
 
 BeforeAll { . (Join-Path $PSScriptRoot 'AgentDocs.TestHelpers.ps1') }
@@ -449,7 +448,7 @@ Describe 'reference-to-shim' {
 Describe 'sibling CLAUDE.md mentions in prose' {
     BeforeAll {
         # A workspace: octo-self under test, octo-done migrated, octo-legacy not yet.
-        function New-Workspace {
+        function Initialize-Workspace {
             $root = New-TempDir
             Write-File (Join-Path $root 'octo-done/AGENTS.md') '# D'
             Write-File (Join-Path $root 'octo-done/CLAUDE.md') $script:Shim
@@ -473,7 +472,7 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         @{ case = 'a backticked file name'; text = 'the checklist (octo-done `CLAUDE.md`, Touch points)' }
         @{ case = 'a path with an anchor'; text = 'See octo-done/CLAUDE.md#rules.' }
     ) {
-        $self = New-Workspace
+        $self = Initialize-Workspace
         Add-Line $self 'docs/one.md' $text
         $res = Get-WorkspaceResult $self
         $f = Get-RuleFinding $res 'reference-to-shim'
@@ -484,7 +483,7 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         (Get-RuleFinding $res 'reference-resolves').Count | Should -Be 0
     }
     It 'warns on a sibling that has not migrated, also when reference-to-shim is raised to error' {
-        $self = New-Workspace
+        $self = Initialize-Workspace
         Set-Override $self '{ "rules": { "reference-to-shim": "error" } }'
         Add-Line $self 'AGENTS.md' "See octo-legacy CLAUDE.md $([char]0xA7) 'Pool member'."
         $f = Get-RuleFinding (Get-WorkspaceResult $self) 'reference-to-shim'
@@ -493,7 +492,7 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         $f[0].message | Should -Match 'octo-legacy has not migrated yet'
     }
     It 'reports a sibling name that is not a repository in the workspace' {
-        $self = New-Workspace
+        $self = Initialize-Workspace
         Add-Line $self 'AGENTS.md' 'LCARS rules: `octo-mesh-refinery-studio/CLAUDE.md`.'
         $f = Get-RuleFinding (Get-WorkspaceResult $self) 'reference-resolves'
         $f.Count | Should -Be 1
@@ -516,12 +515,12 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         @{ case = 'a CLAUDE.md that is not a sibling'; text = 'Update its CLAUDE.md and the CLAUDE.md files.' }
         @{ case = 'a mention inside a fenced block'; text = "``````text`nocto-done CLAUDE.md`n``````" }
     ) {
-        $self = New-Workspace
+        $self = Initialize-Workspace
         Add-Line $self 'docs/one.md' $text
         @((Get-WorkspaceResult $self).data.findings | Where-Object { $_.rule -like 'reference-*' }).Count | Should -Be 0
     }
     It 'counts lines in the file, fenced blocks included' {
-        $self = New-Workspace
+        $self = Initialize-Workspace
         Add-Line $self 'docs/one.md' @('```', 'x', '```', 'See octo-done CLAUDE.md.')
         (Get-RuleFinding (Get-WorkspaceResult $self) 'reference-to-shim')[0].file | Should -Be 'docs/one.md:11'
     }
