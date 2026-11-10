@@ -2,6 +2,30 @@ if (Get-Module -ListAvailable -Name 'powershell-yaml') {
     Import-Module powershell-yaml -ErrorAction SilentlyContinue
 }
 
+function ConvertFrom-OctoOverlayOutput {
+    <#
+    .SYNOPSIS
+        Added / skipped-duplicate counts from octo-cli ApplyClientOverlay's log output.
+    .DESCRIPTION
+        octo-cli logs "Overlay '<name>' on '<client>' applied: RedirectUris=<a> added / <s> skipped,
+        PostLogoutRedirectUris=<a> added / <s> skipped, AllowedCorsOrigins=<a> added / <s> skipped" (the console logger
+        may wrap the line). Returns { redirectUris, postLogoutRedirectUris, allowedCorsOrigins = { added, skippedDuplicate };
+        added; skippedDuplicate } or $null when the output does not contain all three counts.
+    #>
+    param([AllowNull()] [AllowEmptyCollection()] [string[]]$output)
+    $text = (@($output) -join ' ') -replace '\s+', ' '
+    $counts = [ordered]@{}
+    foreach ($pair in @(@('redirectUris', 'RedirectUris'), @('postLogoutRedirectUris', 'PostLogoutRedirectUris'), @('allowedCorsOrigins', 'AllowedCorsOrigins'))) {
+        # (?<![A-Za-z]): "RedirectUris" must not match inside "PostLogoutRedirectUris".
+        $match = [regex]::Match($text, "(?<![A-Za-z])$($pair[1])=(\d+) added / (\d+) skipped")
+        if (-not $match.Success) { return $null }
+        $counts[$pair[0]] = [ordered]@{ added = [int]$match.Groups[1].Value; skippedDuplicate = [int]$match.Groups[2].Value }
+    }
+    $counts['added'] = ($counts.Values | ForEach-Object { $_.added } | Measure-Object -Sum).Sum
+    $counts['skippedDuplicate'] = ($counts.Values | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object { $_.skippedDuplicate } | Measure-Object -Sum).Sum
+    return $counts
+}
+
 function Apply-IdentityOverlay {
     <#
 .SYNOPSIS
@@ -18,7 +42,9 @@ The endpoint and the cmdlet are both idempotent: re-running on the same DB is a 
 write, no cache invalidation, server returns 200 with Added=0/SkippedDuplicate=N counts). The
 cmdlet exits non-zero only when an individual client invocation fails — one failed client does
 not abort the batch. Per-client log lines show Added/SkippedDuplicate counts so the operator
-can spot the actual deltas.
+can spot the actual deltas. With -Json the counts are parsed from octo-cli's output into every client row
+(`counts`: per URI list `added` / `skippedDuplicate` plus their sums; null when the output cannot be parsed) and
+summed in `summary` (`added`, `skippedDuplicate`, `countsUnparsed`); octo-cli's console output is then not printed.
 
 The octo-cli ambient context (active context's TenantId + IdentityServiceUrl + auth tokens)
 is used. Switch contexts beforehand with `Register-OctoCliContext -Installation local` (or equivalent) to target
@@ -181,8 +207,11 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         if (-not $Json) {
             Write-Host "[$clientId] applying overlay..." -ForegroundColor Cyan
         }
-        & $OctoCli @argList
+        # Captured (it is parsed for the counts, and must not end up in the -Json document); printed without -Json.
+        $output = @(& $OctoCli @argList 2>&1 | ForEach-Object { "$_" })
         $clientExit = $LASTEXITCODE
+        if (-not $Json) { foreach ($line in $output) { Write-Host $line } }
+        $counts = if ($clientExit -eq 0) { ConvertFrom-OctoOverlayOutput -output $output } else { $null }
         if ($clientExit -ne 0) {
             if (-not $Json) {
                 Write-Warning "[$clientId] octo-cli exited $clientExit — continuing with remaining clients."
@@ -190,7 +219,7 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
             $failures++
         }
         if ($Json) {
-            $clientResults.Add([ordered]@{ client = $clientId; status = (($clientExit -eq 0) ? 'applied' : "failed (exit $clientExit)") }) | Out-Null
+            $clientResults.Add([ordered]@{ client = $clientId; status = (($clientExit -eq 0) ? 'applied' : "failed (exit $clientExit)"); counts = $counts }) | Out-Null
         }
     }
 
@@ -200,8 +229,11 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
             dryRun      = [bool]$DryRun
             clients     = @($clientResults)
             summary     = [ordered]@{
-                total  = $clients.Count
-                failed = $failures
+                total            = $clients.Count
+                failed           = $failures
+                added            = [int](@($clientResults | Where-Object { $_['counts'] } | ForEach-Object { $_['counts']['added'] }) | Measure-Object -Sum).Sum
+                skippedDuplicate = [int](@($clientResults | Where-Object { $_['counts'] } | ForEach-Object { $_['counts']['skippedDuplicate'] }) | Measure-Object -Sum).Sum
+                countsUnparsed   = @($clientResults | Where-Object { $_['status'] -eq 'applied' -and -not $_['counts'] }).Count
             }
         }
         if ($failures -gt 0) {
