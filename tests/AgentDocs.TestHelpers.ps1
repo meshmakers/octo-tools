@@ -39,6 +39,7 @@ function New-Fixture {
     param([switch]$Legacy, [switch]$Empty, [switch]$NoFix, [switch]$Crlf)
     $root = New-TempDir
     Write-File (Join-Path $root 'docs/one.md') $script:DocOne
+    Write-File (Join-Path $root 'src/app.cs') "class App { }`n"   # what docs/one.md routes on
     if ($Legacy) { Write-File (Join-Path $root 'CLAUDE.md') $script:Entry -Crlf:$Crlf }
     elseif (-not $Empty) {
         Write-File (Join-Path $root 'AGENTS.md') $script:Entry -Crlf:$Crlf
@@ -49,6 +50,7 @@ function New-Fixture {
 }
 function Set-Override { param([string]$Root, [string]$Json) Write-File (Join-Path $Root '.agent-docs.json') $Json }
 function Add-Line { param([string]$Root, [string]$File, [string[]]$Text) Add-Content -LiteralPath (Join-Path $Root $File) -Value $Text }
+function Get-LastLine { param([string]$Root, [string]$File) "$($File):$((Get-Content -LiteralPath (Join-Path $Root $File)).Count)" }   # 'file:n' of the last line
 function Get-Result {
     param([string]$Root, [hashtable]$Extra = @{})
     return ((Test-OctoAgentDocs -Path $Root -Json @Extra 3>$null 6>$null) | ConvertFrom-Json)

@@ -145,10 +145,11 @@ function Test-OctoAgentDocs {
 
     .DESCRIPTION
     Checks the entry point (AGENTS.md, or CLAUDE.md before a migration), the README and
-    docs/*.md: sections, budgets, frontmatter, links, the CLAUDE.md shim, invisible
-    characters and the generated routing table. -Fix regenerates only the routing table,
-    the shim and the opening sentence of AGENTS.md; other hand-written text is never
-    changed. 'Test-OctoAgentDocs -Explain -All' lists every rule with its reason.
+    docs/*.md: sections, budgets, frontmatter, applies_to globs, links, the CLAUDE.md shim,
+    Claude-only @imports, invisible characters and the generated routing table. -Fix
+    regenerates only the routing table, the shim and the opening sentence of AGENTS.md; other
+    hand-written text is never changed. 'Test-OctoAgentDocs -Explain -All' lists every rule
+    with its reason.
 
     Rules are [severity, options] with severity off | warn | error, and cascade, later wins:
     agent-docs.rules.json beside this module, the repository's .agent-docs.json, -ConfigPath,
@@ -237,7 +238,9 @@ function Test-OctoAgentDocs {
         $findings.Add('migration-pending', $briefName, 'Migration brief is still present - follow its steps and delete it in the migration commit')
     }
     $routes = Test-DocsFolder -Rules $rules -Repo $repo -Findings $findings
+    Test-GlobMatch -Rules $rules -Repo $repo -Findings $findings
     Test-InvisibleCharacter -Rules $rules -Repo $repo -Findings $findings
+    Test-EagerImport -Rules $rules -Repo $repo -Findings $findings
     Test-ReferenceSet -Rules $rules -Repo $repo -Findings $findings
     if ($repo.EntryPath) {
         Test-RequiredSection -Rules $rules -Repo $repo -Findings $findings -Fix:$Fix
@@ -345,6 +348,88 @@ function Test-DocsFolder {
     return , $routes
 }
 
+function Test-GlobMatch {
+    # Every applies_to glob must match at least one file; a stale glob routes to nothing.
+    # Background docs have no globs to check.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    if (-not $Rules.IsOn('globs-match')) { return }
+    $files = $null
+    foreach ($d in $Repo.Docs) {
+        $content = $Repo.ReadText($d.FullName)
+        $fm = Get-Frontmatter -Content $content
+        if (-not $fm['applies_to'] -or $fm['background'] -match '^(true|yes)$') { continue }
+        if ($null -eq $files) { $files = Get-RepositoryFile -Rules $Rules -Repo $Repo }
+        $at = "docs/$($d.Name):$(($content -split "`n" | Select-String -Pattern '^applies_to\s*:' | Select-Object -First 1).LineNumber)"
+        foreach ($glob in (Split-GlobList -Value $fm['applies_to'])) {
+            $pattern = ConvertTo-GlobRegex -Glob $glob
+            if (-not $pattern) { $Findings.Add('globs-match', $at, "applies_to glob '$glob' has an unclosed '{'"); continue }
+            $regex = [regex]::new($pattern)
+            if (-not $files.Where({ $regex.IsMatch($_) }, 'First')) {
+                $Findings.Add('globs-match', $at, "applies_to glob '$glob' matches no file - the doc is routed to code that is not there")
+            }
+        }
+    }
+}
+
+function Get-RepositoryFile {
+    # Repository-relative paths: what git knows (tracked, plus untracked files that are not
+    # ignored) in a git checkout, otherwise - or without git on PATH - a walk. Folders in
+    # scan.ignore are left out of both.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo)
+    $paths = $null
+    if ((Test-Path -LiteralPath (Join-Path $Repo.Root '.git')) -and (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        $out = & git -C $Repo.Root ls-files -z --cached --others --exclude-standard 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            # --cached still lists a tracked file that was deleted from the working tree.
+            $gone = & git -C $Repo.Root ls-files -z --deleted 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $deleted = [System.Collections.Generic.HashSet[string]]::new([string[]]("$($gone -join '')" -split "`0"), [StringComparer]::Ordinal)
+                $paths = ("$($out -join '')" -split "`0").Where({ $_ -and -not $deleted.Contains($_) })
+            }
+        }
+    }
+    if ($null -eq $paths) {
+        $paths = @(Get-ChildItem -LiteralPath $Repo.Root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $Repo.Relative($_.FullName) })
+    }
+    $ignored = Get-ScanIgnorePattern -Rules $Rules
+    return , @(if ($ignored) { $paths.Where({ ($_ -replace '/?[^/]*$', '') -notmatch $ignored }) } else { $paths })
+}
+
+function Get-ScanIgnorePattern {
+    # Matches a repository-relative folder that is or lies below a folder named in scan.ignore
+    # (compared case-insensitively, like -contains); $null when nothing is ignored.
+    param([AgentDocsRuleSet]$Rules)
+    $names = @($Rules.Config['scan']['ignore'] | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_) })
+    if (-not $names) { return $null }
+    return "(?:^|/)(?:$($names -join '|'))(?:/|$)"
+}
+
+function ConvertTo-GlobRegex {
+    # '**' crosses folders, '*' and '?' stay inside one, {a,b} alternates. A glob without a
+    # slash matches at any depth, and a trailing slash means everything below it. $null for an
+    # unclosed '{'.
+    param([string]$Glob)
+    $g = $Glob.Trim() -replace '^\./', '' -replace '^/', ''
+    if ($g.EndsWith('/')) { $g += '**' }
+    $body = [System.Text.StringBuilder]::new()
+    $depth = 0
+    for ($i = 0; $i -lt $g.Length; $i++) {
+        $c = $g[$i]
+        if ($c -eq '*' -and $i + 1 -lt $g.Length -and $g[$i + 1] -eq '*') {
+            $i++
+            if ($i + 1 -lt $g.Length -and $g[$i + 1] -eq '/') { $i++; [void]$body.Append('(?:.*/)?') } else { [void]$body.Append('.*') }
+        }
+        elseif ($c -eq '*') { [void]$body.Append('[^/]*') }
+        elseif ($c -eq '?') { [void]$body.Append('[^/]') }
+        elseif ($c -eq '{') { $depth++; [void]$body.Append('(?:') }
+        elseif ($c -eq '}' -and $depth -gt 0) { $depth--; [void]$body.Append(')') }
+        elseif ($c -eq ',' -and $depth -gt 0) { [void]$body.Append('|') }
+        else { [void]$body.Append([regex]::Escape([string]$c)) }
+    }
+    if ($depth -gt 0) { return $null }
+    return "^$(if ($g -notmatch '/') { '(?:.*/)?' })$($body.ToString())$"
+}
+
 function Get-Frontmatter {
     # 'key: value' lines between the two '---' fences. Quotes and [ ] around a value are
     # dropped; other YAML shapes are not supported and read as missing.
@@ -362,7 +447,8 @@ function Get-Frontmatter {
 function Split-GlobList {
     # Commas separate globs, except inside a {a,b} alternation.
     param([string]$Value)
-    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # A glob quoted inside a flow list ([a/**, "b/**"]) loses its quotes.
+    return , @([regex]::Split($Value, ',(?![^{]*\})') | ForEach-Object { $_.Trim() -replace '^(["''])(.*)\1$', '$2' } | Where-Object { $_ })
 }
 
 function Test-InvisibleCharacter {
@@ -377,9 +463,9 @@ function Test-InvisibleCharacter {
         'stray zero-width joiner' = '(?<![\p{So}\uFE0F\uDC00-\uDFFF])\u200D|\u200D(?![\p{So}\uFE0F\uD800-\uDBFF])'
         'bidirectional override'  = '[\u202A-\u202E\u2066-\u2069]'
     }
-    $ignore = @($Rules.Config['scan']['ignore'])
+    $ignored = Get-ScanIgnorePattern -Rules $Rules
     $files = Get-ChildItem -LiteralPath $Repo.Root -Recurse -Force -File -Filter '*.md' -ErrorAction SilentlyContinue |
-        Where-Object { -not ($Repo.Relative($_.DirectoryName) -split '/' | Where-Object { $ignore -contains $_ }) } | Sort-Object FullName
+        Where-Object { -not $ignored -or $Repo.Relative($_.DirectoryName) -notmatch $ignored } | Sort-Object FullName
     foreach ($f in $files) {
         $content = $Repo.ReadText($f.FullName)
         foreach ($kind in $invisible.Keys) {
@@ -387,6 +473,34 @@ function Test-InvisibleCharacter {
             if ($hits.Count -eq 0) { continue }
             $line = ($content.Substring(0, $hits[0].Index) -split "`n").Count
             $Findings.Add('no-invisible-characters', "$($Repo.Relative($f.FullName)):$line", "$($hits.Count) $kind(s) - invisible to a reviewer, not to a model. Remove them")
+        }
+    }
+}
+
+function Test-EagerImport {
+    # '@path' is Claude Code import syntax: other agents ignore the line, so the imported text is
+    # invisible to them. Only the CLAUDE.md shim may import. Checked in the entry point (CLAUDE.md
+    # itself before a migration) and every docs/*.md. Claude Code expands '@path' after start of
+    # line or whitespace, not inside code spans, fenced blocks or HTML comments; so does this.
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    if (-not $Rules.IsOn('no-eager-import')) { return }
+    # An explicit path ('./', '../', '~/', '/') is always an import. Otherwise the target needs a
+    # file extension - any extension after a slash, a text-file one for a bare name - which keeps
+    # '@angular/core', '@Input()' and '@someone' out. A '#fragment' is not part of the path.
+    $textFile = '\.(md|mdc|mdx|markdown|txt|rst|json|ya?ml|toml)$'
+    $nestedFile = '^[^/\s]+/(?:[^/\s]+/)*[^/\s]*\.[A-Za-z0-9]{1,8}$'
+    foreach ($f in @($Repo.EntryPath) + @($Repo.Docs.FullName) | Where-Object { $_ }) {
+        $lines = (ConvertTo-OctoAgentDocsProse -Text $Repo.ReadText($f) -KeepLineNumbers -StripComments) -split "`n"
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -notmatch '@') { continue }
+            $line = [regex]::Replace($lines[$i], '(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)', '')
+            foreach ($m in [regex]::Matches($line, '(?<!\S)@((?:[^\s\\]|\\ )+)')) {
+                # '\ ' is an escaped space inside the path, as Claude Code reads it.
+                $target = ($m.Groups[1].Value.Replace('\ ', '_') -replace '#.*$', '').TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '"', "'")
+                if ($target -match '^(\.{1,2}/|~/|/)[^/\s]' -or $target -match $textFile -or $target -match $nestedFile) {
+                    $Findings.Add('no-eager-import', "$($Repo.Relative($f)):$($i + 1)", "'@$target' is a Claude-only import: other agents ignore it and never see that content. Link it as [text]($target) or state the path in prose")
+                }
+            }
         }
     }
 }

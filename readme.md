@@ -423,7 +423,7 @@ paragraph below the `# ` title is the opening sentence, and that the level-2 hea
 exactly these five, in this order:
 
 ```markdown
-# <repository>
+# AGENTS.md
 
 Instructions for coding agents in this repository. Detail lives in `docs/`; read the matching file before changing the
 code it covers.
@@ -439,6 +439,23 @@ Any other `## ` heading is an error: move its content to `docs/` or under one of
 `###` section. Level-3 and lower headings are not checked. A `CLAUDE.md` that is still the entry
 point is only checked for missing sections. The sentence and the headings are defined once, in
 `modules/agent-docs.rules.json`.
+
+`AGENTS.md` must work with any agent, so rule `no-eager-import` (error, non-relaxable)
+reports every Claude-style `@path` import in it, in `docs/*.md` and in a `CLAUDE.md` that is
+still the entry point; only the `CLAUDE.md` shim imports. Like Claude Code it reads an `@` at
+the start of a line or after whitespace, outside code spans, fenced blocks and HTML comments.
+The target counts as a path when it starts with `./`, `../`, `~/` or `/`, or names a file
+(`@src/Foo.cs`, `@notes.txt`), so e-mail addresses, npm scopes such as `@angular/core`,
+decorators and mentions are not reported. Borderline: `@/components` is reported, `**@x.txt**`
+(no whitespace before the `@`) is not.
+
+Rule `globs-match` (error; a repository may lower it in `.agent-docs.json`, with a reason)
+reports each `applies_to` glob that matches no file, with the doc and the line, so a rename
+cannot orphan a doc unnoticed; `background: true` docs are not checked. The files are what git
+lists (tracked and not deleted, plus untracked files that are not ignored), or a folder walk
+outside a git checkout, minus the folders in `scan.ignore`. `**` crosses folders, `*` and `?`
+stay inside one, `{a,b}` alternates, a glob without a `/` matches at any depth, and matching
+is case-sensitive.
 
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
 from each doc's `applies_to` frontmatter, writes the `CLAUDE.md` shim, and writes the opening

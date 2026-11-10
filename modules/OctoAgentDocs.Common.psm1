@@ -13,9 +13,9 @@ $script:FencePattern = '(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[`~]*[ \t]*
 # Every rule the built-in ruleset defines.
 $script:RuleIds = @(
     'entry-point-lines', 'entry-point-characters', 'line-length', 'doc-size',
-    'frontmatter-present', 'doc-reachable', 'reference-resolves', 'reference-to-shim',
+    'frontmatter-present', 'doc-reachable', 'globs-match', 'reference-resolves', 'reference-to-shim',
     'routing-current', 'docs-count', 'shim-valid', 'required-sections',
-    'no-invisible-characters', 'migration-pending'
+    'no-invisible-characters', 'no-eager-import', 'migration-pending'
 )
 
 function Get-OctoAgentDocsRuleIdList {
@@ -70,13 +70,16 @@ function Format-OctoAgentDocsArgument {
 function ConvertTo-OctoAgentDocsProse {
     <#
     .SYNOPSIS
-    The text without its fenced code blocks. With -KeepLineNumbers each block becomes the
-    same number of empty lines, so a line number in the result is a line number in the file.
+    The text without its fenced code blocks and, with -StripComments, without HTML comments
+    outside them. With -KeepLineNumbers each removed block becomes the same number of empty
+    lines, so a line number in the result is a line number in the file.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers)
+    param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers, [switch]$StripComments)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
-    if (-not $KeepLineNumbers) { return [regex]::Replace($Text, $script:FencePattern, '') }
-    return [regex]::Replace($Text, $script:FencePattern, { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) })
+    $blank = if ($KeepLineNumbers) { { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) } } else { { param($m) '' } }
+    $Text = [regex]::Replace($Text, $script:FencePattern, $blank)
+    if ($StripComments) { $Text = [regex]::Replace($Text, '(?s)<!--.*?-->', $blank) }
+    return $Text
 }
 
 function Format-OctoAgentDocsOpening {
