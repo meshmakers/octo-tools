@@ -518,7 +518,8 @@ function Test-ReferenceSet {
     $anchors = @{}
     foreach ($f in $files) {
         $source = @{ Repo = $Repo; Findings = $Findings; Anchors = $anchors; Rel = $Repo.Relative($f) }
-        $prose = ConvertTo-OctoAgentDocsProse $Repo.ReadText($f)
+        $prose = ConvertTo-OctoAgentDocsProse $Repo.ReadText($f) -KeepLineNumbers
+        if ($siblingPattern) { Test-SiblingClaudeMention -Repo $Repo -Findings $Findings -Rel $source.Rel -Text $prose -SiblingRoot $siblingRoot -Pattern $siblingPattern }
         if ($f -eq $Repo.EntryPath) {
             # The generated table is derived, not written: a stale row naming a doc that is
             # gone is fixed by -Fix, not by a reference finding that would outlive the fix.
@@ -526,7 +527,6 @@ function Test-ReferenceSet {
             $ei = Find-OctoAgentDocsMarker -Text $prose -Marker $endMarker
             if ($si -ge 0 -and $ei -gt $si) { $prose = $prose.Substring(0, $si) + $prose.Substring($ei) }
         }
-        if ($siblingPattern) { Test-SiblingClaudeMention -Repo $Repo -Findings $Findings -Rel $source.Rel -Text (ConvertTo-OctoAgentDocsProse $Repo.ReadText($f) -KeepLineNumbers) -SiblingRoot $siblingRoot -Pattern $siblingPattern }
         # Inline links, with code spans removed first: `[label](path.md)` is quoted syntax.
         foreach ($m in [regex]::Matches(($prose -replace '`[^`\n]*`', ''), '\]\(\s*<?([^)\s>]+)>?')) {
             $target = [System.Uri]::UnescapeDataString($m.Groups[1].Value)
