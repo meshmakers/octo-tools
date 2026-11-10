@@ -4,6 +4,9 @@ Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 
 $script:RuleIds = Get-OctoAgentDocsRuleIdList
 $script:Modes = @('logOnly', 'enforce')
+# A repository name written in prose, optionally backticked; it never ends in a dot, so the
+# full stop of "... octo-x. CLAUDE.md ..." is not part of it.
+$script:ProseRepoName = '(?<![\w./-])`?([A-Za-z0-9](?:[\w.-]*[\w-])?)`?'
 
 class AgentDocsRuleSet {
     # The built-in ruleset with the override layers merged on top.
@@ -539,7 +542,7 @@ function Test-ReferenceSet {
             $shimPath = $null
             if ($ref -ceq 'CLAUDE.md') {
                 # octo-x `CLAUDE.md` is the sibling's, reported by Test-SiblingClaudeMention
-                if ($siblingPattern -and $prose.Substring(0, $m.Index) -match '(?<![\w./-])`?([A-Za-z0-9][\w.-]*)`?[ \t]+$' -and "$($Matches[1])/" -match $siblingPattern) { continue }
+                if ($siblingPattern -and $prose.Substring(0, $m.Index) -match "$script:ProseRepoName[ \t]+`$" -and "$($Matches[1])/" -match $siblingPattern) { continue }
                 $shimPath = $Repo.ClaudePath
             }
             elseif ($ref -notmatch '/' -or $ref -match '^(\.\.|~|/|[A-Za-z]:)' -or $ref -match '[*?\[{<>]') { continue }   # a phrase, an outside path, or a pattern
@@ -564,7 +567,7 @@ function Test-SiblingClaudeMention {
     # sibling that is not checked out locally may still exist.
     param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [string]$Rel, [string]$Text, [string]$SiblingRoot, [string]$Pattern)
     $workspace = $null
-    foreach ($m in [regex]::Matches($Text, '(?<![\w./-])`?([A-Za-z0-9][\w.-]*)`?(?:/|[ \t]+)`?CLAUDE\.md\b')) {
+    foreach ($m in [regex]::Matches($Text, "$script:ProseRepoName(?:/|[ \t]+)``?CLAUDE\.md\b")) {
         $name = $m.Groups[1].Value
         if ($name -eq $Repo.Name -or "$name/" -notmatch $Pattern) { continue }
         $at = "${Rel}:$(($Text.Substring(0, $m.Index) -split "`n").Count)"

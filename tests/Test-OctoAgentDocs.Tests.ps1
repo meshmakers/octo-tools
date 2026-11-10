@@ -512,6 +512,7 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         @{ case = "the repository's own shim by name"; text = 'This is `octo-self/CLAUDE.md`, see octo-self CLAUDE.md.' }
         @{ case = 'a name inside a longer word'; text = 'M2-octo-done CLAUDE.md mentions it.' }
         @{ case = 'a nested path'; text = 'See projects/octo-done/CLAUDE.md.' }
+        @{ case = 'a name that ends a sentence'; text = 'Built by octo-done. CLAUDE.md files are shims.' }
         @{ case = 'a CLAUDE.md that is not a sibling'; text = 'Update its CLAUDE.md and the CLAUDE.md files.' }
         @{ case = 'a mention inside a fenced block'; text = "``````text`nocto-done CLAUDE.md`n``````" }
     ) {
