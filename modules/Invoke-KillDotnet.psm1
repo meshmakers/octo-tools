@@ -25,6 +25,11 @@
 .PARAMETER branchRootPath
     Lane folder (e.g. .../meshmakers/main). Empty = legacy behaviour. Relative paths resolve against $PWD.
 
+.PARAMETER additionalRoots
+    Lane mode only: further folders whose processes belong to the same scope, e.g. the in-place worktrees of a feature
+    environment (Invoke-BuildEnvironment). Each must exist and be a git repository or worktree (hold .git); they need
+    no Octo.User.props. Matched with the same rule as the lane folder.
+
 .PARAMETER Json
     Legacy mode: { success, exitCode, killedCount[, skipped] }. Lane mode:
     { success, exitCode, killedCount, processes: [{ pid, name, reason }], scoped: true, buildServerShutdown: false }.
@@ -38,14 +43,28 @@
 function Invoke-KillDotnet {
     param(
         [string]$branchRootPath = '',
+        [string[]]$additionalRoots = @(),
         [switch]$Json
     )
 
+    if ([string]::IsNullOrWhiteSpace($branchRootPath) -and @($additionalRoots | Where-Object { $_ }).Count -gt 0) {
+        Write-Error "Invoke-KillDotnet: -additionalRoots needs -branchRootPath (lane mode)."
+        $global:LASTEXITCODE = 1
+        return
+    }
     if (-not [string]::IsNullOrWhiteSpace($branchRootPath)) {
         # Relative to $PWD - [IO.Path]::GetFullPath would resolve against the process start directory
         # (e.g. C:\Users\<user>) and match far more than one lane.
         $laneRoot = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($branchRootPath))
         $refusal = Test-OctoLaneFolder -path $laneRoot
+        $roots = @($laneRoot)
+        foreach ($extra in @($additionalRoots | Where-Object { $_ })) {
+            $extraRoot = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($extra))
+            if (-not $refusal -and -not (Test-Path -LiteralPath (Join-Path $extraRoot '.git'))) {
+                $refusal = "Invoke-KillDotnet: additional root $extraRoot is no git repository or worktree - refusing to stop processes under it."
+            }
+            $roots += $extraRoot
+        }
         if ($refusal) {
             $global:LASTEXITCODE = 1
             if ($Json) {
@@ -56,7 +75,7 @@ function Invoke-KillDotnet {
             Write-Error $refusal
             return
         }
-        $processes = @(Get-OctoLaneDotnetProcesses -branchRootPath $laneRoot)
+        $processes = @(Get-OctoLaneDotnetProcesses -branchRootPath $roots)
         $killedCount = 0
         $failed = @()
         if (Test-OctoKillDotnetWindows) {
@@ -86,6 +105,7 @@ function Invoke-KillDotnet {
                     killedCount         = $killedCount
                     processes           = @($processes)
                     failed              = @($failed)
+                    roots               = @($roots)
                     scoped              = $true
                     buildServerShutdown = $false
                 })
@@ -129,7 +149,7 @@ function Test-OctoKillDotnetWindows {
 
 function Get-OctoLaneDotnetProcesses {
     # The dotnet processes that belong to the lane (see Invoke-KillDotnet), as { pid, name, reason }.
-    param([Parameter(Mandatory = $true)] [string]$branchRootPath)
+    param([Parameter(Mandatory = $true)] [string[]]$branchRootPath)
 
     $windows = Test-OctoKillDotnetWindows
     $candidates = @()
@@ -219,10 +239,13 @@ function Select-OctoLaneProcesses {
     # $branchRootPath must be absolute (Invoke-KillDotnet resolves it against $PWD).
     param(
         [object[]]$candidates = @(),
-        [Parameter(Mandatory = $true)] [string]$branchRootPath
+        # One or more roots (lane folder plus e.g. in-place worktrees); a process under any of them matches.
+        [Parameter(Mandatory = $true)] [string[]]$branchRootPath
     )
-    $laneFull = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
-    $prefixes = @("$laneFull/", "$laneFull\") | Select-Object -Unique
+    $prefixes = @(foreach ($root in $branchRootPath) {
+            $laneFull = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($root))
+            "$laneFull/", "$laneFull\"
+        }) | Select-Object -Unique
     $under = {
         param([string]$path)
         # Only absolute paths: GetFullPath would resolve a relative one against the process start directory.
@@ -256,4 +279,41 @@ function Select-OctoLaneProcesses {
     return $found
 }
 
-Export-ModuleMember -Function @('Invoke-KillDotnet')
+function Get-OctoProcessesUnderFolder {
+    <#
+    .SYNOPSIS
+        List-only: the processes that run from a folder, with the lane matching of Invoke-KillDotnet.
+    .DESCRIPTION
+        Same rule as Invoke-KillDotnet's lane mode (Select-OctoLaneProcesses): a process belongs to the folder when its
+        working directory (macOS/Linux, lsof), its entry assembly or (Windows, dotnet processes) one of its module paths
+        lies under it - prefix with a trailing separator, case-insensitive; the octo-devstack daemon never counts. Unlike
+        the lane mode it looks at EVERY process (a shell, an IDE or a Claude Code session in the folder counts, not only
+        dotnet), accepts any folder (no lane check) and never stops anything. Used before a worktree is moved
+        (Add-OctoEnvironmentRepo -path). Returns { pid, name, reason }.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $folder = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path))
+    $windows = Test-OctoKillDotnetWindows
+    $candidates = @()
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $modules = @()
+        if ($windows -and $process.Name -eq 'dotnet') {
+            try { $modules = @($process.Modules | ForEach-Object { $_.FileName } | Where-Object { $_ }) } catch { $modules = @() }
+        }
+        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = [string]$process.CommandLine; Cwd = $null; Modules = $modules }
+    }
+    if (-not $windows -and $candidates.Count -gt 0) {
+        $currentPid = $null
+        # Processes of other users are not readable; that is expected here, so no warning.
+        foreach ($line in @(Get-OctoProcessCwdRecords -processIds $candidates.Pid -WarningAction SilentlyContinue)) {
+            if ($line -like 'p*') { $currentPid = [int]$line.Substring(1) }
+            elseif ($line -like 'n*' -and $null -ne $currentPid) {
+                $candidate = $candidates | Where-Object { $_.Pid -eq $currentPid } | Select-Object -First 1
+                if ($candidate) { $candidate.Cwd = $line.Substring(1) }
+            }
+        }
+    }
+    return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder)
+}
+
+Export-ModuleMember -Function @('Invoke-KillDotnet', 'Get-OctoProcessesUnderFolder')

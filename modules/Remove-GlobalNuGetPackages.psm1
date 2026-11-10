@@ -57,8 +57,9 @@ function Remove-OctoLaneNuGetPackages {
         Removes the local 999.0.0 Meshmakers packages from every package cache a lane restores into.
     .DESCRIPTION
         The caches come from Get-OctoRangePackageCaches (shared with Invoke-BuildRange):
-          - isolated lane (dev): only <lane>/.nuget-packages, the global cache is never touched;
-          - legacy lane (main): <lane>/.nuget-packages when Octo.User.props sets RestorePackagesPath, plus the
+          - isolated lane (Octo.User.props declares RestorePackagesPath): only <lane>/.nuget-packages, the
+            global cache is never touched;
+          - legacy lane (no RestorePackagesPath, or -laneIsolation Off): <lane>/.nuget-packages when Octo.User.props sets RestorePackagesPath, plus the
             global cache (NUGET_PACKAGES or ~/.nuget/packages).
         Each cache is cleaned with Remove-GlobalNuGetPackages, i.e. only meshmakers.*/999.0.0 folders.
         With -Json the nested emits are swallowed: the caller owes ONE machine-readable document.

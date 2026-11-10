@@ -43,7 +43,6 @@ BeforeAll {
         $cache = Join-Path $TestDrive 'nuget-cache'
         if (Test-Path $cache) { Remove-Item $cache -Recurse -Force }
         New-Item -ItemType Directory -Force -Path (Join-Path $cache 'meshmakers.octo.runtime.engine/999.0.0') | Out-Null
-        Set-Content -Path $script:FakeNuGetConfig -Value "<configuration><packageSources><add key=""local-nuget"" value=""$(Join-Path $checkout 'nuget')"" /></packageSources></configuration>"
         $global:rootPath = $root
         $global:GLOBALNUGETPACKAGESPATH = $cache
         return [pscustomobject]@{ Root = $root; Checkout = $checkout; Cache = $cache }
@@ -58,8 +57,6 @@ BeforeAll {
         return ($json -replace '"\w*[Ss]econds":\s*[-0-9.Ee+]+,?', '' -replace '"timestamp":\s*"[^"]*",?', '')
     }
 
-    $script:FakeNuGetConfig = Join-Path $TestDrive 'NuGet.Config'
-    Mock -ModuleName Get-OctoLaneBuildSettings Get-OctoUserNuGetConfigPath { $script:FakeNuGetConfig }
 
     $script:PreviousNugetPackages = $env:NUGET_PACKAGES
     $script:PreviousRootPath = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue

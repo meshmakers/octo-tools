@@ -431,9 +431,9 @@ function Invoke-OctoBuildRangeRepo {
         $buildTarget = New-OctoSolutionFilter -solutionPath $entry.Solution -projects $entry.Projects -name $entry.Name
     }
     if (-not $Json) {
-        Write-Host "[$configuration] dotnet build $buildTarget $($propertyArgs -join ' ')" -ForegroundColor Green
+        Write-Host "[$configuration] dotnet build $buildTarget $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" -ForegroundColor Green
     }
-    "Invoke-BuildRange: dotnet build $buildTarget -c $configuration -nodeReuse:false $($propertyArgs -join ' ')" | Set-Content -Path $logFile
+    "Invoke-BuildRange: dotnet build $buildTarget -c $configuration -nodeReuse:false $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" | Set-Content -Path $logFile
     & dotnet build $buildTarget -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
     $exitCode = $LASTEXITCODE
     return [pscustomobject]@{ Success = ($exitCode -eq 0); LogFile = $logFile; ExitCode = $exitCode }
@@ -459,7 +459,7 @@ function Invoke-OctoBuildRangeTests {
     if (-not $Json) {
         Write-Host "[$configuration] verify tests compile: dotnet build $filter" -ForegroundColor Green
     }
-    "Invoke-BuildRange -verifyTests: dotnet build $filter -c $configuration -nodeReuse:false $($propertyArgs -join ' ')" | Add-Content -Path $logFile
+    "Invoke-BuildRange -verifyTests: dotnet build $filter -c $configuration -nodeReuse:false $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" | Add-Content -Path $logFile
     & dotnet build $filter -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
     $exitCode = $LASTEXITCODE
     return [pscustomobject]@{ Success = ($exitCode -eq 0); Skipped = $false; LogFile = $logFile; ExitCode = $exitCode }
@@ -513,7 +513,7 @@ function Write-OctoBuildRangePlan {
         Write-Host "  Package cache(s) purged per package / checked for stale 999.0.0 folders: $($packageCaches -join ', ')" -ForegroundColor DarkGray
     }
     if ($propertyArgs.Count -gt 0) {
-        Write-Host "  MSBuild properties (all repositories): $($propertyArgs -join ' ')" -ForegroundColor DarkGray
+        Write-Host "  MSBuild properties (all repositories): $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" -ForegroundColor DarkGray
     }
     if ($staleCache.Count -gt 0) {
         $action = if ($purgeStaleCache) { 'will be purged before the first build (-purgeStaleCache)' } else { 'restores would use them silently - pass -purgeStaleCache to purge them' }
@@ -588,13 +588,13 @@ function Write-OctoBuildRangePlan {
          repository in the range restores the fresh ones from <checkout>/nuget.
 
     Lane isolation (AB#4924) is the same as Invoke-BuildAll's (Get-OctoLaneBuildSettings): an
-    isolated lane (e.g. dev, whose nuget/ is not the local feed of the user-level NuGet.Config)
+    isolated lane (its Octo.User.props declares RestorePackagesPath: every feature environment)
     builds with NUGET_PACKAGES=<lane>/.nuget-packages and MSBUILDDISABLENODEREUSE=1, and in DebugL
     repositories without their own <RestoreSources> get RestoreSources=<lane>/nuget;nuget.org.
     The environment is restored afterwards. The package cache that is purged and checked follows
     the lane (Get-OctoRangePackageCaches): <lane>/.nuget-packages for an isolated lane; for the
-    legacy lane (main) the global cache (NUGET_PACKAGES or ~/.nuget/packages), plus
-    <lane>/.nuget-packages if <lane>/Octo.User.props sets RestorePackagesPath.
+    legacy lane (no RestorePackagesPath, or -laneIsolation Off) the global cache (NUGET_PACKAGES or
+    ~/.nuget/packages), plus <lane>/.nuget-packages if <lane>/Octo.User.props sets RestorePackagesPath.
 
     Unlike Invoke-BuildAll it does NOT wipe <checkout>/nuget, does NOT delete every
     meshmakers.* package from the package cache and does NOT kill dotnet processes.
@@ -689,6 +689,14 @@ function Write-OctoBuildRangePlan {
     repositories gets a warning (repositories with their own <RestoreSources> use ../nuget).
     A key for a repository outside the selected range is not applied (warning).
 
+.PARAMETER externalRepoPaths
+    Repositories that are NOT folders of the lane, keyed by their exact repository name, with the folder
+    to build them from (e.g. an in-place worktree adopted by a feature environment). They are placed in
+    the build order like a lane folder of that name (Get-OctoBuildOrder -additionalRepos), validated like
+    -repoPaths, and built from that folder. The caller provides their isolation through
+    -msbuildPropertiesPerRepo (RestoreSources, RestorePackagesPath): the folder's ../nuget is not the
+    lane feed, so no "not next to the lane" warning is printed for them.
+
 .PARAMETER feedPath
     Private feed: copy the built DebugL packages into this folder (created when missing) instead of
     <checkout>/nuget, and do NOT purge the lane's package caches. The caller provides the isolation
@@ -707,6 +715,10 @@ function Write-OctoBuildRangePlan {
     see Write-OctoBuildEvent): plan, then per repository repoStart, phase (build, tests, packages,
     purge) and repoDone, and finally done - also on an early refusal or a throw (success=false).
     Nothing is written under -WhatIf. The -Json output is not affected.
+
+.PARAMETER EventsCommand
+    The command name recorded in every event of -EventsFile. Default Invoke-BuildRange; wrappers such as
+    Invoke-BuildEnvironment pass their own name so a reader sees which cmdlet ran the build.
 
 .PARAMETER WhatIf
     Print the plan (repositories, projects, global-cache folders to purge, running processes,
@@ -753,8 +765,10 @@ function Invoke-BuildRange {
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog.
         [switch]$skipCkSync,
         [hashtable]$repoPaths = @{},
+        [hashtable]$externalRepoPaths = @{},
         [string]$feedPath = '',
         [string]$EventsFile = '',
+        [string]$EventsCommand = 'Invoke-BuildRange',
         [switch]$Json
     )
 
@@ -762,13 +776,13 @@ function Invoke-BuildRange {
     # event of -EventsFile, also when the run refuses early or throws.
     # The core is a simple function: -WhatIf / -ErrorAction reach it as the preference variables of this
     # scope, and its Write-Error lands in this cmdlet's error stream (-ErrorVariable) like before.
-    $skip = @([System.Management.Automation.PSCmdlet]::CommonParameters) + @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters) + @('EventsFile')
+    $skip = @([System.Management.Automation.PSCmdlet]::CommonParameters) + @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters) + @('EventsFile', 'EventsCommand')
     $forward = @{}
     foreach ($key in $PSBoundParameters.Keys) {
         if ($key -in $skip) { continue }
         $forward[$key] = $PSBoundParameters[$key]
     }
-    $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-BuildRange'
+    $events = New-OctoBuildEventState -Path $EventsFile -Command $EventsCommand
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         Invoke-OctoBuildRangeCore @forward -events $events
@@ -787,7 +801,9 @@ function Resolve-OctoRepoPathOverrides {
         [hashtable]$repoPaths = @{},
         [Parameter(Mandatory = $true)] [object[]]$order,
         # Lane checkout; a folder that is not next to the lane's repositories gets a warning.
-        [string]$branchRootPath = ""
+        [string]$branchRootPath = "",
+        # Repositories whose folder is outside the lane on purpose (-externalRepoPaths): no warning.
+        [string[]]$noLaneWarning = @()
     )
     $map = [ordered]@{}
     foreach ($key in @($repoPaths.Keys)) {
@@ -831,7 +847,7 @@ function Resolve-OctoRepoPathOverrides {
             throw "-repoPaths: $folder for $name is no git repository or worktree (no .git) - cannot verify that it holds $name."
         }
         # Repos whose own <RestoreSources> use ../nuget resolve the feed next to the folder.
-        if (-not [string]::IsNullOrWhiteSpace($branchRootPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($branchRootPath) -and $noLaneWarning -notcontains $name) {
             $parent = [IO.Path]::TrimEndingDirectorySeparator((Split-Path -Parent $folder))
             $lane = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
             if ($parent -ine $lane) {
@@ -866,6 +882,7 @@ function Invoke-OctoBuildRangeCore {
         [string]$laneIsolation = 'Auto',
         [switch]$skipCkSync,
         [hashtable]$repoPaths = @{},
+        [hashtable]$externalRepoPaths = @{},
         [string]$feedPath = '',
         [hashtable]$events,
         [switch]$Json
@@ -874,7 +891,7 @@ function Invoke-OctoBuildRangeCore {
     $eventsPath = [string]$events.Path
     $emit = {
         param([string]$name, [System.Collections.IDictionary]$data)
-        Write-OctoBuildEvent -Path $eventsPath -Command 'Invoke-BuildRange' -Event $name -Data $data
+        Write-OctoBuildEvent -Path $eventsPath -Command ([string]$events.Command) -Event $name -Data $data
     }
 
     # Every early exit reports through the same path: Write-Error, LASTEXITCODE 1 and, with -Json,
@@ -907,7 +924,14 @@ function Invoke-OctoBuildRangeCore {
         return
     }
 
-    $order = @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $excludeFrontend -excludeAdditional $false)
+    try { $order = @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $excludeFrontend -excludeAdditional $false -additionalRepos $externalRepoPaths) }
+    catch { & $fail $_.Exception.Message; return }
+    foreach ($name in @($externalRepoPaths.Keys)) {
+        if (Test-Path -LiteralPath (Join-Path $branchRootPath $name) -PathType Container) {
+            & $fail "-externalRepoPaths: $name is a folder of the lane $branchRootPath - use -repoPaths."
+            return
+        }
+    }
     try {
         $repos = @(Get-OctoBuildRangeRepos -order $order -from $from -to $to -include $include -exclude $exclude)
     }
@@ -921,7 +945,10 @@ function Invoke-OctoBuildRangeCore {
     }
 
     # -repoPaths: build single repositories from another folder (e.g. a git worktree), same position.
-    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $repoPaths -order $order -branchRootPath $branchRootPath }
+    $allRepoPaths = @{}
+    foreach ($key in @($repoPaths.Keys)) { $allRepoPaths[$key] = $repoPaths[$key] }
+    foreach ($key in @($externalRepoPaths.Keys)) { $allRepoPaths[$key] = $externalRepoPaths[$key] }
+    try { $repoPathMap = Resolve-OctoRepoPathOverrides -repoPaths $allRepoPaths -order $order -branchRootPath $branchRootPath -noLaneWarning @($externalRepoPaths.Keys) }
     catch { & $fail $_.Exception.Message; return }
     $repoPathsOutside = @($repoPathMap.Keys | Where-Object { $name = $_; -not ($repos | Where-Object { $_.Name -ieq $name }) } | Sort-Object)
     if ($repoPathsOutside.Count -gt 0) {
@@ -1016,7 +1043,8 @@ function Invoke-OctoBuildRangeCore {
     foreach ($entry in $plan) {
         $properties = Merge-OctoRepoMsBuildProperties -repoName $entry.Name -msbuildProperties $msbuildProperties -msbuildPropertiesPerRepo $perRepo
         $entry | Add-Member -NotePropertyName MsBuildProperties -NotePropertyValue $properties -Force
-        $entry | Add-Member -NotePropertyName PropertyArgs -NotePropertyValue @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties) -Force
+        # Display only (plan, -Json): credentials in feed URLs are masked; the build converts MsBuildProperties itself.
+        $entry | Add-Member -NotePropertyName PropertyArgs -NotePropertyValue @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties | ForEach-Object { Hide-OctoUrlCredentials $_ }) -Force
     }
     $publishWarning = Get-OctoCkPublishDisabledWarning -repoNames @($plan | Where-Object { $_.Mode -eq 'dotnet' -and (Test-OctoCkPublishDisabled -properties $_.MsBuildProperties) } | ForEach-Object { $_.Name })
     if ($publishWarning) { Write-Warning $publishWarning }
@@ -1045,7 +1073,7 @@ function Invoke-OctoBuildRangeCore {
                             [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes) }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
-                    msbuildProperties = @($propertyArgs)
+                    msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
                     staleGlobalCache = @($staleCache | ForEach-Object { [ordered]@{ packageId = $_.PackageId; cachePath = $_.CachePath; reason = $_.Reason } })
                     purgeStaleCache  = [bool]$purgeStaleCache
                 })
@@ -1302,7 +1330,7 @@ function Invoke-OctoBuildRangeCore {
                         }
                     })
                 notBuilt       = @($plan | Select-Object -Skip $results.Count | ForEach-Object { $_.Name })
-                msbuildProperties = @($propertyArgs)
+                msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
                 staleGlobalCache = @($staleCache | ForEach-Object { [ordered]@{ packageId = $_.PackageId; cachePath = $_.CachePath; reason = $_.Reason } })
                 staleGlobalCachePurged = @($stalePurged)
                 elapsedSeconds = $totalWatch.Elapsed.TotalSeconds

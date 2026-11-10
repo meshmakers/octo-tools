@@ -41,7 +41,8 @@
     Default pages:https://meshmakers.github.io/construction-kit-libraries-build/.
 
 .PARAMETER ckc
-    octo-ckc executable. Default: <lane>/octo-construction-kit-engine/bin/DebugL/net10.0/publish/octo-ckc, else
+    octo-ckc executable. Default: <lane>/octo-construction-kit-engine/bin/DebugL/net10.0/publish/octo-ckc; in a
+    feature environment without the engine the same path in its base lane (.octo/environment.json "base"); else
     octo-ckc from PATH.
 
 .PARAMETER WhatIf
@@ -105,8 +106,24 @@ function Sync-OctoCkIntermediateVersions {
 
     if ([string]::IsNullOrWhiteSpace($ckc)) {
         $exeName = if ($IsWindows) { 'octo-ckc.exe' } else { 'octo-ckc' }
-        $laneCkc = if ($laneRoot) { Join-Path $laneRoot "octo-construction-kit-engine/bin/DebugL/net10.0/publish/$exeName" } else { $null }
+        $relativeCkc = "octo-construction-kit-engine/bin/DebugL/net10.0/publish/$exeName"
+        $laneCkc = if ($laneRoot) { Join-Path $laneRoot $relativeCkc } else { $null }
+        # A feature environment without the engine uses its base lane's octo-ckc (manifest "base", relative to
+        # the workspace root that holds <root>/wt-<env>) before falling back to PATH.
+        $baseCkc = $null
+        $manifestPath = if ($laneRoot) { Join-Path $laneRoot '.octo/environment.json' } else { $null }
+        if ($manifestPath -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            try {
+                $base = [string](Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).base
+                if ($base) {
+                    $workspaceRoot = Split-Path -Parent ([IO.Path]::GetFullPath($laneRoot).TrimEnd('/', '\'))
+                    $baseCkc = Join-Path (Join-Path $workspaceRoot $base) $relativeCkc
+                }
+            }
+            catch { Write-Warning "Cannot read $manifestPath - no base-lane octo-ckc fallback: $_" }
+        }
         if ($laneCkc -and (Test-Path -LiteralPath $laneCkc)) { $ckc = $laneCkc }
+        elseif ($baseCkc -and (Test-Path -LiteralPath $baseCkc)) { $ckc = $baseCkc }
         elseif (Get-Command octo-ckc -ErrorAction SilentlyContinue) { $ckc = (Get-Command octo-ckc).Source }
         else { $ckc = 'octo-ckc' }
     }

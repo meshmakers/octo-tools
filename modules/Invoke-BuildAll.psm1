@@ -214,8 +214,8 @@ function Invoke-BuildAll {
         [string]$branch = "",
         [Boolean]$excludeAdditional = $false,
         [Boolean]$excludeFrontend = $false,
-        # Lane isolation (see Get-OctoLaneBuildSettings): Auto isolates every lane whose nuget/ folder is
-        # not the local feed of the user-level NuGet.Config (dev); that lane (main) keeps the legacy behaviour.
+        # Lane isolation (see Get-OctoLaneBuildSettings): Auto isolates every lane whose Octo.User.props
+        # declares RestorePackagesPath; a lane without it keeps the legacy behaviour (shared cache).
         [ValidateSet('Auto', 'On', 'Off')]
         [string]$laneIsolation = 'Auto',
         [hashtable]$msbuildProperties = @{},
