@@ -715,6 +715,41 @@ function Invoke-OctoEnvironmentSync {
     }
 }
 
+$script:SyncListLimit = 20
+
+function ConvertTo-OctoSyncReport {
+    <#
+        The sync result for -Json: per feed/catalog the counts (copied, refreshed, kept, merged, dropped) and at most
+        $script:SyncListLimit names per list (truncated = $true when a list was cut); -Detailed keeps every name. A fresh
+        environment copies thousands of catalog files - listing them all made New-OctoEnvironment -Json ~40 KB.
+    #>
+    param([Parameter(Mandatory = $true)] $sync, [switch]$detailed)
+    $limit = if ($detailed) { [int]::MaxValue } else { $script:SyncListLimit }
+    $folder = {
+        param($result)
+        $report = [ordered]@{ source = $result.source; target = $result.target; counts = [ordered]@{}; truncated = $false }
+        foreach ($list in @('copied', 'refreshed', 'kept', 'merged', 'dropped')) {
+            $all = @($result[$list])
+            $report.counts[$list] = $all.Count
+            $report[$list] = @($all | Select-Object -First $limit)
+            if ($all.Count -gt $limit) { $report.truncated = $true }
+        }
+        return $report
+    }
+    $catalogs = [ordered]@{}
+    foreach ($name in $sync.catalogs.Keys) { $catalogs[$name] = & $folder $sync.catalogs[$name] }
+    $purged = @($sync.purgedFromCache)
+    return [ordered]@{
+        dryRun               = $sync.dryRun
+        base                 = $sync.base
+        detailed             = [bool]$detailed
+        nuget                = & $folder $sync.nuget
+        catalogs             = $catalogs
+        purgedFromCacheCount = $purged.Count
+        purgedFromCache      = @($purged | Select-Object -First $limit)
+    }
+}
+
 function Write-OctoEnvironmentSyncSummary {
     param($sync)
     $n = $sync.nuget
@@ -730,15 +765,53 @@ function Write-OctoEnvironmentSyncSummary {
 # Package graph
 # ---------------------------------------------------------------------------------------------------------------
 
+$script:PackageScanSkippedFolders = [System.Collections.Generic.HashSet[string]]::new([string[]]@('node_modules', 'bin', 'obj', '.git', '.vs', '.idea', 'TestResults', 'packages', '.nuget-packages', 'dist', '.angular'), [StringComparer]::OrdinalIgnoreCase)
+
+function Get-OctoPackageScanFiles {
+    <#
+        The files the package graph reads for one repository: *.csproj and *.props below src/ (the repository root when
+        it has no src/), plus Directory.Build.props / Directory.Packages.props in the repository root. The walk never
+        enters node_modules, bin, obj, .git and similar folders, nor symbolic links (a plain recursive Get-ChildItem
+        enumerates node_modules completely before any filter applies - minutes for the frontend repositories).
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $files = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in @('Directory.Build.props', 'Directory.Packages.props')) {
+        $rootFile = Join-Path $path $name
+        if ([IO.File]::Exists($rootFile)) { $files.Add($rootFile) }
+    }
+    $src = Join-Path $path 'src'
+    $start = if ([IO.Directory]::Exists($src)) { $src } else { $path }
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($start)
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
+        try {
+            foreach ($file in [IO.Directory]::EnumerateFiles($directory)) {
+                if ($file.EndsWith('.csproj', [StringComparison]::OrdinalIgnoreCase) -or
+                    ($file.EndsWith('.props', [StringComparison]::OrdinalIgnoreCase) -and -not $files.Contains($file))) { $files.Add($file) }
+            }
+            foreach ($child in [IO.Directory]::EnumerateDirectories($directory)) {
+                if ($script:PackageScanSkippedFolders.Contains([IO.Path]::GetFileName($child))) { continue }
+                if (([IO.File]::GetAttributes($child) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                $stack.Push($child)
+            }
+        }
+        catch [System.UnauthorizedAccessException] { continue }
+        catch [System.IO.IOException] { continue }
+    }
+    return @($files)
+}
+
 function Get-OctoRepoPackageInfo {
-    # Produced package ids and Meshmakers.* references of one repository, from its csproj (and props) files.
+    # Produced package ids and Meshmakers.* references of one repository, from its csproj (and props) files
+    # (Get-OctoPackageScanFiles: src/ plus the root props, never node_modules/bin/obj/.git).
     param([Parameter(Mandatory = $true)] [string]$path)
     $produces = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $references = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $files = @(Get-ChildItem -LiteralPath $path -Recurse -File -Include '*.csproj', '*.props' -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '[/\\](bin|obj|node_modules|\.git)[/\\]' })
-    foreach ($file in $files) {
-        $text = Get-Content -LiteralPath $file.FullName -Raw
+    foreach ($filePath in @(Get-OctoPackageScanFiles -path $path)) {
+        $file = [IO.FileInfo]::new($filePath)
+        $text = [IO.File]::ReadAllText($filePath)
         if ([string]::IsNullOrEmpty($text)) { continue }
         foreach ($match in [regex]::Matches($text, '<PackageReference\s+[^>]*?Include\s*=\s*"(Meshmakers\.[^"]+)"', 'IgnoreCase')) {
             [void]$references.Add($match.Groups[1].Value)
@@ -885,6 +958,7 @@ function New-OctoEnvironment {
         [string]$owner = '',
         [string]$base = $script:DefaultBase,
         [switch]$addAffected,
+        [switch]$Detailed,
         [switch]$Json
     )
 
@@ -968,7 +1042,7 @@ function New-OctoEnvironment {
     if ($Json) {
         Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{
                 environment = $env; path = $environmentPath; branch = $branchName; manifest = $manifest
-                consumersAdded = $addedConsumers; sync = $sync; errors = $errors
+                consumersAdded = $addedConsumers; sync = (ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed); errors = $errors
             })
         return
     }
@@ -1238,7 +1312,8 @@ function Add-OctoEnvironmentExistingWorktree {
     on both sides is JSON-merged (union, the environment's entry wins), a catalog cache file changed on both sides
     is dropped. The per-file state lives in <env>/.octo/sync/*.json. The base lane's feed is never written.
     Snapshot, not live: run it only when main is not being rebuilt (octo-devstack refuses a sync while a main
-    build is queued or running).
+    build is queued or running). -Json reports per feed and catalog the counts and at most 20 names per list
+    (truncated = true when cut); -Detailed lists every file. Same for New-OctoEnvironment and Invoke-BuildEnvironment.
 .EXAMPLE
     Sync-OctoEnvironment -env ab8625-enum-null -WhatIf -Json
 #>
@@ -1246,6 +1321,7 @@ function Sync-OctoEnvironment {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)] [string]$env,
+        [switch]$Detailed,
         [switch]$Json
     )
     try {
@@ -1266,7 +1342,8 @@ function Sync-OctoEnvironment {
     $global:LASTEXITCODE = 0
     if ($Json) {
         $data = New-OctoActionResult -Success $true -ExitCode 0 -Extra @{ environment = $env }
-        foreach ($key in $sync.Keys) { $data[$key] = $sync[$key] }
+        $report = ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed
+        foreach ($key in $report.Keys) { $data[$key] = $report[$key] }
         Write-OctoJson -Command 'Sync-OctoEnvironment' -Data $data
         return
     }
@@ -1455,6 +1532,7 @@ function Invoke-BuildEnvironment {
         [switch]$includeTests,
         [string]$EventsFile = '',
         [switch]$skipKill,
+        [switch]$Detailed,
         [switch]$DryRun,
         [switch]$Json
     )
@@ -1571,7 +1649,7 @@ function Invoke-BuildEnvironment {
     $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external }
     $data['synced'] = $null -ne $sync
     $data['killDotnet'] = $kill
-    if ($null -ne $sync) { $data['sync'] = $sync }
+    if ($null -ne $sync) { $data['sync'] = ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed }
     $global:LASTEXITCODE = $exitCode
     Write-OctoJson -Command 'Invoke-BuildEnvironment' -Data $data
 }

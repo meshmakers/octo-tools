@@ -945,3 +945,62 @@ Describe 'Invoke-BuildEnvironment keeps private feed credentials off the command
         }
     }
 }
+
+Describe 'Package graph scan stays out of node_modules, bin, obj and .git' {
+    It 'reads src/**/*.csproj and the root props only, pruning heavy folders' {
+        InModuleScope OctoEnvironment -Parameters @{ root = (Join-Path $TestDrive 'scan') } {
+            if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+            $repo = Join-Path $root 'octo-frontend-x'
+            foreach ($folder in @('src/Lib', 'src/web/node_modules/pkg', 'src/Lib/bin/DebugL', 'src/Lib/obj', '.git/x', 'node_modules/y', 'tests/Lib.Tests')) {
+                New-Item -ItemType Directory -Force -Path (Join-Path $repo $folder) | Out-Null
+            }
+            $csproj = '<Project><PropertyGroup><PackageId>{0}</PackageId></PropertyGroup></Project>'
+            Set-Content -Path (Join-Path $repo 'src/Lib/Lib.csproj') -Value ($csproj -f 'Meshmakers.Real')
+            foreach ($hidden in @('src/web/node_modules/pkg/Hidden.csproj', 'src/Lib/bin/DebugL/Bin.csproj', 'src/Lib/obj/Obj.csproj', '.git/x/Git.csproj', 'node_modules/y/Root.csproj', 'tests/Lib.Tests/Lib.Tests.csproj')) {
+                Set-Content -Path (Join-Path $repo $hidden) -Value ($csproj -f "Meshmakers.$([IO.Path]::GetFileNameWithoutExtension($hidden))")
+            }
+            Set-Content -Path (Join-Path $repo 'Directory.Build.props') -Value '<Project><ItemGroup><PackageReference Include="Meshmakers.Common.Shared" Version="1" /></ItemGroup></Project>'
+
+            $files = @(Get-OctoPackageScanFiles -path $repo | ForEach-Object { [IO.Path]::GetRelativePath($repo, $_) -replace '\\', '/' } | Sort-Object)
+            $files | Should -Be @('Directory.Build.props', 'src/Lib/Lib.csproj')
+            $info = Get-OctoRepoPackageInfo -path $repo
+            @($info.Produces) | Should -Be @('Meshmakers.Real')
+            @($info.References) | Should -Be @('Meshmakers.Common.Shared')
+
+            # a repository without src/ is scanned from its root, still pruned
+            $flat = Join-Path $root 'octo-flat'
+            New-Item -ItemType Directory -Force -Path (Join-Path $flat 'Tool'), (Join-Path $flat 'node_modules/z') | Out-Null
+            Set-Content -Path (Join-Path $flat 'Tool/Tool.csproj') -Value ($csproj -f 'Meshmakers.Tool')
+            Set-Content -Path (Join-Path $flat 'node_modules/z/Z.csproj') -Value ($csproj -f 'Meshmakers.Z')
+            @((Get-OctoRepoPackageInfo -path $flat).Produces) | Should -Be @('Meshmakers.Tool')
+        }
+    }
+}
+
+Describe 'Sync reports stay small' {
+    BeforeEach {
+        $script:ws = New-FakeWorkspace
+        $blueprints = Join-Path $ws.Main '.octo/local-blueprint-catalog/blueprints/v1'
+        foreach ($i in 1..25) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $blueprints "Bp$i/1.0.0") | Out-Null
+            Set-Content -Path (Join-Path $blueprints "Bp$i/1.0.0/blueprint.yaml") -Value "name: Bp$i"
+        }
+    }
+
+    It 'New-OctoEnvironment -Json lists counts and at most 20 names; -Detailed lists all' {
+        $doc = Get-Doc (New-OctoEnvironment -env env-small -repos octo-sdk -Json)
+        $catalog = $doc.data.sync.catalogs.'local-blueprint-catalog'
+        $catalog.counts.copied | Should -Be 26
+        @($catalog.copied).Count | Should -Be 20
+        $catalog.truncated | Should -BeTrue
+        $doc.data.sync.nuget.counts.copied | Should -Be 3
+        $doc.data.sync.nuget.truncated | Should -BeFalse
+
+        Remove-Item (Join-Path $ws.Root 'wt-env-small/.octo/sync') -Recurse -Force
+        Remove-Item (Join-Path $ws.Root 'wt-env-small/.octo/local-blueprint-catalog') -Recurse -Force
+        $full = Get-Doc (Sync-OctoEnvironment -env env-small -Detailed -Json)
+        @($full.data.catalogs.'local-blueprint-catalog'.copied).Count | Should -Be 26
+        $full.data.catalogs.'local-blueprint-catalog'.truncated | Should -BeFalse
+        $full.data.detailed | Should -BeTrue
+    }
+}
