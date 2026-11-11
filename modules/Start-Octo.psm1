@@ -114,8 +114,10 @@ This example starts all services using "MyCustomSystem" as the system database n
 .EXAMPLE
 Start-Octo -SystemDatabase "OctoSystem_s2" -TenantDatabasePrefix "s2_"
 
-This example starts a second instance on the same MongoDB: its own system database, and its tenants get
-databases named s2_<tenantId>.
+This example starts an instance that shares the MongoDB with another one: its own system database, and its
+tenants get databases named s2_<tenantId>. The service ports are fixed, so it cannot run next to another
+Start-Octo stack on the same host (Identity and Asset Repo use 5000-5003): start it on another machine, or stop
+the other stack first.
 
 .EXAMPLE
 Start-Octo -nonInteractive $true -configuration DebugL -identityAssetRepoOnly $true
@@ -131,7 +133,6 @@ Use this function to selectively start OctoMesh services based on your requireme
         [string]$branch = "",
         [Parameter()] [string]$configuration = "Release",
         [Parameter()] [string]$SystemDatabase = "OctoSystem",
-        [Parameter()] [string]$TenantDatabasePrefix = "",
         [Parameter()] [Boolean]$botService = $true,
         [Parameter()] [Boolean]$identityService = $true,
         [Parameter()] [Boolean]$assetRepoService = $true,
@@ -154,7 +155,9 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$aiWorker = $false,
         [Parameter()] [Boolean]$s3Store = $true,
         [Parameter()] [Boolean]$httpActivator = $false,
-        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "https://{release}.localhost"
+        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "https://{release}.localhost",
+        # Last on purpose: a parameter in the middle would shift the positional binding of the ones after it.
+        [Parameter()] [string]$TenantDatabasePrefix = ""
     )
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Error "docker is not on PATH. Install Docker before running Start-Octo."
@@ -238,10 +241,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
 
     $env:OCTO_SYSTEM__SYSTEMDATABASENAME = $SystemDatabase
-    # AB#8797: only set when given, so a value from the caller's environment (octo-devstack slot) is kept.
-    if (-not [string]::IsNullOrWhiteSpace($TenantDatabasePrefix)) {
-        $env:OCTO_SYSTEM__TENANTDATABASEPREFIX = $TenantDatabasePrefix
-    }
+    Set-OctoTenantDatabasePrefixEnvironment -TenantDatabasePrefix $TenantDatabasePrefix
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
@@ -551,6 +551,30 @@ Use this function to selectively start OctoMesh services based on your requireme
     Write-Host "Jobs stopped"
 
     Get-ServiceStatus
+}
+
+# AB#8797: whether OCTO_SYSTEM__TENANTDATABASEPREFIX holds a value an earlier Start-Octo of this session set.
+$script:StartOctoSetTenantDatabasePrefix = $false
+
+<#
+.SYNOPSIS
+Sets OCTO_SYSTEM__TENANTDATABASEPREFIX for the services Start-Octo starts (AB#8797).
+
+.DESCRIPTION
+A given prefix is set. Without one, a value from the caller's environment (for example an octo-devstack slot)
+is kept, but a value an earlier Start-Octo of this session set is removed: otherwise a later start of another
+instance in the same shell would inherit that instance's prefix. The services inherit the environment when they
+start, so the value stays set after Start-Octo returns.
+#>
+function Set-OctoTenantDatabasePrefixEnvironment([string]$TenantDatabasePrefix) {
+    if (-not [string]::IsNullOrWhiteSpace($TenantDatabasePrefix)) {
+        $env:OCTO_SYSTEM__TENANTDATABASEPREFIX = $TenantDatabasePrefix
+        $script:StartOctoSetTenantDatabasePrefix = $true
+    }
+    elseif ($script:StartOctoSetTenantDatabasePrefix) {
+        Remove-Item Env:OCTO_SYSTEM__TENANTDATABASEPREFIX -ErrorAction SilentlyContinue
+        $script:StartOctoSetTenantDatabasePrefix = $false
+    }
 }
 
 Export-ModuleMember -Function @('Start-Octo')
