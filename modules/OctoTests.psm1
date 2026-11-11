@@ -834,19 +834,33 @@ function Resolve-OctoTestTarget {
         if ($null -eq $manifest) { throw "Environment $env does not exist." }
         $environmentPath = Invoke-OctoModuleFunction -module 'OctoEnvironment' -name 'Get-OctoEnvironmentPath' -arguments @{ env = $env }
         $basePath = Invoke-OctoModuleFunction -module 'OctoEnvironment' -name 'Get-OctoEnvironmentBasePath' -arguments @{ base = ([string]$manifest['base']) }
-        $order = @($manifest['repos'] | ForEach-Object { [pscustomobject]@{ Name = [string]$_['name']; Path = [string]$_['path']; Entry = $_ } })
-        if ($order.Count -eq 0) { throw "Environment $env holds no repository." }
+        $order = @($manifest['repos'] | Where-Object { $null -ne $_ } | ForEach-Object { [pscustomobject]@{ Name = [string]$_['name']; Path = [string]$_['path']; Entry = $_ } })
+        if ($order.Count -eq 0) { throw "Environment $env holds no repository - add one with Add-OctoEnvironmentRepo -env $env -repo <name>." }
+        $broken = @($order | Where-Object { [string]::IsNullOrWhiteSpace($_.Name) -or [string]::IsNullOrWhiteSpace($_.Path) })
+        if ($broken.Count -gt 0) { throw "The manifest of environment $env lists a repository without name or path ($environmentPath/.octo/environment.json)." }
         try { $selected = Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Resolve-OctoBuildRangeRepo' -arguments @{ name = $repo; order = $order } }
         catch { throw "$($_.Exception.Message -replace 'the build order', "environment $env") Tests of a repository outside the environment run in its base lane (-branch $($manifest['base']))." }
         $inPlace = [bool](Invoke-OctoModuleFunction -module 'OctoEnvironment' -name 'Test-OctoEnvironmentRepoInPlace' -arguments @{ repo = $selected.Entry; environmentPath = $environmentPath })
         return [pscustomobject]@{ Environment = $env; LanePath = $environmentPath; BasePath = $basePath; Repo = $selected.Name; RepoPath = $selected.Path; InPlace = $inPlace }
     }
 
-    $resolved = Resolve-OctoBranchRootPath -branch $branch
+    $root = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace([string]$root)) { throw "`$rootPath is not set - load modules/profile.ps1 first." }
+    $resolved = Resolve-OctoBranchRootPath -branch $branch -root ([string]$root)
     $lanePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($resolved.BranchRootPath))
     if (-not (Test-Path -LiteralPath $lanePath -PathType Container)) { throw "Checkout $lanePath does not exist." }
-    $order = @(Get-OctoBuildOrder -branchRootPath $lanePath -excludeFrontend $false -excludeAdditional $false)
-    $selected = Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Resolve-OctoBuildRangeRepo' -arguments @{ name = $repo; order = $order }
+    $order = @(Get-OctoBuildOrder -branchRootPath $lanePath -excludeFrontend $false -excludeAdditional $false | Where-Object { $null -ne $_ })
+    # Only folders named octo-* / mm-* are repositories of a lane (Get-OctoBuildOrder); say so instead of failing on
+    # an empty list or a name that cannot match.
+    $outside = ''
+    if (Test-Path -LiteralPath (Join-Path $lanePath $repo) -PathType Container) {
+        $outside = " The folder $(Join-Path $lanePath $repo) exists, but only folders named octo-* or mm-* are repositories of a lane."
+    }
+    if ($order.Count -eq 0) {
+        throw "Lane $lanePath holds no repository (no folder named octo-* or mm-*) - '$repo' cannot be resolved.$outside Pass the lane that holds the repositories with -branch (e.g. branches/main), or -env <environment>."
+    }
+    try { $selected = Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Resolve-OctoBuildRangeRepo' -arguments @{ name = $repo; order = $order } }
+    catch { throw "$($_.Exception.Message -replace 'the build order', "the build order of $lanePath")$outside" }
     return [pscustomobject]@{ Environment = $null; LanePath = $lanePath; BasePath = $null; Repo = $selected.Name; RepoPath = $selected.Path; InPlace = $false }
 }
 

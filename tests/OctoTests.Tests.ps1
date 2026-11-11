@@ -849,6 +849,55 @@ Describe 'Invoke-OctoTestRun' {
             $script:Calls.Count | Should -Be 0
         }
 
+        It 'reports a lane without repositories, a folder outside the build order and a broken manifest as clear preflight errors' {
+            $events = Join-Path $TestDrive 'events/preflight-order.jsonl'
+            if (Test-Path $events) { Remove-Item $events }
+            # a lane whose only folder is not named octo-* / mm-*: the build order is empty
+            New-TestRepo (Join-Path $ws.Root 'branches/tools/sample-tools') | Out-Null
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/tools -repo sample-tools -EventsFile $events -Json -ErrorAction SilentlyContinue)
+            $doc.data.success | Should -BeFalse
+            $doc.data.failedStep | Should -Be 'preflight'
+            $doc.data.error | Should -Match 'holds no repository \(no folder named octo-\* or mm-\*\)'
+            $doc.data.error | Should -Match 'sample-tools exists, but only folders named octo-\* or mm-\*'
+            $doc.data.error | Should -Not -Match 'Cannot bind'
+            $global:LASTEXITCODE | Should -Be 1
+            $records = @(Get-Content $events | ForEach-Object { $_ | ConvertFrom-Json })
+            @($records.event) | Should -Be @('done')
+            $records[0].failedStep | Should -Be 'preflight'
+
+            # the same folder next to real repositories
+            New-TestRepo (Join-Path $ws.Main 'sample-tools') | Out-Null
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo sample-tools -Json -ErrorAction SilentlyContinue)
+            $doc.data.failedStep | Should -Be 'preflight'
+            $doc.data.error | Should -Match 'not part of the build order of'
+            $doc.data.error | Should -Match 'only folders named octo-\* or mm-\*'
+
+            # a lane that does not exist, an environment without repositories or with an entry without path
+            (Get-Doc (Invoke-OctoTestRun -branch branches/nope -repo octo-sample-services -Json -ErrorAction SilentlyContinue)).data.error | Should -Match 'does not exist'
+            $manifestPath = Join-Path $ws.EnvPath '.octo/environment.json'
+            $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+            $manifest['repos'][0]['path'] = $null
+            Set-Content -Path $manifestPath -Value (ConvertTo-Json -InputObject $manifest -Depth 6)
+            $doc = Get-Doc (Invoke-OctoTestRun -env feat-a -repo octo-sample-services -Json -ErrorAction SilentlyContinue)
+            $doc.data.error | Should -Match 'lists a repository without name or path'
+            $doc.data.error | Should -Not -Match 'Cannot bind'
+            $manifest['repos'] = @()
+            Set-Content -Path $manifestPath -Value (ConvertTo-Json -InputObject $manifest -Depth 6)
+            (Get-Doc (Invoke-OctoTestRun -env feat-a -repo octo-sample-services -Json -ErrorAction SilentlyContinue)).data.error | Should -Match 'holds no repository'
+
+            $script:Calls.Count | Should -Be 0
+        }
+
+        It 'reports a missing $rootPath as a preflight error' {
+            $saved = $global:rootPath
+            try {
+                Remove-Variable -Name rootPath -Scope Global
+                (Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -Json -ErrorAction SilentlyContinue)).data.error | Should -Match 'rootPath is not set'
+                (Get-Doc (Invoke-OctoTestRun -env feat-a -repo octo-sample-services -Json -ErrorAction SilentlyContinue)).data.error | Should -Match 'rootPath is not set'
+            }
+            finally { $global:rootPath = $saved }
+        }
+
         It '-WhatIf plans without running, locking or writing events' {
             $events = Join-Path $TestDrive 'events/whatif.jsonl'
             [IO.File]::SetLastWriteTimeUtc((Join-Path $ws.Repo 'src/Sample/Order.cs'), $built.AddMinutes(10))
