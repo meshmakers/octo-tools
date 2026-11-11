@@ -1057,3 +1057,253 @@ Describe 'Credentials file and adoption base commit (CodeRabbit on 7328531)' {
     }
 }
 
+
+Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
+    BeforeAll {
+        # A commit that only origin has: pushed from a second clone, so the base checkout's remote ref is stale too.
+        function Add-OriginCommit([string]$name, [string]$file = 'upstream.txt') {
+            $clone = Join-Path $TestDrive "clones/$name-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+            Invoke-TestGit $TestDrive clone -q (Join-Path $TestDrive "origins/$name.git") $clone | Out-Null
+            Set-Content -Path (Join-Path $clone $file) -Value 'upstream'
+            Invoke-TestGit $clone add -A | Out-Null
+            Invoke-TestGit $clone commit -q -m "upstream $name" | Out-Null
+            Invoke-TestGit $clone push -q origin main | Out-Null
+            return [string](Invoke-TestGit $clone rev-parse HEAD)
+        }
+    }
+    BeforeEach { $script:ws = New-FakeWorkspace }
+
+    It 'a consumer starts from the fetched origin/main, and the drift of the stale local checkout is reported' {
+        New-OctoEnvironment -env 'env-o' -repos octo-sdk -branchName 'feature/o' -Json | Out-Null
+        $identity = Join-Path $ws.Main 'octo-identity-services'
+        $local = [string](Invoke-TestGit $identity rev-parse HEAD)
+        $upstream = Add-OriginCommit 'octo-identity-services'
+
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-o' -repo octo-identity-services -role consumer -Json -WarningAction SilentlyContinue)
+        $doc.data.success | Should -BeTrue
+        $wt = Join-Path $ws.Root 'wt-env-o/octo-identity-services'
+        (Invoke-TestGit $wt rev-parse HEAD) | Should -Be $upstream
+        (Invoke-TestGit $identity rev-parse HEAD) | Should -Be $local          # the base checkout itself is not moved
+        @($doc.data.baseDrift).Count | Should -Be 1
+        $doc.data.baseDrift[0].repo | Should -Be 'octo-identity-services'
+        $doc.data.baseDrift[0].baseRef | Should -Be 'origin/main'
+        $doc.data.baseDrift[0].behind | Should -Be 1
+        $doc.data.baseDrift[0].ahead | Should -Be 0
+        $doc.data.baseDrift[0].localCommit | Should -Be $local
+        ($doc.data.warnings -join ' ') | Should -Match 'octo-identity-services: the local checkout .* is 1 commit\(s\) behind and 0 ahead of origin/main'
+        $entry = (Get-Content (Join-Path $ws.Root 'wt-env-o/.octo/environment.json') -Raw | ConvertFrom-Json).repos | Where-Object name -eq 'octo-identity-services'
+        $entry.baseCommit | Should -Be $upstream
+        $entry.baseRef | Should -Be 'origin/main'
+        # a consumer at origin's commit has no unpushed work: Remove is not blocked
+        (Get-Doc (Get-OctoEnvironment -env 'env-o' -Json)).data.repos | Where-Object name -eq 'octo-identity-services' | ForEach-Object unpushed | Should -Be 0
+    }
+
+    It '-localBase keeps the local checkout''s commit (also when it is ahead of origin)' {
+        New-OctoEnvironment -env 'env-l' -repos octo-sdk -branchName 'feature/l' -Json | Out-Null
+        $identity = Join-Path $ws.Main 'octo-identity-services'
+        Add-OriginCommit 'octo-identity-services' | Out-Null
+        Set-Content -Path (Join-Path $identity 'local.txt') -Value 'local'
+        Invoke-TestGit $identity add -A | Out-Null
+        Invoke-TestGit $identity commit -q -m 'local only' | Out-Null
+        $local = [string](Invoke-TestGit $identity rev-parse HEAD)
+
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-l' -repo octo-identity-services -role consumer -localBase -Json)
+        $doc.data.localBase | Should -BeTrue
+        @($doc.data.baseDrift).Count | Should -Be 0
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-env-l/octo-identity-services') rev-parse HEAD) | Should -Be $local
+        $doc.data.added[0].baseRef | Should -Be 'HEAD'
+
+        # without the switch: 1 behind, 1 ahead
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-l' -repo octo-cli -role consumer -Json)
+        @($doc.data.baseDrift).Count | Should -Be 0     # octo-cli is in step with origin
+    }
+
+    It 'a new feature branch starts from origin/main without tracking it; an existing branch is not rebased' {
+        $upstream = Add-OriginCommit 'octo-sdk'
+        Invoke-TestGit (Join-Path $ws.Main 'mm-common') branch 'feature/n' | Out-Null
+        Add-OriginCommit 'mm-common' | Out-Null
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-n' -repos 'octo-sdk,mm-common' -branchName 'feature/n' -Json -WarningAction SilentlyContinue)
+        $doc.data.success | Should -BeTrue
+        $sdk = Join-Path $ws.Root 'wt-env-n/octo-sdk'
+        (Invoke-TestGit $sdk rev-parse HEAD) | Should -Be $upstream
+        (& git -C $sdk config --get 'branch.feature/n.merge') | Should -BeNullOrEmpty
+        @($doc.data.baseDrift.repo) | Should -Be @('octo-sdk')
+        # mm-common: the existing branch decides - still at the old commit, baseCommit = merge base, no drift row
+        $common = $doc.data.manifest.repos | Where-Object name -eq 'mm-common'
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-env-n/mm-common') rev-parse HEAD) | Should -Be (Invoke-TestGit (Join-Path $ws.Main 'mm-common') rev-parse HEAD)
+        $common.baseCommit | Should -Be (Invoke-TestGit (Join-Path $ws.Main 'mm-common') rev-parse HEAD)
+        $common.baseRef | Should -Be 'feature/n'
+    }
+
+    It 'a base checkout without an upstream uses origin''s default branch; an unreachable origin falls back to the last fetched ref with a warning' {
+        $cli = Join-Path $ws.Main 'octo-cli'
+        $upstream = Add-OriginCommit 'octo-cli'
+        Invoke-TestGit $cli checkout -q --detach | Out-Null
+        New-OctoEnvironment -env 'env-d' -repos octo-sdk -branchName 'feature/d' -Json | Out-Null
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-d' -repo octo-cli -role consumer -Json -WarningAction SilentlyContinue)
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-env-d/octo-cli') rev-parse HEAD) | Should -Be $upstream
+
+        $identity = Join-Path $ws.Main 'octo-identity-services'
+        Invoke-TestGit $identity remote set-url origin (Join-Path $TestDrive 'origins/gone.git') | Out-Null
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-d' -repo octo-identity-services -role consumer -Json -WarningAction SilentlyContinue)
+        $doc.data.success | Should -BeTrue
+        ($doc.data.warnings -join ' ') | Should -Match 'git fetch origin main failed'
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-env-d/octo-identity-services') rev-parse HEAD) | Should -Be (Invoke-TestGit $identity rev-parse HEAD)
+    }
+
+    It 'says which environment repositories are newer than the seeded packages and which libraries outside are behind' {
+        Add-OriginCommit 'octo-sdk' | Out-Null
+        Add-OriginCommit 'octo-construction-kit-engine' | Out-Null
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-f' -repos octo-sdk -branchName 'feature/f' -Json -WarningAction SilentlyContinue)
+        $doc.data.success | Should -BeTrue
+        @($doc.data.feedSnapshot.rebuildInEnvironment) | Should -Be @('octo-sdk')
+        @($doc.data.feedSnapshot.staleProducers).Count | Should -Be 1
+        $doc.data.feedSnapshot.staleProducers[0].repo | Should -Be 'octo-construction-kit-engine'
+        $doc.data.feedSnapshot.staleProducers[0].behind | Should -Be 1
+        @($doc.data.feedSnapshot.staleProducers[0].consumedBy) | Should -Be @('octo-sdk')
+        ($doc.data.feedSnapshot.hints -join ' ') | Should -Match 'Invoke-BuildEnvironment -env env-f rebuilds them'
+        ($doc.data.feedSnapshot.hints -join ' ') | Should -Match 'Add-OctoEnvironmentRepo -env env-f -repo octo-construction-kit-engine -role consumer'
+
+        # in step with origin, or -localBase: nothing to say
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-g' -repos octo-cli -branchName 'feature/g' -Json)
+        @($doc.data.feedSnapshot.rebuildInEnvironment).Count | Should -Be 0
+        @($doc.data.feedSnapshot.hints).Count | Should -Be 0
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-h' -repos octo-sdk -branchName 'feature/h' -localBase -Json)
+        @($doc.data.feedSnapshot.staleProducers).Count | Should -Be 0
+    }
+}
+
+Describe 'Developer tools next to the lanes in an environment (AB#8815)' {
+    BeforeEach {
+        $script:ws = New-FakeWorkspace
+        foreach ($tool in @('octo-tools', 'octo-devstack')) {
+            New-FakeRepo $ws.Root $tool { param($r) New-Item -ItemType Directory -Force -Path (Join-Path $r 'src') | Out-Null; Set-Content -Path (Join-Path $r 'src/readme.txt') -Value 'tool' } | Out-Null
+        }
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName OctoEnvironment Invoke-KillDotnet { Write-OctoJson -Command 'Invoke-KillDotnet' -Data ([ordered]@{ success = $true; exitCode = 0; killedCount = 0; processes = @() }) }
+        $script:built = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { $script:built.Add($entry.Name); [pscustomobject]@{ Success = $true; LogFile = $null } }
+    }
+
+    It 'New-OctoEnvironment and Add-OctoEnvironmentRepo take octo-tools / octo-devstack from <rootPath>; the build skips them' {
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-t' -repos 'octo-sdk,tools' -branchName 'feature/t' -Json)
+        $doc.data.success | Should -BeTrue
+        @($doc.data.toolRepos) | Should -Be @('octo-tools')
+        $envPath = Join-Path $ws.Root 'wt-env-t'
+        (Invoke-TestGit (Join-Path $envPath 'octo-tools') rev-parse --abbrev-ref HEAD) | Should -Be 'feature/t'
+        @(Invoke-TestGit (Join-Path $ws.Root 'octo-tools') worktree list).Count | Should -Be 2
+
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-t' -repo octo-devstack -Json)
+        $doc.data.success | Should -BeTrue
+        @($doc.data.toolRepos) | Should -Be @('octo-devstack')
+
+        $plan = Get-Doc (Invoke-BuildEnvironment -env 'env-t' -DryRun -Json)
+        $plan.data.whatIf | Should -BeTrue
+        @($plan.data.repositories.repo) | Should -Be @('octo-sdk')
+        @($plan.data.environment.toolRepos) | Should -Be @('octo-tools', 'octo-devstack')
+
+        $run = Get-Doc (Invoke-BuildEnvironment -env 'env-t' -Json)
+        $run.data.success | Should -BeTrue
+        @($script:built) | Should -Be @('octo-sdk')
+
+        (Get-Doc (Remove-OctoEnvironment -env 'env-t' -Json)).data.success | Should -BeTrue
+        Test-Path $envPath | Should -BeFalse
+        @(Invoke-TestGit (Join-Path $ws.Root 'octo-tools') worktree list).Count | Should -Be 1
+    }
+
+    It 'an environment that holds only tools has nothing to build: success, a plan, a done event' {
+        (Get-Doc (New-OctoEnvironment -env 'env-u' -repos octo-tools -branchName 'feature/u' -Json)).data.success | Should -BeTrue
+        $plan = Get-Doc (Invoke-BuildEnvironment -env 'env-u' -DryRun -Json)
+        $plan.data.success | Should -BeTrue
+        $plan.data.whatIf | Should -BeTrue
+        @($plan.data.repositories).Count | Should -Be 0
+        $plan.data.note | Should -Match 'only developer tools \(octo-tools\)'
+        $events = Join-Path $TestDrive 'events-tools.jsonl'
+        $run = Get-Doc (Invoke-BuildEnvironment -env 'env-u' -EventsFile $events -Json)
+        $run.data.success | Should -BeTrue
+        $global:LASTEXITCODE | Should -Be 0
+        @(Get-Content $events | ForEach-Object { ($_ | ConvertFrom-Json).event }) | Should -Be @('plan', 'done')
+        $script:built.Count | Should -Be 0
+    }
+
+    It 'an in-place tool worktree in the manifest does not break the build plan' {
+        New-OctoEnvironment -env 'env-v' -repos octo-sdk -branchName 'feature/v' -Json | Out-Null
+        $toolWorktree = Join-Path $ws.Root 'octo-tools/.claude/worktrees/x'
+        Invoke-TestGit (Join-Path $ws.Root 'octo-tools') worktree add -q -b 'feature/tool' $toolWorktree | Out-Null
+        (Get-Doc (Add-OctoEnvironmentRepo -env 'env-v' -path $toolWorktree -inPlace -Json -WarningAction SilentlyContinue)).data.success | Should -BeTrue
+        $plan = Get-Doc (Invoke-BuildEnvironment -env 'env-v' -DryRun -Json)
+        @($plan.data.repositories.repo) | Should -Be @('octo-sdk')
+        @($plan.data.environment.toolRepos) | Should -Be @('octo-tools')
+        $plan.data.environment.inPlace.PSObject.Properties.Name | Should -Not -Contain 'octo-tools'
+        (Get-Doc (Invoke-BuildEnvironment -env 'env-v' -Json)).data.success | Should -BeTrue
+        @($script:built) | Should -Be @('octo-sdk')
+    }
+
+    It 'a tool name is refused when it is no checkout next to the lanes' {
+        Remove-Item (Join-Path $ws.Root 'octo-devstack') -Recurse -Force
+        (Get-Doc (New-OctoEnvironment -env 'env-w' -repos octo-devstack -Json)).data.error | Should -Match "not a git checkout in .* or "
+    }
+}
+
+Describe 'New-OctoEnvironment is atomic (AB#8815)' {
+    BeforeEach {
+        $script:ws = New-FakeWorkspace
+        $script:common = Join-Path $ws.Main 'mm-common'
+        $script:engine = Join-Path $ws.Main 'octo-construction-kit-engine'
+        $script:sdk = Join-Path $ws.Main 'octo-sdk'
+        $script:envPath = Join-Path $ws.Root 'wt-env-x'
+    }
+
+    It 'rolls back worktrees, folder and the branches it created - never a branch that existed - and the same call succeeds after the fix' {
+        Invoke-TestGit $common branch 'feature/x' | Out-Null          # existed before: must survive the rollback
+        Invoke-TestGit $sdk checkout -q -b 'feature/x' | Out-Null     # checked out in the base lane: worktree add fails
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-x' -repos 'mm-common,octo-construction-kit-engine,octo-sdk' -branchName 'feature/x' -Json)
+        $doc.data.success | Should -BeFalse
+        $global:LASTEXITCODE | Should -Be 1
+        $doc.data.error | Should -Match 'rolled back'
+        $doc.data.error | Should -Match 'git worktree add failed for octo-sdk'
+        @($doc.data.rolledBack.worktrees).Count | Should -Be 2
+        @($doc.data.rolledBack.branches) | Should -Be @('octo-construction-kit-engine: feature/x')
+        $doc.data.rolledBack.folder | Should -BeTrue
+        @($doc.data.rolledBack.errors).Count | Should -Be 0
+
+        Test-Path $envPath | Should -BeFalse
+        foreach ($repo in @($common, $engine, $sdk)) { @(Invoke-TestGit $repo worktree list).Count | Should -Be 1 }
+        (& git -C $engine rev-parse --verify --quiet 'refs/heads/feature/x') | Should -BeNullOrEmpty
+        (& git -C $common rev-parse --verify --quiet 'refs/heads/feature/x') | Should -Not -BeNullOrEmpty
+        (Get-Doc (Get-OctoEnvironment -Json)).data.environments.Count | Should -Be 0
+
+        Invoke-TestGit $sdk checkout -q main | Out-Null
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-x' -repos 'mm-common,octo-construction-kit-engine,octo-sdk' -branchName 'feature/x' -Json)
+        $doc.data.success | Should -BeTrue
+        @($doc.data.manifest.repos.name) | Should -Be @('mm-common', 'octo-construction-kit-engine', 'octo-sdk')
+        foreach ($name in @('mm-common', 'octo-construction-kit-engine', 'octo-sdk')) { (Invoke-TestGit (Join-Path $envPath $name) rev-parse --abbrev-ref HEAD) | Should -Be 'feature/x' }
+    }
+
+    It 'rolls back when seeding the feed fails, and when a consumer of -addAffected fails' {
+        Mock -ModuleName OctoEnvironment Invoke-OctoEnvironmentSync { throw 'disk full' }
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-x' -repos octo-sdk -branchName 'feature/y' -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'disk full'
+        Test-Path $envPath | Should -BeFalse
+        (& git -C $sdk rev-parse --verify --quiet 'refs/heads/feature/y') | Should -BeNullOrEmpty
+
+        Mock -ModuleName OctoEnvironment Invoke-OctoEnvironmentSync { [pscustomobject]@{ Nuget = $null; Catalogs = @(); PurgedFromCache = @() } }
+        Mock -ModuleName OctoEnvironment Get-OctoEnvironmentAffected { [pscustomobject]@{ Features = @('octo-construction-kit-engine'); Graph = [pscustomobject]@{ Affected = @([pscustomobject]@{ repo = 'octo-sdk' }, [pscustomobject]@{ repo = 'octo-gone' }); Consumers = @{} } } }
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-x' -repos octo-construction-kit-engine -branchName 'feature/y' -addAffected -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match "octo-gone"
+        @($doc.data.rolledBack.worktrees).Count | Should -Be 2
+        Test-Path $envPath | Should -BeFalse
+        foreach ($repo in @($engine, $sdk)) { @(Invoke-TestGit $repo worktree list).Count | Should -Be 1 }
+        (& git -C $engine rev-parse --verify --quiet 'refs/heads/feature/y') | Should -BeNullOrEmpty
+    }
+
+    It 'without -Json a failure ends with an error that says it was rolled back' {
+        Invoke-TestGit $sdk checkout -q -b 'feature/x' | Out-Null
+        New-OctoEnvironment -env 'env-x' -repos octo-sdk -branchName 'feature/x' -ErrorVariable problems -ErrorAction SilentlyContinue
+        # (git's own stderr lines are recorded too; the cmdlet's error is the last one)
+        "$($problems[-1])" | Should -Match 'rolled back .* run the same call again'
+        Test-Path $envPath | Should -BeFalse
+    }
+}

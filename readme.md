@@ -268,7 +268,7 @@ on several features at the same time without one build overwriting another's `99
 touching `branches/main/nuget`.
 
 ```powershell
-# 1. Create it: feature worktree(s) on <user>/AB#8625_enum-null, feed and catalogs copied from branches/main
+# 1. Create it: feature worktree(s) on <user>/AB#8625_enum-null from origin/main, feed and catalogs copied from branches/main
 New-OctoEnvironment -env ab8625-enum-null -repos octo-construction-kit-engine -workItem AB#8625
 
 # 2. Which repositories does the change reach? Add the ones between the library and the service you run
@@ -287,9 +287,29 @@ Get-OctoEnvironment -env ab8625-enum-null
 Remove-OctoEnvironment -env ab8625-enum-null
 ```
 
-- **Consumers** are detached worktrees at the commit `branches/main/<repo>` is on; treat them as read-only. A library
+- **Base: `origin/main`, not the local checkout.** New feature branches and consumer worktrees start from the
+  upstream of the base checkout's branch (`branches/main`: `origin/main`), fetched first; a checkout without an
+  upstream uses origin's default branch. A stale local `branches/main/<repo>` no longer leaks into the environment:
+  when its HEAD differs, a warning names the repository and how far it is behind/ahead (`-Json`: `baseDrift`).
+  `-localBase` (`New-OctoEnvironment`, `Add-OctoEnvironmentRepo`) starts from the local checkout's commit instead.
+  An existing feature branch is checked out as it is. The manifest records per repository `baseCommit` (the commit
+  the worktree started from) and `baseRef` (`origin/main`, `HEAD`, or the existing branch).
+- **Seeded packages come from the local base lane.** The feed is a copy of `branches/main/nuget`, built there from
+  the local checkouts. The output (`-Json`: `feedSnapshot`) says which environment repositories are newer than
+  those packages - `Invoke-BuildEnvironment` rebuilds them - and which libraries outside the environment are behind
+  their upstream in the base lane, so their seeded packages may lack what the newer consumers need (`CS0246`):
+  add them as consumers, or update and rebuild them in the base lane and run `Sync-OctoEnvironment`.
+- **Consumers** are detached worktrees; treat them as read-only. A library
   change reaches a service only if every repository between them is rebuilt in the environment, otherwise main's
   prebuilt packages bind to the new library at runtime (`MissingMethodException`).
+- **Developer tools** (`octo-tools`, `octo-devstack`) live next to the lanes (`<rootPath>/<repo>`), not in the base
+  lane; `-repos octo-tools` / `Add-OctoEnvironmentRepo -repo octo-devstack` add a worktree of them all the same.
+  `Invoke-BuildEnvironment` does not build them (`-Json`: `environment.toolRepos`); an environment that holds only
+  tools builds nothing and succeeds.
+- **Atomic creation.** A `New-OctoEnvironment` that fails (a worktree, the seeding, `-addAffected`) rolls back what
+  it created - its worktrees, the environment folder and the branches it created, never a branch that existed
+  before - so the same call can simply be repeated after the cause is fixed (`-Json`: `rolledBack`).
+  `Add-OctoEnvironmentRepo` is repeatable instead: what it added stays in the manifest, the same call adds the rest.
 - **Snapshot, not live.** Main's packages and catalogs are copied when the environment is created and refreshed only
   on request (`Sync-OctoEnvironment`, `-syncMain`). Packages built in the environment always win; catalog indexes
   changed on both sides are merged. Main's feed is never added as a second NuGet source.
