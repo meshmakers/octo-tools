@@ -1,5 +1,5 @@
 # Dot-sourced by the agent-docs test files inside BeforeAll. Builds throw-away repositories
-# under the temp folder and reads the tools' output in both of its shapes.
+# under Pester's TestDrive and reads the tools' output in both of its shapes.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test fixtures under the temp folder; -WhatIf has no meaning here')]
 param()
 
@@ -19,8 +19,12 @@ $script:Entry = @(
 ) -join "`n"
 $script:DocOne = "---`ndescription: One routed document.`napplies_to: src/**`n---`n# One`n`nText.`n"
 
+# Fixtures live in Pester's TestDrive, not in the user's temp folder: PowerShell's file cmdlets get slow below a
+# folder with many entries (a temp folder with 47,000 leftovers cost 45 ms per Get-ChildItem, 120 s per run), and
+# TestDrive is always a fresh folder. Outside a Pester run the temp folder is used.
+$script:FixtureRoot = if ($TestDrive) { [string]$TestDrive } else { [System.IO.Path]::GetTempPath() }
 function New-TempDir {
-    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('adocs-' + [guid]::NewGuid().ToString('N'))
+    $root = Join-Path $script:FixtureRoot ('adocs-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $root | Out-Null
     $script:Fixtures.Add($root)
     return $root
