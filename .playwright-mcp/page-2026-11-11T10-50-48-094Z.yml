@@ -1,0 +1,37 @@
+- generic [active] [ref=f87e1]:
+  - link "Skip to content" [ref=f87e2] [cursor=pointer]:
+    - /url: "#view"
+  - banner [ref=f87e3]:
+    - link "octo-devstack" [ref=f87e4] [cursor=pointer]:
+      - /url: "#/stack"
+    - navigation "Views" [ref=f87e5]:
+      - link "Stack" [ref=f87e6] [cursor=pointer]:
+        - /url: "#/stack"
+      - link "Builds" [ref=f87e7] [cursor=pointer]:
+        - /url: "#/builds"
+      - link "Profiles" [ref=f87e8] [cursor=pointer]:
+        - /url: "#/profiles"
+      - link "Configuration" [ref=f87e9] [cursor=pointer]:
+        - /url: "#/config"
+    - status [ref=f87e10]: Updated 11:50:43
+  - main [ref=f87e11]:
+    - heading "Configuration in effect." [level=1] [ref=f87e117]
+    - paragraph [ref=f87e118]: Read-only. Secret-looking values are masked with the rules of service_env; provider scripts are shown, their results never. Change the configuration with the MCP tools.
+    - generic [ref=f87e119]:
+      - navigation "Configuration views" [ref=f87e120]:
+        - link "Daemon" [ref=f87e121] [cursor=pointer]:
+          - /url: "#/config/daemon"
+        - link "Services" [ref=f87e122] [cursor=pointer]:
+          - /url: "#/config/services"
+        - link "Profiles" [ref=f87e123] [cursor=pointer]:
+          - /url: "#/config/profiles"
+        - link "Slots" [ref=f87e124] [cursor=pointer]:
+          - /url: "#/config/slots"
+        - link "Running services" [ref=f87e125] [cursor=pointer]:
+          - /url: "#/config/running"
+        - link "Environments" [ref=f87e126] [cursor=pointer]:
+          - /url: "#/config/environments"
+      - button "Reload" [ref=f87e128] [cursor=pointer]
+    - paragraph [ref=f87e129]: Loading the configuration…
+  - contentinfo [ref=f87e13]:
+    - paragraph [ref=f87e14]: Read-only. Start, stop and build through the MCP tools of octo-devstack; they take the lease.

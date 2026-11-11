@@ -1,0 +1,20 @@
+- generic [active] [ref=f88e1]:
+  - link "Skip to content" [ref=f88e2] [cursor=pointer]:
+    - /url: "#view"
+  - banner [ref=f88e3]:
+    - link "octo-devstack" [ref=f88e4] [cursor=pointer]:
+      - /url: "#/stack"
+    - navigation "Views" [ref=f88e5]:
+      - link "Stack" [ref=f88e6] [cursor=pointer]:
+        - /url: "#/stack"
+      - link "Builds" [ref=f88e7] [cursor=pointer]:
+        - /url: "#/builds"
+      - link "Profiles" [ref=f88e8] [cursor=pointer]:
+        - /url: "#/profiles"
+      - link "Configuration" [ref=f88e9] [cursor=pointer]:
+        - /url: "#/config"
+    - status [ref=f88e10]
+  - main [ref=f88e11]:
+    - paragraph [ref=f88e12]: Reading the stack…
+  - contentinfo [ref=f88e13]:
+    - paragraph [ref=f88e14]: Read-only. Start, stop and build through the MCP tools of octo-devstack; they take the lease.

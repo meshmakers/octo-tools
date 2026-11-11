@@ -1,0 +1,35 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - paragraph [ref=e4]: octo-devstack
+      - heading "Reading the stack…" [level=1] [ref=e5]
+      - paragraph
+    - paragraph
+  - main [ref=e6]:
+    - region [ref=e7]:
+      - heading "Services" [level=2] [ref=e8]
+      - table [ref=e9]:
+        - rowgroup [ref=e10]:
+          - row [ref=e11]:
+            - columnheader "Signal" [ref=e12]
+            - columnheader "Service" [ref=e14]
+            - columnheader "State" [ref=e15]
+            - columnheader "Started by" [ref=e16]
+            - columnheader "Runs from" [ref=e17]
+            - columnheader "PID" [ref=e18]
+            - columnheader "Up" [ref=e19]
+            - columnheader "Ports" [ref=e20]
+        - rowgroup
+    - complementary [ref=e21]:
+      - region [ref=e22]:
+        - heading "Profiles" [level=2] [ref=e23]
+        - list
+      - region [ref=e24]:
+        - heading "Waiting for the stack" [level=2] [ref=e25]
+        - list
+      - region [ref=e26]:
+        - heading "Builds" [level=2] [ref=e27]
+        - list "Build queue"
+        - list
+      - region [ref=e28]:
+        - heading "Configuration" [level=2] [ref=e29]
