@@ -320,9 +320,15 @@ Describe 'Docker capacity and limits (AB#8835)' {
     It 'limits each new Testcontainers container once with docker update and leaves the resource reaper alone' {
         InModuleScope OctoTests {
             $script:Updates = [System.Collections.Generic.List[string]]::new()
+            $since = [DateTimeOffset]::new(2026, 11, 11, 16, 30, 0, [TimeSpan]::FromHours(1))
             $script:Running = @(
-                'aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111|testcontainers/ryuk:0.14.0|testcontainers-ryuk-1',
-                'bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222|mongo:8.0.15|fixture-mongo')
+                'aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111|testcontainers/ryuk:0.14.0|testcontainers-ryuk-1|2026-11-11 16:30:05 +0100 CET',
+                'bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222|mongo:8.0.15|fixture-mongo|2026-11-11 16:30:07 +0100 CET',
+                # labelled too, but created before this run took the lock (another session's, or left over): never touched
+                'dddddddddddd4444444444444444444444444444444444444444444444444444|mongo:8.0.15|someone-elses-mongo|2026-11-11 15:10:00 +0100 CET',
+                # the same moment in another time zone counts the same; a creation time that cannot be read is not touched
+                'eeeeeeeeeeee5555555555555555555555555555555555555555555555555555|mongo:8.0.15|utc-mongo|2026-11-11 14:10:00 +0000 UTC',
+                'ffffffffffff6666666666666666666666666666666666666666666666666666|mongo:8.0.15|no-time-mongo|unknown')
             Mock Invoke-OctoDocker {
                 if ($arguments[0] -eq 'ps') {
                     ($arguments -join ' ') | Should -Match '--filter label=org\.testcontainers=true --filter status=running'
@@ -332,9 +338,10 @@ Describe 'Docker capacity and limits (AB#8835)' {
                 $failed = $arguments[-1] -like 'cccc*'
                 return [pscustomobject]@{ ExitCode = $(if ($failed) { 1 } else { 0 }); Output = @($(if ($failed) { 'fixture: cannot update' })) }
             }
-            $state = @{ Seen = [System.Collections.Generic.HashSet[string]]::new(); Limited = [System.Collections.ArrayList]::new() }
+            $state = @{ Since = $since; Seen = [System.Collections.Generic.HashSet[string]]::new(); Limited = [System.Collections.ArrayList]::new() }
             Invoke-OctoDockerLimitPass -State $state -Cpus 2.5 -Memory '4g'
             Invoke-OctoDockerLimitPass -State $state -Cpus 2.5 -Memory '4g'
+            ($script:Updates -join ' ') | Should -Not -Match 'dddd|eeee|ffff'
             @($script:Updates) | Should -Be @('update --cpus 2.5 --memory 4g --memory-swap 4g bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222')
             $state.Limited.Count | Should -Be 1
             $state.Limited[0].id | Should -Be 'bbbbbbbbbbbb'
@@ -342,7 +349,7 @@ Describe 'Docker capacity and limits (AB#8835)' {
             $state.Limited[0].success | Should -BeTrue
 
             # a container that starts later is limited too; a failed update is reported, not thrown
-            $script:Running += 'cccccccccccc3333333333333333333333333333333333333333333333333333|rabbitmq:3|fixture-rabbit'
+            $script:Running += 'cccccccccccc3333333333333333333333333333333333333333333333333333|rabbitmq:3|fixture-rabbit|2026-11-11 15:31:00 +0000 UTC'
             Invoke-OctoDockerLimitPass -State $state -Cpus 2.5
             $script:Updates[-1] | Should -Be 'update --cpus 2.5 cccccccccccc3333333333333333333333333333333333333333333333333333'
             $state.Limited[1].success | Should -BeFalse
@@ -588,6 +595,10 @@ Describe 'Build state of a test project' {
             # no output: the integration project was never built; a Release run of the unit project neither
             $integration = $projects | Where-Object Name -eq 'Sample.IntegrationTests'
             (Get-OctoTestBuildState -project $integration -repositoryPath $repo -configuration DebugL).Reason | Should -Be 'no DebugL build output of Sample.IntegrationTests'
+            # a project the solution does not list is never compiled by a build with -verifyTests: the reason says so
+            Set-Content -Path (Join-Path $repo 'octo-sample-services.slnx') -Value '<Solution><Project Path="src/Sample/Sample.csproj" /><Project Path="tests/Sample.UnitTests/Sample.UnitTests.csproj" /></Solution>'
+            (Get-OctoTestBuildState -project $integration -repositoryPath $repo -configuration DebugL).Reason | Should -Be 'no DebugL build output of Sample.IntegrationTests (the project is not in octo-sample-services.slnx: a build with -verifyTests or -includeTests does not compile it)'
+            Remove-Item (Join-Path $repo 'octo-sample-services.slnx')
             (Get-OctoTestBuildState -project $unit -repositoryPath $repo -configuration Release).Current | Should -BeFalse
 
             # an output of a target framework that is no longer built does not make it stale

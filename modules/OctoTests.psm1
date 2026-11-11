@@ -445,6 +445,11 @@ function Invoke-OctoDockerLimitPass {
         was not seen before gets its CPU and memory limit with `docker update` - from outside the test code. The
         resource reaper (ryuk) is left alone. $State.Seen remembers the ids, $State.Limited collects
         { id; name; image; success; error }.
+        Only containers of this run are touched. Docker cannot tell which run started a container, so two facts stand
+        in for it: the label, and the creation time - a container created before $State.Since (the moment the run
+        took the test lock; 5 seconds of clock difference to the engine are allowed) is never changed, nor is one
+        whose creation time cannot be read. With the lock held, no other Invoke-OctoTestRun starts containers in that
+        window; a Testcontainers suite somebody starts by hand in that window is limited too.
         A limit set this way starts a moment after the container did: a process that sized itself to the whole VM at
         start (a JVM heap, a database cache) keeps that size; the memory limit then is a ceiling that kills it when it
         grows past it. Limits at creation need the test fixture (see the readme).
@@ -455,15 +460,20 @@ function Invoke-OctoDockerLimitPass {
         [string]$Memory = ''
     )
     if ($Cpus -le 0 -and -not $Memory) { return }
-    $list = Invoke-OctoDocker -arguments @('ps', '--no-trunc', '--filter', 'label=org.testcontainers=true', '--filter', 'status=running', '--format', '{{.ID}}|{{.Image}}|{{.Names}}')
+    $list = Invoke-OctoDocker -arguments @('ps', '--no-trunc', '--filter', 'label=org.testcontainers=true', '--filter', 'status=running', '--format', '{{.ID}}|{{.Image}}|{{.Names}}|{{.CreatedAt}}')
     if ($list.ExitCode -ne 0) { return }
     foreach ($row in $list.Output) {
-        $parts = ([string]$row) -split '\|', 3
-        if ($parts.Count -lt 3 -or $parts[0] -notmatch '^[0-9a-f]{12,}$') { continue }
+        $parts = ([string]$row) -split '\|', 4
+        if ($parts.Count -lt 4 -or $parts[0] -notmatch '^[0-9a-f]{12,}$') { continue }
         $id = $parts[0]
         if ($State.Seen.Contains($id)) { continue }
         [void]$State.Seen.Add($id)
         if ($parts[1] -match '(^|/)ryuk(:|$)|testcontainers/ryuk') { continue }
+        # "2026-11-11 16:34:50 +0100 CET": created before this run took the lock = not ours.
+        $created = [DateTimeOffset]::MinValue
+        $stamp = if ($parts[3] -match '^(?<time>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (?<sign>[+-])(?<hours>\d\d):?(?<minutes>\d\d)') { "$($Matches['time']) $($Matches['sign'])$($Matches['hours']):$($Matches['minutes'])" } else { '' }
+        if (-not [DateTimeOffset]::TryParseExact($stamp, 'yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$created)) { continue }
+        if ($State.Since -is [DateTimeOffset] -and $created -lt $State.Since.AddSeconds(-5)) { continue }
         $arguments = @('update')
         if ($Cpus -gt 0) { $arguments += @('--cpus', $Cpus.ToString([Globalization.CultureInfo]::InvariantCulture)) }
         if ($Memory) { $arguments += @('--memory', $Memory, '--memory-swap', $Memory) }
@@ -483,6 +493,8 @@ function Start-OctoDockerLimiter {
     if ($Cpus -le 0 -and -not $Memory) { return $null }
     $state = [hashtable]::Synchronized(@{
             Stop    = $false
+            # Containers created before this moment are not this run's.
+            Since   = [DateTimeOffset]::Now
             Seen    = [System.Collections.Generic.HashSet[string]]::new()
             Limited = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
         })
@@ -874,7 +886,17 @@ function Get-OctoTestBuildState {
     )
     $output = Get-OctoTestOutputTime -projectDirectory $project.Directory -assemblyName $project.AssemblyName -configuration $configuration
     if ($null -eq $output) {
-        return [pscustomobject]@{ Current = $false; Reason = "no $configuration build output of $($project.Name)" }
+        # A build with -verifyTests compiles the solution's projects: one that is not in the solution stays unbuilt.
+        $hint = ''
+        try {
+            $solution = Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Get-OctoRepoSolution' -arguments @{ path = $repositoryPath }
+            if ($solution -and $project.PSObject.Properties['RelativePath']) {
+                $inSolution = @(Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Get-OctoSolutionProjects' -arguments @{ solutionPath = $solution.FullName } | ForEach-Object { $_ -replace '\\', '/' })
+                if ($inSolution -notcontains $project.RelativePath) { $hint = " (the project is not in $($solution.Name): a build with -verifyTests or -includeTests does not compile it)" }
+            }
+        }
+        catch { $hint = '' }
+        return [pscustomobject]@{ Current = $false; Reason = "no $configuration build output of $($project.Name)$hint" }
     }
     if ($null -ne $newestSource -and $newestSource.Time -gt $output) {
         $relative = [IO.Path]::GetRelativePath($repositoryPath, $newestSource.File) -replace '\\', '/'

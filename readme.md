@@ -239,7 +239,9 @@ Get-OctoTestLock
   the engine's free memory (`docker info` minus what the running containers use) and refuses them below
   `-minDockerFreeMemoryGiB` (default 3; `-dockerCheck Warn` runs anyway, `Off` skips the check). While they run,
   every container Testcontainers starts is limited to `-dockerCpus` (default 4) and `-dockerMemory` (default `4g`)
-  with `docker update` - no change to the test code needed. That limit lands about a second after the container
+  with `docker update` - no change to the test code needed. Only containers of this run are touched: they carry
+  the Testcontainers label and were created after the run took the test lock; a labelled container that existed
+  before is never changed. That limit lands about a second after the container
   started; a fixture that wants it from the first moment reads the values the run puts into its environment:
 
   ```csharp
