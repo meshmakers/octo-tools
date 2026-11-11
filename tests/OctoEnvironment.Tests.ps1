@@ -1144,6 +1144,43 @@ Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
         $common.baseRef | Should -Be 'feature/n'
     }
 
+    It 'an existing branch that forked before the base checkout''s HEAD gives no drift row' {
+        $cli = Join-Path $ws.Main 'octo-cli'
+        Invoke-TestGit $cli branch 'feature/old' | Out-Null
+        Set-Content -Path (Join-Path $cli 'later.txt') -Value 'later'
+        Invoke-TestGit $cli add -A | Out-Null
+        Invoke-TestGit $cli commit -q -m 'main moved on' | Out-Null
+        Invoke-TestGit $cli push -q origin main | Out-Null
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-old' -repos octo-cli -branchName 'feature/old' -Json)
+        $doc.data.success | Should -BeTrue
+        @($doc.data.baseDrift).Count | Should -Be 0
+        $doc.data.manifest.repos[0].baseCommit | Should -Be (Invoke-TestGit $cli rev-parse 'feature/old')
+    }
+
+    It 'network calls never ask for credentials on the terminal, and the setting does not stay behind' {
+        $before = $env:GIT_TERMINAL_PROMPT
+        InModuleScope OctoEnvironment -Parameters @{ repo = (Join-Path $ws.Main 'octo-cli') } {
+            (Invoke-OctoEnvironmentGit -path $repo -arguments @('config', '--get', 'user.name') -noPrompt).ExitCode | Should -BeIn @(0, 1)
+            # with an upstream: fetch; without: ls-remote, then fetch
+            foreach ($upstreamExit in @(0, 1)) {
+                $script:seen = @()
+                $script:upstreamExit = $upstreamExit
+                Mock Invoke-OctoEnvironmentGit {
+                    $script:seen += , @{ Arguments = $arguments; NoPrompt = [bool]$noPrompt }
+                    if ($arguments -contains '@{upstream}') { return [pscustomobject]@{ ExitCode = $script:upstreamExit; Output = @('origin/main') } }
+                    if ($arguments[0] -eq 'ls-remote') { return [pscustomobject]@{ ExitCode = 0; Output = @("ref: refs/heads/main`tHEAD") } }
+                    [pscustomobject]@{ ExitCode = 0; Output = @('0123456789abcdef') }
+                }
+                Resolve-OctoEnvironmentBase -source $repo | Out-Null
+                $network = @($script:seen | Where-Object { $_.Arguments[0] -in 'fetch', 'ls-remote' })
+                $network.Count | Should -Be (1 + $upstreamExit)
+                foreach ($call in $network) { $call.NoPrompt | Should -BeTrue }
+                ($network | Where-Object { $_.Arguments[0] -eq 'fetch' }).Arguments[-1] | Should -Be '+refs/heads/main:refs/remotes/origin/main'
+            }
+        }
+        $env:GIT_TERMINAL_PROMPT | Should -Be $before
+    }
+
     It 'a base checkout without an upstream uses origin''s default branch; an unreachable origin falls back to the last fetched ref with a warning' {
         $cli = Join-Path $ws.Main 'octo-cli'
         $upstream = Add-OriginCommit 'octo-cli'
@@ -1269,6 +1306,14 @@ Describe 'Developer tools next to the lanes in an environment (AB#8815)' {
         $plan.data.environment.inPlace.PSObject.Properties.Name | Should -Not -Contain 'octo-tools'
         (Get-Doc (Invoke-BuildEnvironment -env 'env-v' -Json)).data.success | Should -BeTrue
         @($script:built) | Should -Be @('octo-sdk')
+    }
+
+    It 'a missing worktree of a real repository is a failure, not "only developer tools"' {
+        (Get-Doc (New-OctoEnvironment -env 'env-m' -repos 'octo-sdk,octo-tools' -branchName 'feature/m' -Json)).data.success | Should -BeTrue
+        Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree remove --force (Join-Path $ws.Root 'wt-env-m/octo-sdk') | Out-Null
+        $doc = Get-Doc (Invoke-BuildEnvironment -env 'env-m' -DryRun -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'worktree\(s\) of octo-sdk are missing'
     }
 
     It 'a tool name is refused when it is no checkout next to the lanes' {

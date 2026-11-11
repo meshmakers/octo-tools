@@ -314,7 +314,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
   when its HEAD differs, a warning names the repository and how far it is behind/ahead (`-Json`: `baseDrift`).
   `-localBase` (`New-OctoEnvironment`, `Add-OctoEnvironmentRepo`) starts from the local checkout's commit instead.
   An existing feature branch is checked out as it is. The manifest records per repository `baseCommit` (the commit
-  the worktree started from) and `baseRef` (`origin/main`, `HEAD`, or the existing branch).
+  the worktree started from) and `baseRef` (the remote ref it started from, e.g. `origin/main`; `HEAD`; or the existing branch).
 - **Seeded packages come from the local base lane.** The feed is a copy of `branches/main/nuget`, built there from
   the local checkouts. The output (`-Json`: `feedSnapshot`) says which environment repositories are newer than
   those packages - `Invoke-BuildEnvironment` rebuilds them - and which libraries outside the environment are behind
