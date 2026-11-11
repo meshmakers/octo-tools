@@ -384,6 +384,142 @@ function Remove-OctoTestLock {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+# Docker capacity and limits for test containers (AB#8835)
+# ---------------------------------------------------------------------------------------------------------------
+
+function Invoke-OctoDocker {
+    # The one place that calls the docker CLI (tests mock it). Returns { ExitCode; Output (string[]) }; exit code 127
+    # when docker is not installed.
+    param([Parameter(Mandatory = $true)] [string[]]$arguments)
+    if (-not (Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ ExitCode = 127; Output = @('the docker command is not on PATH') }
+    }
+    $output = @(& docker @arguments 2>&1 | ForEach-Object { "$_" })
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+}
+
+function ConvertTo-OctoByteCount {
+    # "6.154GiB", "572KiB", "3g", "1.5 GB", "2048" -> bytes; $null when it is no size.
+    param([string]$text)
+    if ([string]$text -notmatch '^\s*(?<number>\d+(\.\d+)?)\s*(?<unit>[kKmMgGtT]?)(?<binary>i?)[bB]?\s*$') { return $null }
+    $number = [double]::Parse($Matches['number'], [Globalization.CultureInfo]::InvariantCulture)
+    $power = switch ($Matches['unit'].ToLowerInvariant()) { 'k' { 1 } 'm' { 2 } 'g' { 3 } 't' { 4 } default { 0 } }
+    # docker prints kB/MB/GB (1000) and KiB/MiB/GiB (1024); a bare "3g" as in `docker run --memory 3g` is 1024-based.
+    $base = if ($Matches['binary'] -or $text -notmatch '[bB]\s*$') { 1024 } else { 1000 }
+    return [long]($number * [Math]::Pow($base, $power))
+}
+
+function Get-OctoDockerCapacity {
+    <#
+        What the Docker engine has and what its running containers use right now: { Available; Error; MemoryBytes;
+        Cpus; UsedBytes; FreeBytes; Containers = @({ Name; MemoryBytes }) }. On Docker Desktop the engine is one VM
+        that the kind cluster (MongoDB, CrateDB, RabbitMQ of the local stack) and every test container share.
+        Available is $false when docker cannot be asked; the caller decides what that means.
+    #>
+    $info = Invoke-OctoDocker -arguments @('info', '--format', '{{.MemTotal}} {{.NCPU}}')
+    $line = @($info.Output | Where-Object { $_ -match '^\d+ \d+$' }) | Select-Object -Last 1
+    if ($info.ExitCode -ne 0 -or -not $line) {
+        return [pscustomobject]@{ Available = $false; Error = "docker info failed: $((@($info.Output) | Select-Object -Last 1))"; MemoryBytes = $null; Cpus = $null; UsedBytes = $null; FreeBytes = $null; Containers = @() }
+    }
+    $memory = [long]($line -split ' ')[0]
+    $cpus = [int]($line -split ' ')[1]
+    $stats = Invoke-OctoDocker -arguments @('stats', '--no-stream', '--format', '{{.Name}}|{{.MemUsage}}')
+    $containers = @()
+    if ($stats.ExitCode -eq 0) {
+        $containers = @(foreach ($row in $stats.Output) {
+                if ($row -notmatch '^(?<name>[^|]+)\|(?<used>[^/]+)/') { continue }
+                $used = ConvertTo-OctoByteCount -text $Matches['used']
+                if ($null -ne $used) { [pscustomobject]@{ Name = $Matches['name']; MemoryBytes = $used } }
+            })
+    }
+    $usedTotal = [long](($containers | Measure-Object MemoryBytes -Sum).Sum)
+    return [pscustomobject]@{
+        Available = $true; Error = $(if ($stats.ExitCode -ne 0) { "docker stats failed: $((@($stats.Output) | Select-Object -Last 1))" })
+        MemoryBytes = $memory; Cpus = $cpus; UsedBytes = $usedTotal; FreeBytes = [Math]::Max([long]0, [long]($memory - $usedTotal)); Containers = $containers
+    }
+}
+
+function Invoke-OctoDockerLimitPass {
+    <#
+        One pass of the limiter: every running container Testcontainers started (label org.testcontainers=true) that
+        was not seen before gets its CPU and memory limit with `docker update` - from outside the test code. The
+        resource reaper (ryuk) is left alone. $State.Seen remembers the ids, $State.Limited collects
+        { id; name; image; success; error }.
+        Only containers of this run are touched. Docker cannot tell which run started a container, so two facts stand
+        in for it: the label, and the creation time - a container created before $State.Since (the moment the run
+        took the test lock; 5 seconds of clock difference to the engine are allowed) is never changed, nor is one
+        whose creation time cannot be read. With the lock held, no other Invoke-OctoTestRun starts containers in that
+        window; a Testcontainers suite somebody starts by hand in that window is limited too.
+        A limit set this way starts a moment after the container did: a process that sized itself to the whole VM at
+        start (a JVM heap, a database cache) keeps that size; the memory limit then is a ceiling that kills it when it
+        grows past it. Limits at creation need the test fixture (see the readme).
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$State,
+        [double]$Cpus = 0,
+        [string]$Memory = ''
+    )
+    if ($Cpus -le 0 -and -not $Memory) { return }
+    $list = Invoke-OctoDocker -arguments @('ps', '--no-trunc', '--filter', 'label=org.testcontainers=true', '--filter', 'status=running', '--format', '{{.ID}}|{{.Image}}|{{.Names}}|{{.CreatedAt}}')
+    if ($list.ExitCode -ne 0) { return }
+    foreach ($row in $list.Output) {
+        $parts = ([string]$row) -split '\|', 4
+        if ($parts.Count -lt 4 -or $parts[0] -notmatch '^[0-9a-f]{12,}$') { continue }
+        $id = $parts[0]
+        if ($State.Seen.Contains($id)) { continue }
+        [void]$State.Seen.Add($id)
+        if ($parts[1] -match '(^|/)ryuk(:|$)|testcontainers/ryuk') { continue }
+        # "2026-11-11 16:34:50 +0100 CET": created before this run took the lock = not ours.
+        $created = [DateTimeOffset]::MinValue
+        $stamp = if ($parts[3] -match '^(?<time>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (?<sign>[+-])(?<hours>\d\d):?(?<minutes>\d\d)') { "$($Matches['time']) $($Matches['sign'])$($Matches['hours']):$($Matches['minutes'])" } else { '' }
+        if (-not [DateTimeOffset]::TryParseExact($stamp, 'yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$created)) { continue }
+        if ($State.Since -is [DateTimeOffset] -and $created -lt $State.Since.AddSeconds(-5)) { continue }
+        $arguments = @('update')
+        if ($Cpus -gt 0) { $arguments += @('--cpus', $Cpus.ToString([Globalization.CultureInfo]::InvariantCulture)) }
+        if ($Memory) { $arguments += @('--memory', $Memory, '--memory-swap', $Memory) }
+        $arguments += $id
+        $update = Invoke-OctoDocker -arguments $arguments
+        [void]$State.Limited.Add([ordered]@{
+                id = $id.Substring(0, 12); name = $parts[2]; image = $parts[1]; success = ($update.ExitCode -eq 0)
+                error = $(if ($update.ExitCode -ne 0) { [string](@($update.Output) | Select-Object -Last 1) })
+            })
+    }
+}
+
+function Start-OctoDockerLimiter {
+    # Runs Invoke-OctoDockerLimitPass every second in a background thread until Stop-OctoDockerLimiter. Returns the
+    # handle { Job; State }, or $null when no limit is set.
+    param([double]$Cpus = 0, [string]$Memory = '')
+    if ($Cpus -le 0 -and -not $Memory) { return $null }
+    $state = [hashtable]::Synchronized(@{
+            Stop    = $false
+            # Containers created before this moment are not this run's.
+            Since   = [DateTimeOffset]::Now
+            Seen    = [System.Collections.Generic.HashSet[string]]::new()
+            Limited = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+        })
+    $job = Start-ThreadJob -ArgumentList $PSCommandPath, $state, $Cpus, $Memory -ScriptBlock {
+        param([string]$modulePath, $state, [double]$cpus, [string]$memory)
+        $module = Import-Module $modulePath -PassThru -Force
+        while (-not $state.Stop) {
+            try { & $module { param($s, $c, $m) Invoke-OctoDockerLimitPass -State $s -Cpus $c -Memory $m } $state $cpus $memory } catch { $null = $_ }
+            Start-Sleep -Milliseconds 1000
+        }
+    }
+    return [pscustomobject]@{ Job = $job; State = $state }
+}
+
+function Stop-OctoDockerLimiter {
+    # Stops the limiter thread and returns what it limited.
+    param($Limiter)
+    if ($null -eq $Limiter) { return @() }
+    $Limiter.State.Stop = $true
+    [void](Wait-Job -Job $Limiter.Job -Timeout 10)
+    Remove-Job -Job $Limiter.Job -Force -ErrorAction SilentlyContinue
+    return @($Limiter.State.Limited)
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Test projects of a repository
 # ---------------------------------------------------------------------------------------------------------------
 
@@ -424,7 +560,7 @@ function Read-OctoTestProjectFile {
         # their group) count, so a rule such as "projects named *Tests are test projects" marks nothing by mistake.
         [switch]$unconditionalOnly
     )
-    $info = [pscustomobject]@{ IsTestProject = $null; AssemblyName = $null; Packages = @(); ProjectReferences = @() }
+    $info = [pscustomobject]@{ IsTestProject = $null; AssemblyName = $null; OutputType = $null; Packages = @(); ProjectReferences = @() }
     try { [xml]$xml = Get-Content -LiteralPath $path -Raw }
     catch { Write-Warning "Cannot parse $path - ignored for the test project detection: $($_.Exception.Message)"; return $info }
     if ($unconditionalOnly) {
@@ -434,11 +570,57 @@ function Read-OctoTestProjectFile {
     if ($null -ne $flag) { $info.IsTestProject = ([string]$flag.InnerText).Trim() -ieq 'true' }
     $assembly = @($xml.SelectNodes("//*[local-name()='AssemblyName']")) | Select-Object -Last 1
     if ($null -ne $assembly -and ([string]$assembly.InnerText).Trim() -notmatch '\$\(') { $info.AssemblyName = ([string]$assembly.InnerText).Trim() }
+    $outputType = @($xml.SelectNodes("//*[local-name()='OutputType']")) | Select-Object -Last 1
+    if ($null -ne $outputType) { $info.OutputType = ([string]$outputType.InnerText).Trim() }
     $info.Packages = @($xml.SelectNodes("//*[local-name()='PackageReference']") | ForEach-Object { [string]$_.GetAttribute('Include') } | Where-Object { $_ })
     $directory = Split-Path -Parent $path
     $info.ProjectReferences = @($xml.SelectNodes("//*[local-name()='ProjectReference']") | ForEach-Object { [string]$_.GetAttribute('Include') } | Where-Object { $_ -and $_ -notmatch '\$\(' } |
         ForEach-Object { [IO.Path]::GetFullPath((Join-Path $directory ($_ -replace '\\', '/'))) })
     return $info
+}
+
+function Test-OctoTestPackageSet {
+    <#
+        Do these package references make a project a test project? Microsoft.NET.Test.Sdk (VSTest), or a framework
+        that brings its own runner on Microsoft.Testing.Platform: TUnit (the package that carries the engine and the TRX
+        report; TUnit.Engine alone does not count), MSTest, or xunit.v3 in an executable
+        (-outputType Exe). octo-communication-operator's tests reference only TUnit - no Test.Sdk, no IsTestProject.
+    #>
+    param([string[]]$packages = @(), [string]$outputType = '')
+    if ($packages -contains 'Microsoft.NET.Test.Sdk') { return $true }
+    if (@($packages | Where-Object { $_ -ieq 'TUnit' -or $_ -ieq 'MSTest' }).Count -gt 0) { return $true }
+    return ($outputType -ieq 'Exe' -and @($packages | Where-Object { $_ -match '^xunit\.v3($|\.)' }).Count -gt 0)
+}
+
+function Get-OctoTestRunner {
+    <#
+        'mtp' when the nearest global.json from the project folder up to the repository root selects
+        Microsoft.Testing.Platform ({ "test": { "runner": "Microsoft.Testing.Platform" } }): with the .NET 10 SDK
+        `dotnet test` then runs the test applications themselves and takes other arguments. Otherwise 'vstest'.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$projectDirectory, [Parameter(Mandatory = $true)] [string]$repositoryRoot)
+    # Returns { Runner; Directory }: Directory is the folder of the global.json that decided (the repository root
+    # without one) - `dotnet test` must start there, because the CLI reads global.json from its current folder up.
+    # The search goes on above the repository (a global.json in the lane folder applies to every repository below it);
+    # dotnet then starts in the repository root, from where the CLI finds that file.
+    $directory = $projectDirectory
+    while ($directory) {
+        $file = Join-Path $directory 'global.json'
+        if (Test-Path -LiteralPath $file -PathType Leaf) {
+            $runner = 'vstest'
+            try {
+                $json = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable
+                if ($json -is [System.Collections.IDictionary] -and $json['test'] -is [System.Collections.IDictionary] -and [string]$json['test']['runner'] -ieq 'Microsoft.Testing.Platform') { $runner = 'mtp' }
+            }
+            catch { Write-Warning "Cannot parse $file - the test runner counts as VSTest: $($_.Exception.Message)" }
+            $inside = $directory.Length -ge $repositoryRoot.Length -and $directory.StartsWith($repositoryRoot, [StringComparison]::OrdinalIgnoreCase)
+            return [pscustomobject]@{ Runner = $runner; Directory = $(if ($inside) { $directory } else { $repositoryRoot }) }
+        }
+        $parent = Split-Path -Parent $directory
+        if (-not $parent -or $parent -eq $directory) { break }
+        $directory = $parent
+    }
+    return [pscustomobject]@{ Runner = 'vstest'; Directory = $repositoryRoot }
 }
 
 function Get-OctoTestProjects {
@@ -475,9 +657,10 @@ function Get-OctoTestProjects {
             $directory = Split-Path -Parent $directory
         }
         $isTest = $own.IsTestProject
+        $allPackages = @($own.Packages) + @($inherited | ForEach-Object { $_.Packages })
         if ($null -eq $isTest) {
-            $isTest = ($own.Packages -contains 'Microsoft.NET.Test.Sdk') -or
-                @($inherited | Where-Object { $_.IsTestProject -eq $true -or $_.Packages -contains 'Microsoft.NET.Test.Sdk' }).Count -gt 0
+            $isTest = (Test-OctoTestPackageSet -packages $allPackages -outputType $own.OutputType) -or
+                @($inherited | Where-Object { $_.IsTestProject -eq $true }).Count -gt 0
         }
         if (-not $isTest) { continue }
 
@@ -503,6 +686,7 @@ function Get-OctoTestProjects {
         }
 
         $name = [IO.Path]::GetFileNameWithoutExtension($file)
+        $runner = Get-OctoTestRunner -projectDirectory (Split-Path -Parent $file) -repositoryRoot $root
         $projects += [pscustomobject]@{
             Name              = $name
             Path              = $file
@@ -511,6 +695,11 @@ function Get-OctoTestProjects {
             AssemblyName      = if ($own.AssemblyName) { $own.AssemblyName } else { $name }
             Docker            = [bool]$dockerReason
             DockerReason      = $dockerReason
+            # How `dotnet test` runs it (vstest | mtp) and which framework's filter and report options apply.
+            Runner            = $runner.Runner
+            # Where `dotnet test` starts: the folder whose global.json selected the runner.
+            RunnerDirectory   = $runner.Directory
+            Framework         = if (@($allPackages | Where-Object { $_ -ieq 'TUnit' }).Count -gt 0) { 'tunit' } elseif (@($allPackages | Where-Object { $_ -match '^xunit\.v3($|\.)' }).Count -gt 0) { 'xunit3' } else { 'other' }
             ProjectReferences = @($references | ForEach-Object { [pscustomobject]@{ Path = $_; Directory = (Split-Path -Parent $_); AssemblyName = $(if ((& $read $_).AssemblyName) { (& $read $_).AssemblyName } else { [IO.Path]::GetFileNameWithoutExtension($_) }) } })
         }
     }
@@ -576,6 +765,7 @@ function Read-OctoJUnitFile {
     [xml]$xml = Get-Content -LiteralPath $path -Raw
     $total = 0; $passed = 0; $failed = 0; $skipped = 0; $seconds = 0.0
     $failedTests = [System.Collections.Generic.List[object]]::new()
+    $passedTests = [System.Collections.Generic.List[string]]::new()
     foreach ($case in @($xml.SelectNodes('//testcase'))) {
         $total++
         $time = 0.0
@@ -584,7 +774,12 @@ function Read-OctoJUnitFile {
         $problem = $case.SelectSingleNode('failure')
         if ($null -eq $problem) { $problem = $case.SelectSingleNode('error') }
         if ($null -eq $problem) {
-            if ($null -ne $case.SelectSingleNode('skipped')) { $skipped++ } else { $passed++ }
+            if ($null -ne $case.SelectSingleNode('skipped')) { $skipped++ }
+            else {
+                $passed++
+                $passedFile = [string]$case.GetAttribute('classname'); $passedName = [string]$case.GetAttribute('name')
+                $passedTests.Add($(if ($passedFile -and $passedFile -ne $passedName) { "$passedFile :: $passedName" } else { $passedName }))
+            }
             continue
         }
         $failed++
@@ -608,7 +803,7 @@ function Read-OctoJUnitFile {
     }
     return [pscustomobject]@{
         Path = $path; Total = $total; Passed = $passed; Failed = $failed; Skipped = $skipped
-        DurationSeconds = $seconds; FailedTests = @($failedTests); RunErrors = @()
+        DurationSeconds = $seconds; FailedTests = @($failedTests); PassedTests = @($passedTests); RunErrors = @()
     }
 }
 
@@ -695,7 +890,17 @@ function Get-OctoTestBuildState {
     )
     $output = Get-OctoTestOutputTime -projectDirectory $project.Directory -assemblyName $project.AssemblyName -configuration $configuration
     if ($null -eq $output) {
-        return [pscustomobject]@{ Current = $false; Reason = "no $configuration build output of $($project.Name)" }
+        # A build with -verifyTests compiles the solution's projects: one that is not in the solution stays unbuilt.
+        $hint = ''
+        try {
+            $solution = Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Get-OctoRepoSolution' -arguments @{ path = $repositoryPath }
+            if ($solution -and $project.PSObject.Properties['RelativePath']) {
+                $inSolution = @(Invoke-OctoModuleFunction -module 'Invoke-BuildRange' -name 'Get-OctoSolutionProjects' -arguments @{ solutionPath = $solution.FullName } | ForEach-Object { $_ -replace '\\', '/' })
+                if ($inSolution -notcontains $project.RelativePath) { $hint = " (the project is not in $($solution.Name): a build with -verifyTests or -includeTests does not compile it)" }
+            }
+        }
+        catch { $hint = '' }
+        return [pscustomobject]@{ Current = $false; Reason = "no $configuration build output of $($project.Name)$hint" }
     }
     if ($null -ne $newestSource -and $newestSource.Time -gt $output) {
         $relative = [IO.Path]::GetRelativePath($repositoryPath, $newestSource.File) -replace '\\', '/'
@@ -749,7 +954,11 @@ function Read-OctoTrxFile {
         <class>.<method> for filters, DisplayName, Message, StackFrame, DurationSeconds) and RunErrors (run-level
         messages, e.g. an aborted test host).
     #>
-    param([Parameter(Mandatory = $true)] [string]$path)
+    param(
+        [Parameter(Mandatory = $true)] [string]$path,
+        # Names of passed tests to collect (-includePassed); 0 = none.
+        [int]$maxPassed = 0
+    )
     [xml]$xml = Get-Content -LiteralPath $path -Raw
     $methods = @{}
     foreach ($unitTest in @($xml.SelectNodes("//*[local-name()='TestDefinitions']/*[local-name()='UnitTest']"))) {
@@ -758,6 +967,7 @@ function Read-OctoTrxFile {
     }
     $total = 0; $passed = 0; $failed = 0; $skipped = 0
     $failedTests = [System.Collections.Generic.List[object]]::new()
+    $passedTests = [System.Collections.Generic.List[string]]::new()
     $durationSum = [TimeSpan]::Zero
     foreach ($result in @($xml.SelectNodes("//*[local-name()='Results']/*[local-name()='UnitTestResult']"))) {
         $total++
@@ -765,7 +975,14 @@ function Read-OctoTrxFile {
         [void][TimeSpan]::TryParse([string]$result.GetAttribute('duration'), [Globalization.CultureInfo]::InvariantCulture, [ref]$duration)
         $durationSum += $duration
         $outcome = [string]$result.GetAttribute('outcome')
-        if ($outcome -in @('Passed', 'PassedButRunAborted', 'Warning', 'Completed')) { $passed++; continue }
+        if ($outcome -in @('Passed', 'PassedButRunAborted', 'Warning', 'Completed')) {
+            $passed++
+            if ($passedTests.Count -lt $maxPassed) {
+                $method = $methods[[string]$result.GetAttribute('testId')]
+                $passedTests.Add((Get-OctoTestFilterName -className $(if ($method) { $method.GetAttribute('className') }) -methodName $(if ($method) { $method.GetAttribute('name') }) -testName $result.GetAttribute('testName')))
+            }
+            continue
+        }
         if ($outcome -notin @('Failed', 'Error', 'Timeout', 'Aborted')) { $skipped++; continue }
         $failed++
         $method = $methods[[string]$result.GetAttribute('testId')]
@@ -801,11 +1018,12 @@ function Read-OctoTrxFile {
     $runErrors = @($xml.SelectNodes("//*[local-name()='ResultSummary']/*[local-name()='RunInfos']/*[local-name()='RunInfo'][@outcome='Error' or @outcome='Failed']/*[local-name()='Text']") |
         ForEach-Object { ([string]$_.InnerText).Trim() } |
         # xunit repeats every failed test as a run-level "[xUnit.net 00:00:01.14]  <test> [FAIL]" line: not a run error.
-        Where-Object { $_ -and $_ -notmatch '^\[xUnit\.net [\d:.]+\]\s+.*\[FAIL\]$' } |
+        # Microsoft.Testing.Platform repeats its exit code there: no news either.
+        Where-Object { $_ -and $_ -notmatch '^\[xUnit\.net [\d:.]+\]\s+.*\[FAIL\]$' -and $_ -notmatch '^Exit code indicates failure' } |
         ForEach-Object { if ($_.Length -gt $script:MaxMessageLength) { $_.Substring(0, $script:MaxMessageLength) + ' ...' } else { $_ } })
     return [pscustomobject]@{
         Path = $path; Total = $total; Passed = $passed; Failed = $failed; Skipped = $skipped
-        DurationSeconds = $seconds; FailedTests = @($failedTests); RunErrors = $runErrors
+        DurationSeconds = $seconds; FailedTests = @($failedTests); PassedTests = @($passedTests); RunErrors = $runErrors
     }
 }
 
@@ -857,18 +1075,116 @@ function Get-OctoTestFilterChunks {
     return @($chunks)
 }
 
+function Get-OctoTestFilterCalls {
+    <#
+        The `dotnet test` calls of one test project: per call the filter arguments and how they read.
+        Returns { Calls = @({ Display; Arguments }); Mismatch } - Mismatch is set (and Calls empty) when -filter is
+        written in a form the project's runner does not take.
+
+        -filter is passed through in the project's own filter language:
+          VSTest (and MSTest/NUnit on Microsoft.Testing.Platform): an expression, --filter FullyQualifiedName~Name
+          TUnit:   a tree-node filter,  --treenode-filter /*/*/ClassName/*      (starts with "/")
+          xunit.v3 on Microsoft.Testing.Platform: a query filter, --filter-query /*/*/ClassName/*   (starts with "/")
+        -failedNames (-rerunFailed, <namespace>.<class>.<method>) become calls that run exactly those tests:
+          VSTest:   FullyQualifiedName=..|.. clauses, combined with -filter, split at -maxLength
+          TUnit:    one tree-node filter per class, /*/<namespace>/<class>/(<method>|<method>)
+          xunit.v3: --filter-method <name> per test, split at -maxLength
+        For the two Microsoft.Testing.Platform forms -filter is not combined with the rerun (no AND there).
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $project,
+        [string]$filter = '',
+        [string[]]$failedNames = $null,
+        [int]$maxLength = 6000
+    )
+    $runner = if ($project.PSObject.Properties['Runner']) { [string]$project.Runner } else { 'vstest' }
+    $framework = if ($project.PSObject.Properties['Framework']) { [string]$project.Framework } else { 'other' }
+    $kind = if ($runner -ne 'mtp') { 'expression' } elseif ($framework -eq 'tunit') { 'treenode' } elseif ($framework -eq 'xunit3') { 'query' } else { 'expression' }
+    $call = { param([string]$display, [string[]]$arguments) [pscustomobject]@{ Display = $display; Arguments = @($arguments) } }
+    $isTree = $filter.TrimStart().StartsWith('/')
+    $mismatch = $null
+    if ($filter) {
+        if ($kind -eq 'expression' -and $isTree) { $mismatch = "the filter '$filter' is a tree filter; $($project.Name) takes a filter expression such as FullyQualifiedName~ClassName" }
+        elseif ($kind -eq 'treenode' -and -not $isTree) { $mismatch = "the filter '$filter' is a filter expression; $($project.Name) (TUnit on Microsoft.Testing.Platform) takes a tree-node filter such as /*/*/ClassName/* or /*/*/*/MethodName" }
+        elseif ($kind -eq 'query' -and -not $isTree) { $mismatch = "the filter '$filter' is a filter expression; $($project.Name) (xunit.v3 on Microsoft.Testing.Platform) takes a query filter such as /*/*/ClassName/* or /*/*/*/MethodName" }
+    }
+
+    if ($null -eq $failedNames) {
+        if ($mismatch) { return [pscustomobject]@{ Calls = @(); Mismatch = $mismatch } }
+        if (-not $filter) { return [pscustomobject]@{ Calls = @((& $call '' @())); Mismatch = $null } }
+        $option = switch ($kind) { 'treenode' { '--treenode-filter' } 'query' { '--filter-query' } default { '--filter' } }
+        return [pscustomobject]@{ Calls = @((& $call $filter @($option, $filter))); Mismatch = $null }
+    }
+
+    $names = @($failedNames | Where-Object { $_ } | Sort-Object -Unique)
+    $calls = [System.Collections.Generic.List[object]]::new()
+    if ($kind -eq 'expression') {
+        # The rerun is combined with -filter here: a filter this runner cannot take matches nothing, also in a rerun.
+        if ($mismatch) { return [pscustomobject]@{ Calls = @(); Mismatch = $mismatch } }
+        foreach ($chunk in @(Get-OctoTestFilterChunks -names $names -filter $filter -maxLength $maxLength)) { $calls.Add((& $call $chunk @('--filter', $chunk))) }
+    }
+    elseif ($kind -eq 'treenode') {
+        # <namespace>.<class>.<method>: one filter per class, its methods as alternatives.
+        $classes = [ordered]@{}
+        foreach ($name in $names) {
+            $cut = $name.LastIndexOf('.')
+            $class = if ($cut -gt 0) { $name.Substring(0, $cut) } else { '' }
+            $method = if ($cut -gt 0) { $name.Substring($cut + 1) } else { $name }
+            if (-not $classes.Contains($class)) { $classes[$class] = [System.Collections.Generic.List[string]]::new() }
+            $classes[$class].Add($method)
+        }
+        foreach ($class in $classes.Keys) {
+            $cut = $class.LastIndexOf('.')
+            $namespace = if ($cut -gt 0) { $class.Substring(0, $cut) } else { '*' }
+            $className = if ($cut -gt 0) { $class.Substring($cut + 1) } elseif ($class) { $class } else { '*' }
+            $prefix = "/*/$namespace/$className/"
+            $group = [System.Collections.Generic.List[string]]::new()
+            $length = $prefix.Length + 2
+            foreach ($method in $classes[$class]) {
+                if ($group.Count -gt 0 -and ($length + $method.Length + 1) -gt $maxLength) {
+                    $text = "$prefix($($group -join '|'))"; $calls.Add((& $call $text @('--treenode-filter', $text)))
+                    $group.Clear(); $length = $prefix.Length + 2
+                }
+                $group.Add($method); $length += $method.Length + 1
+            }
+            if ($group.Count -gt 0) { $text = "$prefix($($group -join '|'))"; $calls.Add((& $call $text @('--treenode-filter', $text))) }
+        }
+    }
+    else {
+        $group = [System.Collections.Generic.List[string]]::new()
+        $length = 0
+        $flush = {
+            $arguments = @(foreach ($name in $group) { '--filter-method'; $name })
+            $calls.Add((& $call (($group | ForEach-Object { "--filter-method $_" }) -join ' ') $arguments))
+        }
+        foreach ($name in $names) {
+            $added = $name.Length + 17
+            if ($group.Count -gt 0 -and ($length + $added) -gt $maxLength) { & $flush; $group.Clear(); $length = 0 }
+            $group.Add($name); $length += $added
+        }
+        if ($group.Count -gt 0) { & $flush }
+    }
+    return [pscustomobject]@{ Calls = @($calls); Mismatch = $null }
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------------------------------------------
 
 function Invoke-OctoDotnetTest {
     # The one place that starts `dotnet test` (tests mock it). All output goes to the log; returns the exit code.
+    # -workingDirectory: the repository - `dotnet test` reads global.json (the test runner) from the current folder up.
     param(
         [Parameter(Mandatory = $true)] [string[]]$arguments,
-        [Parameter(Mandatory = $true)] [string]$logFile
+        [Parameter(Mandatory = $true)] [string]$logFile,
+        [string]$workingDirectory = ''
     )
-    & dotnet @arguments *>> $logFile
-    return $LASTEXITCODE
+    if ($workingDirectory) { Push-Location -LiteralPath $workingDirectory }
+    try {
+        & dotnet @arguments *>> $logFile
+        return $LASTEXITCODE
+    }
+    finally { if ($workingDirectory) { Pop-Location } }
 }
 
 function Get-OctoTestLogErrors {
@@ -987,7 +1303,7 @@ function Resolve-OctoTestTarget {
 function Write-OctoTestRunSummary {
     # Human output: the failed tests first, then one line per test project.
     param([Parameter(Mandatory = $true)] [System.Collections.IDictionary]$data)
-    $failedProjects = @($data.projects | Where-Object { @($_.failedTests).Count -gt 0 -or $_.state -eq 'error' })
+    $failedProjects = @($data.projects | Where-Object { @($_.failedTests).Count -gt 0 -or $_.state -in @('error', 'noTests') })
     if ($failedProjects.Count -gt 0) {
         Write-Host ''
         Write-Host 'Failed tests:' -ForegroundColor Red
@@ -1007,11 +1323,11 @@ function Write-OctoTestRunSummary {
     Write-Host "Summary (Invoke-OctoTestRun, $($data.repo), $($data.configuration)):"
     Write-Host '---------------------------------'
     foreach ($project in @($data.projects)) {
-        $color = switch ($project.state) { 'passed' { 'Green' } 'failed' { 'Red' } 'error' { 'Red' } default { 'DarkGray' } }
+        $color = switch ($project.state) { 'passed' { 'Green' } 'failed' { 'Red' } 'error' { 'Red' } 'noTests' { 'Red' } default { 'DarkGray' } }
         $line = '{0,-55} {1,-8} total {2,5}  passed {3,5}  failed {4,4}  skipped {5,4}  {6,8}' -f $project.project, $project.state, $project.total, $project.passed, $project.failed, $project.skipped, (Format-OctoTestDuration -seconds $project.durationSeconds)
         Write-Host $line -ForegroundColor $color
         if ($project.note) { Write-Host "    $($project.note)" -ForegroundColor DarkGray }
-        if ($project.state -in @('failed', 'error')) {
+        if ($project.state -in @('failed', 'error', 'noTests')) {
             foreach ($file in @($project.trx)) { Write-Host "    trx: $file" -ForegroundColor DarkGray }
             if ($project.logFile) { Write-Host "    log: $($project.logFile)" -ForegroundColor DarkGray }
         }
@@ -1061,7 +1377,12 @@ function Format-OctoTestDuration {
     repeated -rerunFailed calls narrow down to what still fails.
 
     All test projects are run, also after one failed. $LASTEXITCODE is 0 when every executed test passed, else 1.
-    A run with -filter or -rerunFailed in which no test ran at all fails (the filter matches nothing).
+    A run with -filter or -rerunFailed in which no test ran at all fails (the filter matches nothing). Without a
+    filter, a project that runs no test fails the run (state noTests): it is never reported green.
+
+    Projects on Microsoft.Testing.Platform (the repository's global.json selects that runner: TUnit, xunit.v3) are
+    run with `dotnet test --project <csproj> ... -- --report-trx`, VSTest projects with `dotnet test <csproj>
+    --logger trx`; the result names the runner of each project.
 
 .PARAMETER env
     Feature environment (wt-<env>). Either -env or -branch.
@@ -1076,7 +1397,15 @@ function Format-OctoTestDuration {
     Test project(s): csproj name, path relative to the repository, or a unique part of the name. Default: all.
 
 .PARAMETER filter
-    A `dotnet test --filter` expression, e.g. 'FullyQualifiedName~RtEntityTests' or 'Category!=Slow'.
+    A filter in the language of the project's runner: for VSTest projects a `dotnet test --filter` expression, e.g.
+    'FullyQualifiedName~RtEntityTests' or 'Category!=Slow'; for TUnit a tree-node filter and for xunit.v3 on
+    Microsoft.Testing.Platform a query filter, both of the form '/<assembly>/<namespace>/<class>/<method>' with '*'
+    as wildcard, e.g. '/*/*/RtEntityTests/*'. A project whose runner cannot take the given form is not started
+    (state noMatch). Projects in which the filter matches no test are noMatch too; the run fails only when no test
+    ran in any project.
+
+.PARAMETER includePassed
+    Also list the names of the passed tests per project (passedTests), at most -maxPassed (default 200).
 
 .PARAMETER rerunFailed
     Run only the tests that failed in the last result of each selected project. Projects without failed tests in
@@ -1087,6 +1416,23 @@ function Format-OctoTestDuration {
 
 .PARAMETER dockerLock
     Auto (default): lock for projects with a Testcontainers reference. Always: for every project. Never: no lock.
+
+.PARAMETER dockerCheck
+    Refuse (default): do not start the Docker-heavy projects when the Docker engine has less free memory than
+    -minDockerFreeMemoryGiB (failedStep "docker"). Warn: start them anyway. Off: do not ask docker. The test
+    containers share the engine (on Docker Desktop one VM) with the kind cluster of the local stack.
+
+.PARAMETER minDockerFreeMemoryGiB
+    Free memory of the Docker engine the Docker-heavy projects need: its total memory minus what the running
+    containers use (default 3).
+
+.PARAMETER dockerCpus
+    CPU limit for every container Testcontainers starts during the run (default 4, 0 = none), set with
+    `docker update` about a second after the container started.
+
+.PARAMETER dockerMemory
+    Memory limit for those containers (default 4g, '' = none). A ceiling: the container is killed when it grows past
+    it.
 
 .PARAMETER lockTimeoutSeconds
     How long to wait for the machine-wide test lock (default 1800). 0 = fail at once when it is taken.
@@ -1128,8 +1474,14 @@ function Invoke-OctoTestRun {
         [int]$lockTimeoutSeconds = 1800,
         [int]$lockPollMilliseconds = 2000,
         [string]$lockPath = '',
+        [ValidateSet('Refuse', 'Warn', 'Off')] [string]$dockerCheck = 'Refuse',
+        [double]$minDockerFreeMemoryGiB = 3,
+        [double]$dockerCpus = 4,
+        [string]$dockerMemory = '4g',
         [string]$configuration = 'DebugL',
         [int]$maxFailures = 50,
+        [switch]$includePassed,
+        [int]$maxPassed = 200,
         [int]$maxFilterLength = 6000,
         [string]$EventsFile = '',
         [switch]$Json
@@ -1175,7 +1527,9 @@ function Invoke-OctoTestRun {
     $plan = @()
     foreach ($entry in $selected) {
         $projectResults = Join-Path $resultsRoot $entry.Name
-        $filters = @($filter)
+        $frontendEntry = Test-OctoFrontendTestProject $entry
+        $calls = @()
+        $noMatch = $null
         $skip = $null
         $rerunCount = $null
         $rerunFiles = @()
@@ -1186,16 +1540,25 @@ function Invoke-OctoTestRun {
             if ($null -eq $last) { $skip = 'no previous result - run the project without -rerunFailed first' }
             elseif ($failedNames.Count -eq 0 -and $last['state'] -eq 'error') { $skip = 'the last run produced no test result (state error) - run the project without -rerunFailed' }
             elseif ($failedNames.Count -eq 0) { $skip = 'no failed test in the last result' }
-            elseif (Test-OctoFrontendTestProject $entry) {
+            elseif ($frontendEntry) {
                 # A frontend rerun runs the spec files that held a failed test ("<spec file> :: <test name>").
                 $rerunFiles = @($failedNames | ForEach-Object { ([string]$_ -split ' :: ', 2)[0] } | Where-Object { $_ } | Sort-Object -Unique)
                 $rerunCount = @($failedNames | Sort-Object -Unique).Count
             }
             else {
-                $filters = @(Get-OctoTestFilterChunks -names $failedNames -filter $filter -maxLength $maxFilterLength)
+                $callPlan = Get-OctoTestFilterCalls -project $entry -filter $filter -failedNames $failedNames -maxLength $maxFilterLength
+                $calls = @($callPlan.Calls)
+                $noMatch = $callPlan.Mismatch
                 $rerunCount = @($failedNames | Sort-Object -Unique).Count
             }
         }
+        elseif (-not $frontendEntry) {
+            $callPlan = Get-OctoTestFilterCalls -project $entry -filter $filter -maxLength $maxFilterLength
+            $calls = @($callPlan.Calls)
+            # A filter in a form this project's runner does not take cannot match here: not run, not a failure.
+            $noMatch = $callPlan.Mismatch
+        }
+        $filters = if ($frontendEntry) { @($filter) } else { @($calls | ForEach-Object { $_.Display }) }
         $buildState = if (Test-OctoFrontendTestProject $entry) {
             [pscustomobject]@{ Current = $false; Reason = 'frontend tests: ng test builds the test bundle itself' }
         }
@@ -1211,6 +1574,9 @@ function Invoke-OctoTestRun {
             Project     = $entry
             ResultsPath = $projectResults
             Filters     = $filters
+            Calls       = $calls
+            NoMatch     = $noMatch
+            Runner      = if ($frontendEntry) { 'ng' } elseif ($entry.PSObject.Properties['Runner']) { $entry.Runner } else { 'vstest' }
             RerunFiles  = $rerunFiles
             Skip        = $skip
             RerunCount  = $rerunCount
@@ -1222,7 +1588,7 @@ function Invoke-OctoTestRun {
     }
     # Projects without Docker first, so the lock is held only while the Docker-heavy ones run.
     $plan = @(@($plan | Where-Object { -not $_.Docker }) + @($plan | Where-Object { $_.Docker }))
-    $runnable = @($plan | Where-Object { -not $_.Skip })
+    $runnable = @($plan | Where-Object { -not $_.Skip -and -not $_.NoMatch })
     if ($rerunFailed -and $runnable.Count -eq 0) {
         $withoutResult = @($plan | Where-Object { $_.Skip -like 'no previous result*' })
         if ($withoutResult.Count -eq $plan.Count) {
@@ -1249,6 +1615,13 @@ function Invoke-OctoTestRun {
     catch { & $fail $_.Exception.Message; return }
     $displayProperties = @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties | ForEach-Object { Hide-OctoUrlCredentials $_ })
     $lockNeeded = @($runnable | Where-Object { $_.Docker }).Count -gt 0
+    if ($dockerMemory -and $null -eq (ConvertTo-OctoByteCount -text $dockerMemory)) { & $fail "-dockerMemory '$dockerMemory' is no size (e.g. 4g, 2048m, or '' for no limit)."; return }
+    if ($lockNeeded) {
+        # For test fixtures that set the limits when they create a container (the only way to limit it from its first
+        # moment): the same values the run applies from outside afterwards.
+        if ($dockerCpus -gt 0) { $runEnvironment['OCTO_TEST_CONTAINER_CPUS'] = $dockerCpus.ToString([Globalization.CultureInfo]::InvariantCulture) }
+        if ($dockerMemory) { $runEnvironment['OCTO_TEST_CONTAINER_MEMORY_BYTES'] = [string](ConvertTo-OctoByteCount -text $dockerMemory) }
+    }
     $lockFile = if ([string]::IsNullOrWhiteSpace($lockPath)) { Get-OctoTestLockPath } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($lockPath) }
 
     $planReport = @($plan | ForEach-Object {
@@ -1263,6 +1636,8 @@ function Invoke-OctoTestRun {
                 rerunCount   = $_.RerunCount
                 rerunFiles   = @($_.RerunFiles | Where-Object { $_ })
                 skip         = $_.Skip
+                runner       = $_.Runner
+                noMatch      = $_.NoMatch
             }
         })
 
@@ -1297,6 +1672,7 @@ function Invoke-OctoTestRun {
             Write-Host ''
             Write-Host "  $($item.Project.Name)$(if ($item.Docker) { '  [docker: ' + $item.DockerReason + ']' })" -ForegroundColor Green
             if ($item.Skip) { Write-Host "    skipped: $($item.Skip)" -ForegroundColor Yellow; continue }
+            if ($item.NoMatch) { Write-Host "    not run: $($item.NoMatch)" -ForegroundColor Yellow; continue }
             Write-Host "    $(if ($item.NoBuild) { '--no-build' } else { 'builds first' }): $($item.BuildReason)"
             if ($null -ne $item.RerunCount -and (Test-OctoFrontendTestProject $item.Project)) {
                 Write-Host "    reruns $($item.RerunCount) failed test(s): npx ng test with --include for $(@($item.RerunFiles).Count) spec file(s)"
@@ -1310,7 +1686,7 @@ function Invoke-OctoTestRun {
         return
     }
 
-    & $emit 'plan' ([ordered]@{ repo = $repo; environment = $target.Environment; projects = @($planReport | ForEach-Object { [ordered]@{ project = $_.project; docker = $_.docker; noBuild = $_.noBuild; buildReason = $_.buildReason; skip = $_.skip } }); count = $plan.Count })
+    & $emit 'plan' ([ordered]@{ repo = $repo; environment = $target.Environment; projects = @($planReport | ForEach-Object { [ordered]@{ project = $_.project; runner = $_.runner; docker = $_.docker; noBuild = $_.noBuild; buildReason = $_.buildReason; skip = $_.skip; noMatch = $_.noMatch } }); count = $plan.Count })
     if (-not $Json) {
         Write-Host "Invoke-OctoTestRun ($configuration): $repo in $($target.LanePath) - $($runnable.Count) test project(s)" -ForegroundColor Cyan
     }
@@ -1318,6 +1694,28 @@ function Invoke-OctoTestRun {
     $results = [System.Collections.Generic.List[object]]::new()
     $lockState = [ordered]@{ required = $lockNeeded; path = $lockFile; acquired = $false; waitedSeconds = 0.0; staleRemoved = @(); blockedBy = $null }
     $lockId = $null
+    $limiter = $null
+    # AB#8835: what the Docker engine had when the Docker-heavy projects started, and what was limited.
+    $dockerState = [ordered]@{
+        required = $lockNeeded; checked = $false; check = $(if ($dockerCheck -eq 'Off') { 'off' } else { $null }); available = $null
+        memoryGiB = $null; cpus = $null; usedGiB = $null; freeGiB = $null; minFreeGiB = $minDockerFreeMemoryGiB; containers = @(); message = $null
+        limits = [ordered]@{ cpus = $(if ($dockerCpus -gt 0) { $dockerCpus } else { $null }); memory = $(if ($dockerMemory) { $dockerMemory } else { $null }) }
+        limited = @()
+    }
+    # The projects from $from on (0-based index into the plan) did not run.
+    $markNotRun = {
+        param([int]$from, [string]$note)
+        foreach ($pending in @($plan | Select-Object -Skip $from)) {
+            $results.Add([ordered]@{
+                    project = $pending.Project.Name; path = $pending.Project.Path; state = 'notRun'; success = $false; exitCode = $null
+                    docker = $pending.Docker; dockerReason = $pending.DockerReason; noBuild = $pending.NoBuild; buildReason = $pending.BuildReason
+                    filters = @($pending.Filters | Where-Object { $_ }); rerunCount = $pending.RerunCount
+                    total = 0; passed = 0; failed = 0; skipped = 0; durationSeconds = 0.0; failedTests = @(); truncated = $false
+                    passedTests = @(); passedTruncated = $false; errors = @(); runner = $pending.Runner
+                    note = $note; resultsPath = $null; trx = @(); logFile = $null
+                })
+        }
+    }
     $failedStep = $null
     $failedProject = $null
     $runError = $null
@@ -1354,13 +1752,22 @@ function Invoke-OctoTestRun {
                 durationSeconds = 0.0
                 failedTests     = @()
                 truncated       = $false
+                passedTests     = @()
+                passedTruncated = $false
                 errors          = @()
+                runner          = $item.Runner
                 note            = $item.Skip
                 resultsPath     = $null
                 trx             = @()
                 logFile         = $null
             }
             if ($item.Skip) {
+                $results.Add($result)
+                continue
+            }
+            if ($item.NoMatch) {
+                $result.state = 'noMatch'
+                $result.note = $item.NoMatch
                 $results.Add($result)
                 continue
             }
@@ -1384,20 +1791,50 @@ function Invoke-OctoTestRun {
                     $failedStep = 'lock'
                     $failedProject = $name
                     $runError = "The machine-wide test lock $lockFile is held by $(Format-OctoTestLockOwner -owner $lock.Owner); waited $([Math]::Round($lock.WaitedSeconds)) s (-lockTimeoutSeconds $lockTimeoutSeconds). The Docker-heavy project(s) $((@($runnable | Where-Object { $_.Docker } | ForEach-Object { $_.Project.Name })) -join ', ') were not run."
-                    foreach ($pending in @($plan | Select-Object -Skip ($index - 1))) {
-                        $results.Add([ordered]@{
-                                project = $pending.Project.Name; path = $pending.Project.Path; state = 'notRun'; success = $false; exitCode = $null
-                                docker = $pending.Docker; dockerReason = $pending.DockerReason; noBuild = $pending.NoBuild; buildReason = $pending.BuildReason
-                                filters = @($pending.Filters | Where-Object { $_ }); rerunCount = $pending.RerunCount
-                                total = 0; passed = 0; failed = 0; skipped = 0; durationSeconds = 0.0; failedTests = @(); truncated = $false; errors = @()
-                                note = 'not run: the machine-wide test lock was not available'; resultsPath = $null; trx = @(); logFile = $null
-                            })
-                    }
+                    & $markNotRun ($index - 1) 'not run: the machine-wide test lock was not available'
                     break   # reported below like every other result
                 }
                 $lockId = $lock.Id
                 $lockState.acquired = $true
                 & $emit 'lockAcquired' ([ordered]@{ path = $lockFile; waitedSeconds = $lock.WaitedSeconds })
+
+                # AB#8835: the test containers share the Docker engine (on Docker Desktop one VM) with the kind cluster
+                # of the local stack. Checked with the lock held, so no other test run changes the picture.
+                if ($dockerCheck -ne 'Off') {
+                    $capacity = Get-OctoDockerCapacity
+                    $dockerState.checked = $true
+                    $dockerState.available = [bool]$capacity.Available
+                    if (-not $capacity.Available) {
+                        # Cannot be judged from here (no CLI, another Docker host): the tests decide.
+                        $dockerState.check = 'unavailable'
+                        $dockerState.message = "Docker capacity not checked: $($capacity.Error)"
+                        if (-not $Json) { Write-Warning $dockerState.message }
+                    }
+                    else {
+                        $gib = { param([long]$bytes) [Math]::Round($bytes / 1GB, 1) }
+                        $dockerState.memoryGiB = & $gib $capacity.MemoryBytes
+                        $dockerState.cpus = $capacity.Cpus
+                        $dockerState.usedGiB = & $gib $capacity.UsedBytes
+                        $dockerState.freeGiB = & $gib $capacity.FreeBytes
+                        $dockerState.containers = @($capacity.Containers | Sort-Object MemoryBytes -Descending | Select-Object -First 5 | ForEach-Object { [ordered]@{ name = $_.Name; memoryGiB = (& $gib $_.MemoryBytes) } })
+                        if ($capacity.FreeBytes -lt ($minDockerFreeMemoryGiB * 1GB)) {
+                            $top = @($dockerState.containers | ForEach-Object { "$($_.name) $($_.memoryGiB) GiB" }) -join ', '
+                            $dockerState.message = "The Docker engine has $($dockerState.freeGiB) GiB of $($dockerState.memoryGiB) GiB free (running containers use $($dockerState.usedGiB) GiB: $top); the Docker-heavy tests need at least $minDockerFreeMemoryGiB GiB (-minDockerFreeMemoryGiB) or they starve the local stack's MongoDB, CrateDB and RabbitMQ in the same engine. Stop a stack you do not need, give the Docker VM more memory, or pass -dockerCheck Warn to run anyway."
+                            if ($dockerCheck -eq 'Refuse') {
+                                $dockerState.check = 'refused'
+                                $failedStep = 'docker'
+                                $failedProject = $name
+                                $runError = "$($dockerState.message) The Docker-heavy project(s) $((@($runnable | Where-Object { $_.Docker } | ForEach-Object { $_.Project.Name })) -join ', ') were not run."
+                                & $markNotRun ($index - 1) 'not run: the Docker engine has too little free memory'
+                                break
+                            }
+                            $dockerState.check = 'warned'
+                            if (-not $Json) { Write-Warning $dockerState.message }
+                        }
+                        else { $dockerState.check = 'ok' }
+                    }
+                }
+                $limiter = Start-OctoDockerLimiter -Cpus $dockerCpus -Memory $dockerMemory
             }
 
             $runPath = Join-Path $item.ResultsPath $runStamp
@@ -1406,7 +1843,7 @@ function Invoke-OctoTestRun {
             $logFile = Join-Path $runPath $(if ($frontend) { 'ng-test.log' } else { 'dotnet-test.log' })
             $result.resultsPath = $runPath
             $result.logFile = $logFile
-            & $emit 'testProjectStart' ([ordered]@{ repo = $repo; project = $name; index = $index; count = $plan.Count; docker = $item.Docker; noBuild = $item.NoBuild; buildReason = $item.BuildReason; calls = @($item.Filters).Count })
+            & $emit 'testProjectStart' ([ordered]@{ repo = $repo; project = $name; index = $index; count = $plan.Count; runner = $item.Runner; docker = $item.Docker; noBuild = $item.NoBuild; buildReason = $item.BuildReason; calls = $(if ($frontend) { 1 } else { @($item.Calls).Count }) })
             if (-not $Json) {
                 $mode = if ($item.NoBuild) { '--no-build' } else { "builds first: $($item.BuildReason)" }
                 Write-Host "==> $name ($mode)$(if ($item.Docker) { ' [test lock held]' })" -ForegroundColor Cyan
@@ -1414,6 +1851,7 @@ function Invoke-OctoTestRun {
             $projectWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $exitCode = 0
             $call = 0
+            $zeroTestCalls = 0
             if ($frontend) {
                 # One `ng test` call: headless (no watch), the JUnit report first (--output-file belongs to the first reporter).
                 $arguments = @('ng', 'test', '--watch=false', '--reporters=junit', "--output-file=$(Join-Path $runPath 'results.junit.xml')", '--reporters=default')
@@ -1422,29 +1860,50 @@ function Invoke-OctoTestRun {
                 "Invoke-OctoTestRun: npx $($arguments -join ' ') (in $($item.Project.Directory))" | Add-Content -LiteralPath $logFile
                 $exitCode = Invoke-OctoFrontendTest -directory $item.Project.Directory -arguments $arguments -logFile $logFile
             }
-            foreach ($expression in @($(if (-not $frontend) { $item.Filters }))) {
+            $mtp = $item.Runner -eq 'mtp'
+            foreach ($testCall in @($(if (-not $frontend) { $item.Calls }))) {
                 $call++
-                $trxName = if (@($item.Filters).Count -gt 1) { "results-$call.trx" } else { 'results.trx' }
-                $arguments = @('test', $item.Project.Path, '-c', $configuration)
-                # Only the first call of a chunked rerun may build.
-                if ($item.NoBuild -or $call -gt 1) { $arguments += '--no-build' }
-                $arguments += @('--results-directory', $runPath, '--logger', "trx;LogFileName=$trxName", '-nodeReuse:false')
-                if ($expression) { $arguments += @('--filter', $expression) }
-                $arguments += $propertyArgs
-                "Invoke-OctoTestRun: dotnet $(Hide-OctoUrlCredentials ($arguments -join ' '))" | Add-Content -LiteralPath $logFile
-                $callExit = Invoke-OctoDotnetTest -arguments $arguments -logFile $logFile
+                $trxName = if (@($item.Calls).Count -gt 1) { "results-$call.trx" } else { 'results.trx' }
+                if ($mtp) {
+                    # Microsoft.Testing.Platform (global.json): `dotnet test --project`, the report and filter options
+                    # belong to the test application and follow `--`. No -nodeReuse here: it would reach the application.
+                    $arguments = @('test', '--project', $item.Project.Path, '-c', $configuration)
+                    if ($item.NoBuild -or $call -gt 1) { $arguments += '--no-build' }
+                    $arguments += @('--results-directory', $runPath)
+                    $arguments += $propertyArgs
+                    $arguments += '--'
+                    $arguments += if ($item.Project.Framework -eq 'xunit3') { @('--report-xunit-trx', '--report-xunit-trx-filename', $trxName) } else { @('--report-trx', '--report-trx-filename', $trxName) }
+                    $arguments += @($testCall.Arguments)
+                }
+                else {
+                    $arguments = @('test', $item.Project.Path, '-c', $configuration)
+                    # Only the first call of a chunked rerun may build.
+                    if ($item.NoBuild -or $call -gt 1) { $arguments += '--no-build' }
+                    $arguments += @('--results-directory', $runPath, '--logger', "trx;LogFileName=$trxName", '-nodeReuse:false')
+                    $arguments += @($testCall.Arguments)
+                    $arguments += $propertyArgs
+                }
+                $startIn = if ($item.Project.PSObject.Properties['RunnerDirectory'] -and $item.Project.RunnerDirectory) { $item.Project.RunnerDirectory } else { $target.RepoPath }
+                "Invoke-OctoTestRun: dotnet $(Hide-OctoUrlCredentials ($arguments -join ' ')) (in $startIn)" | Add-Content -LiteralPath $logFile
+                $callExit = Invoke-OctoDotnetTest -arguments $arguments -logFile $logFile -workingDirectory $startIn
+                # Microsoft.Testing.Platform: 8 = no test ran (a filter that matches nothing in this call) - judged below.
+                if ($mtp -and $callExit -eq 8) { $callExit = 0; $zeroTestCalls++ }
                 if ($callExit -ne 0 -and $exitCode -eq 0) { $exitCode = $callExit }
             }
             $projectWatch.Stop()
 
             $trxFiles = @(Get-ChildItem -LiteralPath $runPath -Recurse -File -Filter $(if ($frontend) { '*.junit.xml' } else { '*.trx' }) -ErrorAction SilentlyContinue | Sort-Object FullName)
             $failedTests = [System.Collections.Generic.List[object]]::new()
+            $passedTests = [System.Collections.Generic.List[string]]::new()
+            # One more than is reported, so `passedTruncated` can tell that there were more.
+            $passedLimit = if ($includePassed) { [Math]::Max(0, $maxPassed) + 1 } else { 0 }
             $errors = [System.Collections.Generic.List[string]]::new()
             foreach ($file in $trxFiles) {
-                try { $trx = if ($frontend) { Read-OctoJUnitFile -path $file.FullName } else { Read-OctoTrxFile -path $file.FullName } }
+                try { $trx = if ($frontend) { Read-OctoJUnitFile -path $file.FullName } else { Read-OctoTrxFile -path $file.FullName -maxPassed $passedLimit } }
                 catch { $errors.Add("Cannot read $($file.FullName): $($_.Exception.Message)"); continue }
                 $result.total += $trx.Total; $result.passed += $trx.Passed; $result.failed += $trx.Failed; $result.skipped += $trx.Skipped
                 foreach ($test in $trx.FailedTests) { $failedTests.Add($test) }
+                if ($trx.PSObject.Properties['PassedTests']) { foreach ($test in @($trx.PassedTests)) { if ($passedTests.Count -lt $passedLimit) { $passedTests.Add([string]$test) } } }
                 foreach ($line in $trx.RunErrors) { $errors.Add($line) }
             }
             $result.exitCode = $exitCode
@@ -1454,18 +1913,30 @@ function Invoke-OctoTestRun {
                     [ordered]@{ name = $_.Name; displayName = $_.DisplayName; outcome = $_.Outcome; message = $_.Message; stackFrame = $_.StackFrame; durationSeconds = $_.DurationSeconds }
                 })
             $result.truncated = $failedTests.Count -gt @($result.failedTests).Count
+            if ($includePassed) {
+                $result.passedTests = @($passedTests | Select-Object -First ([Math]::Max(0, $maxPassed)))
+                $result.passedTruncated = $result.passed -gt @($result.passedTests).Count
+            }
+            $filteredRun = [bool]$filter -or $null -ne $item.RerunCount
             if ($result.failed -gt 0) { $result.state = 'failed' }
             elseif ($exitCode -ne 0) {
                 # No failed test, but dotnet failed: the build broke, the test host crashed, or no TRX was written.
                 $result.state = 'error'
                 foreach ($line in @(Get-OctoTestLogErrors -logFile $logFile)) { if (-not $errors.Contains($line)) { $errors.Add($line) } }
             }
+            elseif ($result.total -eq 0 -and $filteredRun) {
+                # Not a failure of this project: another project of the run may hold the tests the filter means.
+                $result.state = 'noMatch'
+                $result.note = 'no test matched the filter'
+            }
             elseif ($result.total -eq 0) {
+                # Without a filter a project that runs nothing is broken (wrong runner, discovery failed): never green.
                 $result.state = 'noTests'
-                $result.note = if (@($item.Filters | Where-Object { $_ }).Count -gt 0) { 'no test matched the filter' } else { 'the project ran no test' }
+                $result.note = 'the project ran no test although no filter was given'
+                foreach ($line in @(Get-OctoTestLogErrors -logFile $logFile)) { if (-not $errors.Contains($line)) { $errors.Add($line) } }
             }
             else { $result.state = 'passed' }
-            $result.success = $result.state -in @('passed', 'noTests')
+            $result.success = $result.state -in @('passed', 'noMatch')
             $result.errors = @($errors | Select-Object -First $script:MaxErrorLines)
             if (-not $result.success -and -not $failedProject) {
                 $failedProject = $name
@@ -1507,6 +1978,8 @@ function Invoke-OctoTestRun {
 
             # Release the lock as soon as the last Docker-heavy project is through.
             if ($lockId -and @($plan | Select-Object -Skip $index | Where-Object { $_.Docker -and -not $_.Skip }).Count -eq 0) {
+                $dockerState.limited = @(Stop-OctoDockerLimiter -Limiter $limiter)
+                $limiter = $null
                 [void](Exit-OctoTestLock -Id $lockId -LockPath $lockFile)
                 $lockId = $null
                 & $emit 'lockReleased' ([ordered]@{ path = $lockFile })
@@ -1521,6 +1994,7 @@ function Invoke-OctoTestRun {
         $finished = $true
     }
     finally {
+        if ($limiter) { $dockerState.limited = @(Stop-OctoDockerLimiter -Limiter $limiter) }
         if ($lockId) {
             [void](Exit-OctoTestLock -Id $lockId -LockPath $lockFile)
             & $emit 'lockReleased' ([ordered]@{ path = $lockFile })
@@ -1539,9 +2013,11 @@ function Invoke-OctoTestRun {
 
     # A filter (or a rerun) that matched nothing at all is a mistake, not a green run.
     $filtered = [bool]$filter -or [bool]$rerunFailed
-    if (-not $failedStep -and $filtered -and $totals.total -eq 0 -and @($results | Where-Object { $_.state -eq 'noTests' }).Count -gt 0) {
+    $unmatched = @($results | Where-Object { $_.state -eq 'noMatch' })
+    if (-not $failedStep -and $filtered -and $totals.total -eq 0 -and $unmatched.Count -gt 0) {
         $failedStep = 'tests'
-        $runError = "No test ran: $(if ($rerunFailed) { 'the failed tests of the last result no longer exist' } else { "the filter '$filter' matches no test" }) in $((@($results | Where-Object { $_.state -eq 'noTests' } | ForEach-Object { $_.project })) -join ', ')."
+        $reasons = @($unmatched | ForEach-Object { $_.note } | Where-Object { $_ -and $_ -ne 'no test matched the filter' } | Select-Object -Unique)
+        $runError = "No test ran: $(if ($rerunFailed) { 'the failed tests of the last result no longer exist' } else { "the filter '$filter' matches no test" }) in $(($unmatched | ForEach-Object { $_.project }) -join ', ').$(if ($reasons.Count -gt 0) { ' ' + ($reasons -join '; ') + '.' })"
     }
     $success = -not $failedStep
     $global:LASTEXITCODE = if ($success) { 0 } else { 1 }
@@ -1564,6 +2040,7 @@ function Invoke-OctoTestRun {
         lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
         msbuildProperties = $displayProperties
         lock           = $lockState
+        docker         = $dockerState
         resultsPath    = $resultsRoot
         projects       = @($results)
     }
