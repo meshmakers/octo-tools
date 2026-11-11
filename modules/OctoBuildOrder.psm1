@@ -13,6 +13,10 @@
                                                           that other additional repos consume)
         4. every remaining octo-* repository             (phase 'additional'; directory enumeration order,
                                                           i.e. alphabetical)
+        5. in a feature environment only: the repositories of its manifest that are neither mm-* nor
+           octo-* and hold a build.ps1                    (phase 'app'; manifest order) - consumer apps
+                                                          such as energy-community, which build against
+                                                          the frontend libraries. A lane never builds them.
 
     Phases 3 and 4 are dropped with -excludeAdditional. Changing the order here changes it for both
     cmdlets. Keep the comments on each entry up to date - they explain why the slot exists.
@@ -101,7 +105,7 @@ function Get-OctoBuildOrder {
         order Invoke-BuildAll builds them. Each entry is a PSCustomObject with:
           Name      - directory name (e.g. octo-construction-kit-engine)
           Path      - full path
-          Group     - phase: 'common' | 'ordered' | 'additional-ordered' | 'additional'
+          Group     - phase: 'common' | 'ordered' | 'additional-ordered' | 'additional' | 'app'
           Directory - the DirectoryInfo
 
     .PARAMETER branchRootPath
@@ -114,9 +118,10 @@ function Get-OctoBuildOrder {
         Drop both additional phases (same as Invoke-BuildAll).
 
     .PARAMETER additionalRepos
-        Repositories that are not folders of the lane, keyed by repository name (mm-* / octo-*) with the folder
-        they live in, e.g. an in-place worktree of a feature environment. They are ordered like a lane folder of
-        that name; a lane folder of the same name wins.
+        Repositories that are not folders of the lane, keyed by repository name with the folder they live in,
+        e.g. an in-place worktree of a feature environment. An mm-* / octo-* name is ordered like a lane folder of
+        that name (a lane folder of the same name wins); any other name is a consumer app and needs a build.ps1
+        (phase 'app', last).
 
     .EXAMPLE
         Get-OctoBuildOrder -branchRootPath (Join-Path $rootPath dev) | Format-Table Name, Group
@@ -136,6 +141,22 @@ function Get-OctoBuildOrder {
     $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*" | Where-Object { $_.Name -notin @('octo-tools', 'octo-devstack') } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name; Info = $_ } })
     $mmDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*" | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Info = $_ } })
+    # Consumer apps (AB#8819): only in a feature environment, and only the repositories its manifest names - a lane
+    # such as branches/main holds energy-community or voest-app too, and Invoke-BuildAll must not start building them.
+    $appDirectories = @()
+    $manifestPath = Join-Path (Join-Path $branchRootPath '.octo') 'environment.json'
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        $manifest = $null
+        try { $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { $manifest = $null }
+        foreach ($entry in @($(if ($manifest) { $manifest.repos }) | Where-Object { $null -ne $_ })) {
+            $name = [string]$entry.name
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -like 'mm-*' -or $name -like 'octo-*') { continue }
+            $folder = Join-Path $branchRootPath $name
+            if ((Test-Path -LiteralPath $folder -PathType Container) -and (Test-Path -LiteralPath (Join-Path $folder 'build.ps1') -PathType Leaf)) {
+                $appDirectories += [pscustomobject]@{ Name = $name; Info = (Get-Item -LiteralPath $folder) }
+            }
+        }
+    }
     foreach ($name in @($additionalRepos.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
         if ($name -in @('octo-tools', 'octo-devstack')) { continue }
         if (@($octoDirectories + $mmDirectories | Where-Object { $_.Name -ieq $name }).Count -gt 0) { continue }
@@ -144,7 +165,8 @@ function Get-OctoBuildOrder {
         $candidate = [pscustomobject]@{ Name = $name; Info = (Get-Item -LiteralPath $folder) }
         if ($name -like 'mm-*') { $mmDirectories += $candidate }
         elseif ($name -like 'octo-*') { $octoDirectories += $candidate }
-        else { throw "Get-OctoBuildOrder: -additionalRepos key '$name' is not an mm-* or octo-* repository name." }
+        elseif (Test-Path -LiteralPath (Join-Path $folder 'build.ps1') -PathType Leaf) { $appDirectories += $candidate }
+        else { throw "Get-OctoBuildOrder: -additionalRepos key '$name' is not an mm-* or octo-* repository name and its folder $folder has no build.ps1 (a consumer app is built by its build.ps1)." }
     }
     $octoDirectories = @($octoDirectories | Sort-Object Name)
     $mmDirectories = @($mmDirectories | Sort-Object Name)
@@ -176,6 +198,8 @@ function Get-OctoBuildOrder {
             & $add ($octoDirectories | Where-Object { $_.Name -eq $name } | Select-Object -First 1) 'additional-ordered'
         }
         foreach ($directory in $octoDirectories) { & $add $directory 'additional' }
+        # Last: an app's build.ps1 builds against the frontend libraries of the environment.
+        foreach ($directory in $appDirectories) { & $add $directory 'app' }
     }
 
     return $result.ToArray()

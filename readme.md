@@ -201,6 +201,21 @@ ones, or a `dotnet test --filter` expression - and tells you which tests failed 
 them.
 
 ```powershell
+
+## Frontend tests of an app
+
+`Invoke-OctoTestRun` also runs the frontend tests of a repository: a folder with `angular.json` and a `package.json`
+that has a `test` script is a test project (named after the folder).
+
+```powershell
+Invoke-OctoTestRun -branch branches/main -repo voest-app                    # ng test, headless, JUnit report
+Invoke-OctoTestRun -env ab8819-apps -repo energy-community -filter 'Billing' # a regular expression over suite and test names
+Invoke-OctoTestRun -branch branches/main -repo voest-app -rerunFailed       # only the spec files that held a failed test
+```
+
+It runs `npx ng test --watch=false --reporters=junit ...` in the app folder (after `npm ci` when there is no
+`node_modules`) and reports the failed tests as `<spec file> :: <test name>` with the message and the place.
+
 # All test projects of a repository in a feature environment (or a lane: -branch branches/main)
 Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine
 
