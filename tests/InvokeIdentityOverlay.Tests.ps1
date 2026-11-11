@@ -64,6 +64,7 @@ Describe 'Invoke-IdentityOverlay -Json counts' -Skip:$NoYaml {
         $studio.counts.allowedCorsOrigins.skippedDuplicate | Should -Be 1
         $studio.counts.added | Should -Be 1
         $studio.counts.skippedDuplicate | Should -Be 1
+        $out[0] | Should -Not -Match '"(added|skippedDuplicate)":\s*\d+\.\d' -Because 'counts are integers, not doubles from Measure-Object'
         ($doc.data.clients | Where-Object client -eq 'octo-cli').counts | Should -BeNullOrEmpty
         $broken = $doc.data.clients | Where-Object client -eq 'broken-client'
         $broken.status | Should -Be 'failed (exit 3)'

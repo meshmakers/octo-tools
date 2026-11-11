@@ -21,8 +21,8 @@ function ConvertFrom-OctoOverlayOutput {
         if (-not $match.Success) { return $null }
         $counts[$pair[0]] = [ordered]@{ added = [int]$match.Groups[1].Value; skippedDuplicate = [int]$match.Groups[2].Value }
     }
-    $counts['added'] = ($counts.Values | ForEach-Object { $_.added } | Measure-Object -Sum).Sum
-    $counts['skippedDuplicate'] = ($counts.Values | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object { $_.skippedDuplicate } | Measure-Object -Sum).Sum
+    $counts['added'] = [int]($counts.Values | ForEach-Object { $_.added } | Measure-Object -Sum).Sum
+    $counts['skippedDuplicate'] = [int]($counts.Values | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object { $_.skippedDuplicate } | Measure-Object -Sum).Sum
     return $counts
 }
 
