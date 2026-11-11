@@ -38,7 +38,10 @@ function Compile-Repo {
         # Effective MSBuild properties for this repository (-msbuildProperties merged with -msbuildPropertiesPerRepo).
         [hashtable]$msbuildProperties = @{},
         # -EventsFile state of Invoke-BuildAll ($null = no events).
-        $events = $null
+        $events = $null,
+        # Invoke-BuildAll decided about the remote CK catalogs for the whole run (AB#8831): the repository's own
+        # Invoke-Build must not read them again - neither after -refreshCatalogs nor after a read that failed.
+        [switch]$catalogsDecided
     )
 
     # Isolated lane only: repos without their own <RestoreSources> would restore from the user-level
@@ -52,7 +55,7 @@ function Compile-Repo {
         }
     }
     try {
-        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties -events $events
+        return Compile-RepoCore -branch $branch -path $path -configuration $configuration -msbuildProperties $msbuildProperties -events $events -catalogsDecided:$catalogsDecided
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
@@ -67,7 +70,8 @@ function Compile-RepoCore {
         [Parameter(Mandatory=$true)]
         [string]$configuration,
         [hashtable]$msbuildProperties = @{},
-        $events = $null
+        $events = $null,
+        [switch]$catalogsDecided
     )
 
     $builder = Get-RepoBuilder -path $path
@@ -106,7 +110,8 @@ function Compile-RepoCore {
         $state = $Global:LASTEXITCODE -eq 0
     }
     else {
-        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off -msbuildProperties $msbuildProperties
+        # -refreshCatalogs = "do not decide about the catalogs": the run did (the property is in $msbuildProperties or not).
+        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off -msbuildProperties $msbuildProperties -refreshCatalogs:$catalogsDecided
         $state = $Global:LASTEXITCODE -eq 0
     }
 
@@ -549,7 +554,7 @@ function Invoke-BuildAllCore {
             # packages: the repository counts as failed and the run stops.
             $copyError = $null
             try {
-                [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $buildProperties -events $events
+                [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $buildProperties -events $events -catalogsDecided
             }
             catch {
                 if ($_.FullyQualifiedErrorId -notlike 'OctoPackageCopyFailed*') { throw }

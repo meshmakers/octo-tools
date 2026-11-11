@@ -1265,12 +1265,26 @@ function Get-OctoPackageCacheSeedSource {
     # Where an environment's package cache is filled from: the base lane's cache when it has one, else the
     # user-level cache. $null when neither exists.
     param([Parameter(Mandatory = $true)] [string]$basePath)
+    # A cache counts when it holds at least one version that would be copied: a base lane cache with nothing but
+    # local builds (or unfinished extractions) must not hide the user-level cache.
     foreach ($candidate in @((Join-Path $basePath '.nuget-packages'), (Get-OctoGlobalPackageCachePath))) {
-        if ((Test-Path -LiteralPath $candidate -PathType Container) -and @([IO.Directory]::EnumerateDirectories($candidate) | Select-Object -First 1).Count -gt 0) {
-            return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($candidate))
+        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
+        foreach ($idFolder in [IO.Directory]::EnumerateDirectories($candidate)) {
+            $id = [IO.Path]::GetFileName($idFolder)
+            foreach ($versionFolder in [IO.Directory]::EnumerateDirectories($idFolder)) {
+                if (Test-OctoPackageVersionEligible -id $id -versionFolder $versionFolder) { return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($candidate)) }
+            }
         }
     }
     return $null
+}
+
+function Test-OctoPackageVersionEligible {
+    # A version folder a cache may hand to another: not a local build (meshmakers.*/999.0.0), and completely
+    # extracted (NuGet writes .nupkg.metadata last).
+    param([Parameter(Mandatory = $true)] [string]$id, [Parameter(Mandatory = $true)] [string]$versionFolder)
+    if ($id -like 'meshmakers.*' -and [IO.Path]::GetFileName($versionFolder) -eq '999.0.0') { return $false }
+    return (Test-Path -LiteralPath (Join-Path $versionFolder '.nupkg.metadata') -PathType Leaf)
 }
 
 function Get-OctoPackageCopyMethod {
@@ -1295,6 +1309,21 @@ function Get-OctoPackageCopyMethod {
 
 function Copy-OctoPackageFolder {
     # Copies one folder (a package id or one version of it) to a target that does not exist yet. Throws on failure.
+    # All or nothing: the bytes go to a temporary sibling that is renamed into place; a copy that fails halfway
+    # leaves no folder a later run would take for a complete package.
+    param([Parameter(Mandatory = $true)] [string]$source, [Parameter(Mandatory = $true)] [string]$target, [Parameter(Mandatory = $true)] [string]$method)
+    $temporary = Join-Path (Split-Path -Parent $target) (".seeding-{0}-{1}" -f $PID, [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        Copy-OctoPackageFolderRaw -source $source -target $temporary -method $method
+        [IO.Directory]::Move($temporary, $target)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Copy-OctoPackageFolderRaw {
+    # The copy itself (clone or plain) to a target that does not exist. Throws on failure; may leave a partial target.
     param([Parameter(Mandatory = $true)] [string]$source, [Parameter(Mandatory = $true)] [string]$target, [Parameter(Mandatory = $true)] [string]$method)
     if ($method -eq 'clone') {
         $output = @(& /bin/cp -Rc $source $target 2>&1)
@@ -1358,7 +1387,11 @@ function Invoke-OctoPackageCacheSeed {
             }
             $report.packages += $wanted.Count
         }
-        catch { $report.errors += "${id}: $($_.Exception.Message)" }
+        catch {
+            $report.errors += "${id}: $($_.Exception.Message)"
+            # No empty id folder stays behind either.
+            if ((Test-Path -LiteralPath $targetId -PathType Container) -and @([IO.Directory]::EnumerateFileSystemEntries($targetId) | Select-Object -First 1).Count -eq 0) { Remove-Item -LiteralPath $targetId -Force -ErrorAction SilentlyContinue }
+        }
     }
     $report.seconds = $watch.Elapsed.TotalSeconds
     return $report
@@ -1931,6 +1964,9 @@ function Initialize-OctoEnvironmentPackageCache {
         $environmentPath = Get-OctoEnvironmentPath -env $env
         $basePath = Get-OctoEnvironmentBasePath -base ([string]$manifest['base'])
         if (-not [string]::IsNullOrWhiteSpace($source) -and -not (Test-Path -LiteralPath $source -PathType Container)) { throw "Package cache $source does not exist." }
+        # -Json is for callers without a terminal: never wait for a confirmation there (-Confirm, or a
+        # $ConfirmPreference that makes this cmdlet ask).
+        if ($Json -and -not $WhatIfPreference -and "$ConfirmPreference" -in @('Low', 'Medium')) { throw "Initialize-OctoEnvironmentPackageCache -Json does not prompt: drop -Confirm (or `$ConfirmPreference = '$ConfirmPreference')." }
         $dryRun = -not $PSCmdlet.ShouldProcess((Join-Path $environmentPath '.nuget-packages'), 'Fill the package cache from a local cache')
         $report = Invoke-OctoEnvironmentPackageCacheSeed -environmentPath $environmentPath -basePath $basePath -source $source -dryRun:$dryRun
     }

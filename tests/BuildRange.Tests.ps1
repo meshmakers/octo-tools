@@ -1516,9 +1516,14 @@ Describe 'Invoke-Build and Invoke-BuildAll read the remote CK catalogs at most o
         $script:dotnetCalls = [System.Collections.Generic.List[string]]::new()
         Mock -ModuleName Invoke-Build dotnet { $script:dotnetCalls.Add($args -join ' '); $global:LASTEXITCODE = 0 }
 
-        $doc = (Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -Json) -join "`n" | ConvertFrom-Json
+        $events = Join-Path $TestDrive "events-build-$([Guid]::NewGuid().ToString('N').Substring(0, 8)).jsonl"
+        $doc = (Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -EventsFile $events -Json) -join "`n" | ConvertFrom-Json
         $script:ckcCalls | Should -Be 1
         $doc.data.catalogs.mode | Should -Be 'refreshed'
+        # the read happens inside the repository's progress: repoStart, then the phases catalogs, restore, build
+        $records = @(Get-Content $events | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+        @($records | Where-Object { $_.event -in 'repoStart', 'phase' } | ForEach-Object { if ($_.event -eq 'phase') { $_.phase } else { $_.event } }) | Should -Be @('repoStart', 'catalogs', 'restore', 'build')
+        $script:dotnetCalls[1] | Should -Match '^build .* --no-restore '
         $doc.data.restoreSeconds | Should -BeGreaterOrEqual 0
         $doc.data.compileSeconds | Should -BeGreaterOrEqual 0
         $script:dotnetCalls[0] | Should -Match '^restore .* -p:OctoRefreshRemoteCatalogs=false'
@@ -1551,11 +1556,28 @@ Describe 'Invoke-Build and Invoke-BuildAll read the remote CK catalogs at most o
         $doc.data.catalogs.repo | Should -Be 'octo-sdk'
         ($script:compiled | Where-Object Repo -eq 'octo-sdk').Refresh | Should -Be 'false'
         ($script:compiled | Where-Object Repo -eq 'octo-construction-kit-engine').Refresh | Should -BeNullOrEmpty
+        # the run decided: no repository's own Invoke-Build reads the catalogs again
+        Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 0 -ParameterFilter { -not $catalogsDecided }
 
         $script:compiled.Clear()
         $doc = (Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -refreshCatalogs -Json) -join "`n" | ConvertFrom-Json
         $doc.data.catalogs.mode | Should -Be 'perCompile'
         ($script:compiled | Where-Object Repo -eq 'octo-sdk').Refresh | Should -BeNullOrEmpty
         $script:ckcCalls | Should -Be 1
+        Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 0 -ParameterFilter { -not $catalogsDecided }
+    }
+
+    It 'Invoke-BuildAll: the decision reaches the nested Invoke-Build, also after a read that failed' {
+        Import-Module (Join-Path $PSScriptRoot '../modules/Invoke-Build.psm1') -Force
+        Mock -ModuleName OctoCkCatalogRefresh Invoke-OctoCkcRefresh { $script:ckcCalls++; [pscustomobject]@{ ExitCode = 5; Output = @('offline') } }
+        $script:nested = [System.Collections.Generic.List[object]]::new()
+        Mock -ModuleName Invoke-BuildAll Invoke-Build { $script:nested.Add([pscustomobject]@{ Repo = (Split-Path -Leaf $repositoryPath); RefreshCatalogs = [bool]$refreshCatalogs; Property = $msbuildProperties['OctoRefreshRemoteCatalogs'] }); $global:LASTEXITCODE = 0 }
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
+        $doc = (Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.catalogs.mode | Should -Be 'failed'
+        $script:ckcCalls | Should -Be 1                                        # once for the run, not once per repository
+        $script:nested.Count | Should -BeGreaterThan 0
+        @($script:nested | Where-Object { -not $_.RefreshCatalogs }).Count | Should -Be 0
+        @($script:nested | Where-Object { $_.Property }).Count | Should -Be 0   # nothing is switched off
     }
 }

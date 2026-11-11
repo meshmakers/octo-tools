@@ -130,7 +130,8 @@ function Initialize-OctoRunCatalogs {
         $ages = @($files | ForEach-Object { if (Test-Path -LiteralPath $_ -PathType Leaf) { ($now - [IO.File]::GetLastWriteTimeUtc($_)).TotalMinutes } else { [double]::PositiveInfinity } })
         $oldest = ($ages | Measure-Object -Maximum).Maximum
         $mode = 'fresh'
-        $detail = "remote catalog caches are $([int]$oldest) minute(s) old (limit $maxAgeMinutes)"
+        # A cache that was never written has no age (infinite): formatted apart, an [int] cast would throw.
+        $detail = if ([double]::IsInfinity($oldest)) { 'a remote catalog cache does not exist yet' } else { "remote catalog caches are $([Math]::Floor($oldest)) minute(s) old (limit $maxAgeMinutes)" }
         if ($oldest -gt $maxAgeMinutes) {
             if ([string]::IsNullOrWhiteSpace($ckc)) { $ckc = Resolve-OctoCkc -laneRootPath $laneRootPath }
             if ([string]::IsNullOrWhiteSpace($ckc)) {
@@ -146,7 +147,13 @@ function Initialize-OctoRunCatalogs {
         # The local catalog's cache is rebuilt from the folder by the first compile (the engine does that for a
         # missing cache file) - files that reached the catalog by a copy (environment sync) are in it then.
         $localCache = Join-Path $laneRootPath '.octo/local-catalog/cache/local-catalog-cache.json'
-        if (Test-Path -LiteralPath $localCache -PathType Leaf) { Remove-Item -LiteralPath $localCache -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $localCache -PathType Leaf) {
+            Remove-Item -LiteralPath $localCache -Force -ErrorAction SilentlyContinue
+            # A cache that stays may be older than the catalog folder: nothing is switched off then.
+            if (Test-Path -LiteralPath $localCache -PathType Leaf) {
+                return & $result $false 'failed' "$localCache cannot be deleted, the local catalog cache may be stale - every CK compile refreshes the catalogs itself"
+            }
+        }
         return & $result $true $mode $detail
     }
     catch {

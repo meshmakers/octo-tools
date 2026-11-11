@@ -64,9 +64,10 @@ Describe 'The remote CK catalogs are read at most once per build run (AB#8831)' 
         Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeTests -Times 2 -Exactly -ParameterFilter { $msbuildProperties['OctoRefreshRemoteCatalogs'] -eq 'false' }
         # the local catalog cache is rebuilt by the first compile
         Test-Path $localCache | Should -BeFalse
-        # one catalogs phase, for the repository that triggered the read; timings on repoDone and in -Json
+        # one catalogs phase, for the repository that triggered the read, before its build phase; timings on repoDone and in -Json
         $records = @(Get-Content $events | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
         @($records | Where-Object { $_.event -eq 'phase' -and $_.phase -eq 'catalogs' } | ForEach-Object repo) | Should -Be @('octo-asset-repo-services')
+        @($records | Where-Object { $_.event -eq 'phase' -and $_.repo -eq 'octo-asset-repo-services' } | ForEach-Object phase | Select-Object -First 2) | Should -Be @('catalogs', 'build')
         $done = $records | Where-Object { $_.event -eq 'repoDone' -and $_.repo -eq 'octo-asset-repo-services' }
         $done.restoreSeconds | Should -Be 1.5
         $done.compileSeconds | Should -Be 2.5
@@ -114,6 +115,25 @@ Describe 'The remote CK catalogs are read at most once per build run (AB#8831)' 
         (Get-Doc (Invoke-BuildEnvironment -env 'env-k' -buildUnchanged -Json)).data.catalogs.mode | Should -Be 'unavailable'
     }
 
+    It 'a cache that was never written counts as due (first build on a machine); a local cache that cannot be deleted switches nothing off' {
+        Remove-Item (Join-Path $env:OCTO_CK_CACHE_DIRECTORY 'private-github-catalog-cache.json')
+        try {
+            $doc = Get-Doc (Invoke-BuildEnvironment -env 'env-k' -Json)
+            $doc.data.catalogs.mode | Should -Be 'refreshed'
+            $script:ckcCalls | Should -Be 1
+        }
+        finally { Set-Content -Path (Join-Path $env:OCTO_CK_CACHE_DIRECTORY 'private-github-catalog-cache.json') -Value '{}' }
+
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $localCache) | Out-Null
+        Set-Content -Path $localCache -Value '{}'
+        Mock -ModuleName OctoCkCatalogRefresh Remove-Item { }
+        $script:builds.Clear()
+        $doc = Get-Doc (Invoke-BuildEnvironment -env 'env-k' -buildUnchanged -Json)
+        $doc.data.catalogs.usable | Should -BeFalse
+        $doc.data.catalogs.detail | Should -Match 'cannot be deleted'
+        Get-Refresh 'octo-cli' | Should -BeNullOrEmpty
+    }
+
     It 'a parallel run reads them once in the parent and hands the property to the child builds' {
         $script:jobs = [System.Collections.Generic.List[object]]::new()
         Mock -ModuleName Invoke-BuildRange Start-OctoRepoBuildJob {
@@ -121,13 +141,18 @@ Describe 'The remote CK catalogs are read at most once per build run (AB#8831)' 
             New-Item -ItemType Directory -Force -Path (Join-Path $entry.Path 'bin/DebugL') | Out-Null
             [pscustomobject]@{ Name = $entry.Name }
         }
+        $events = Join-Path $TestDrive 'events-k-parallel.jsonl'
         Mock -ModuleName Invoke-BuildRange Get-OctoRepoBuildJobState {
             [pscustomobject]@{ Done = $true; Phase = 'build'; Build = [pscustomobject]@{ Success = $true; LogFile = $null }; Tests = $null; BuildSeconds = 4.0; TestSeconds = 0.0
                 Timings = [ordered]@{ catalogSeconds = 0.0; restoreSeconds = 1.25; compileSeconds = 2.75; testRestoreSeconds = 0.0; testCompileSeconds = 0.0 } }
         }
-        $doc = Get-Doc (Invoke-BuildEnvironment -env 'env-k' -maxParallel 3 -Json)
+        $doc = Get-Doc (Invoke-BuildEnvironment -env 'env-k' -maxParallel 3 -EventsFile $events -Json)
         $doc.data.success | Should -BeTrue
         $script:ckcCalls | Should -Be 1
+        # the read is its own phase and the build phase follows it (not the other way round)
+        $records = @(Get-Content $events | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+        @($records | Where-Object { $_.event -eq 'phase' -and $_.repo -eq 'octo-asset-repo-services' } | ForEach-Object phase | Select-Object -First 2) | Should -Be @('catalogs', 'build')
+        @($records | Where-Object { $_.event -eq 'phase' -and $_.repo -eq 'octo-sdk' } | ForEach-Object phase | Select-Object -First 1) | Should -Be @('build')
         ($script:jobs | Where-Object Repo -eq 'octo-sdk').Refresh | Should -BeNullOrEmpty
         ($script:jobs | Where-Object Repo -eq 'octo-asset-repo-services').Refresh | Should -Be 'false'
         ($script:jobs | Where-Object Repo -eq 'octo-asset-repo-services').CkcCalls | Should -Be 1     # read before the child started
@@ -261,11 +286,51 @@ Describe 'A new environment''s package cache is filled from a local cache (AB#88
         $explicit.data.skippedLocalBuilds | Should -Be 1
 
         Mock -ModuleName OctoEnvironment Get-OctoPackageCopyMethod { 'clone' }
-        Mock -ModuleName OctoEnvironment Copy-OctoPackageFolder { Copy-Item -LiteralPath $source -Destination $target -Recurse }
+        Mock -ModuleName OctoEnvironment Copy-OctoPackageFolderRaw { Copy-Item -LiteralPath $source -Destination $target -Recurse }
         $doc = Get-Doc (New-OctoEnvironment -env 'env-mac' -repos octo-sdk -branchName 'feature/mac' -Json)
         $doc.data.packageCache.method | Should -Be 'clone'
         $doc.data.packageCache.packages | Should -Be 1
         Test-Path (Join-Path $ws.Root 'wt-env-mac/.nuget-packages/newtonsoft.json/13.0.3') | Should -BeTrue
+    }
+
+    It 'a base lane cache with nothing to copy does not hide the user-level cache' {
+        Remove-Item $source -Recurse -Force
+        New-CachedPackage $source 'meshmakers.octo.sdk.common' '999.0.0' 'local build only'
+        New-CachedPackage $source 'half.extracted' '1.0.0' 'x' -incomplete
+        $userLevel = Join-Path $TestDrive 'user-level-fallback'
+        New-CachedPackage $userLevel 'newtonsoft.json' '13.0.3' 'json'
+        Mock -ModuleName OctoEnvironment Get-OctoGlobalPackageCachePath { Join-Path $TestDrive 'user-level-fallback' }
+        Mock -ModuleName OctoEnvironment Get-OctoPackageCopyMethod { 'clone' }
+        Mock -ModuleName OctoEnvironment Copy-OctoPackageFolderRaw { Copy-Item -LiteralPath $source -Destination $target -Recurse }
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-fb' -repos octo-sdk -branchName 'feature/fb' -Json)
+        $doc.data.packageCache.source | Should -Be $userLevel
+        $doc.data.packageCache.packages | Should -Be 1
+    }
+
+    It 'a copy that breaks off leaves no folder behind, so the next run copies the package completely' {
+        New-OctoEnvironment -env 'env-part' -repos octo-sdk -branchName 'feature/part' -skipPackageCacheSeed -Json | Out-Null
+        $cache = Join-Path $ws.Root 'wt-env-part/.nuget-packages'
+        # the copy writes a part of the package, then fails
+        Mock -ModuleName OctoEnvironment Copy-OctoPackageFolderRaw { New-Item -ItemType Directory -Force -Path $target | Out-Null; Set-Content -Path (Join-Path $target 'partial.txt') -Value 'half'; throw 'connection to the disk lost' }
+        $doc = Get-Doc (Initialize-OctoEnvironmentPackageCache -env 'env-part' -Json)
+        $doc.data.success | Should -BeFalse
+        @($doc.data.errors).Count | Should -BeGreaterThan 0
+        @(Get-ChildItem $cache -Force).Count | Should -Be 0            # no package folder, no temporary folder
+
+        Mock -ModuleName OctoEnvironment Copy-OctoPackageFolderRaw { Copy-Item -LiteralPath $source -Destination $target -Recurse }
+        $doc = Get-Doc (Initialize-OctoEnvironmentPackageCache -env 'env-part' -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.packages | Should -Be 4
+        $doc.data.alreadyPresent | Should -Be 0
+        Test-Path (Join-Path $cache 'questpdf/2025.1.0/.nupkg.metadata') | Should -BeTrue
+    }
+
+    It '-Json never waits for a confirmation' {
+        New-OctoEnvironment -env 'env-cf' -repos octo-sdk -branchName 'feature/cf' -skipPackageCacheSeed -Json | Out-Null
+        $doc = Get-Doc (Initialize-OctoEnvironmentPackageCache -env 'env-cf' -Confirm -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'does not prompt'
+        @(Get-ChildItem (Join-Path $ws.Root 'wt-env-cf/.nuget-packages')).Count | Should -Be 0
     }
 
     It 'no local cache at all: the environment is created, the cache stays empty and the report says why' {

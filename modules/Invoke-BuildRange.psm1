@@ -1673,9 +1673,9 @@ function Invoke-OctoBuildRangeCore {
                         }
                         $slot = [pscustomobject]@{ Entry = $entry; Index = $repoIndex; Decision = $decision; Watch = [System.Diagnostics.Stopwatch]::StartNew(); Job = $null; Phase = 'build'; Reported = $false; CatalogSeconds = 0.0 }
                         & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
-                        & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
                         if ($entry.Mode -eq 'none') {
                             # Nothing to build: the same repoStart/repoDone pair as the sequential run.
+                            & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
                             $result = [ordered]@{
                                 repo = $entry.Name; success = $true; status = 'skipped'; reason = $decision.Reason; detail = $decision.Detail
                                 buildDuration = [TimeSpan]::Zero; packageDuration = [TimeSpan]::Zero; testDuration = [TimeSpan]::Zero; testsCompiled = $null
@@ -1691,6 +1691,8 @@ function Invoke-OctoBuildRangeCore {
                         $status[$entry.Name] = 'running'
                         # Here, never in a child: one read for the whole run, before the first repository that needs it.
                         $slot.CatalogSeconds = & $ensureCatalogs $entry
+                        # After the read (its phase is "catalogs"): the build phase holds until tests or packages start.
+                        & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
                         if ($configuration -ieq 'DebugL' -and $entry.Mode -eq 'dotnet' -and -not $skipCkSync) {
                             # Writes the lane's local catalog: here, never in a child (CK repositories are serial).
                             [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.Path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
