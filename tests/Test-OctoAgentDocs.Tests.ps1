@@ -1,6 +1,6 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
-# Behaviour of Test-OctoAgentDocs, grouped by feature. Fixtures are built under the temp
-# folder by the helpers and removed in AfterAll.
+# Behaviour of Test-OctoAgentDocs, grouped by feature. Fixtures are built under TestDrive
+# by the helpers and removed in AfterAll.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH is the profile contract under test')]
 param()
 
