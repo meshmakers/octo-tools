@@ -5,7 +5,7 @@
 
     An environment holds git worktrees of the repositories a feature changes (role feature, on the feature branch)
     and of the repositories that must be rebuilt against them (role consumer, detached at the base checkout's
-    commit), plus its own feed (nuget/), package cache (.nuget-packages/), CK and blueprint catalogs (.octo/), logs
+    upstream commit, origin/main; -localBase: the local checkout's commit), plus its own feed (nuget/), package cache (.nuget-packages/), CK and blueprint catalogs (.octo/), logs
     (logFiles/) and an Octo.User.props that declares RestorePackagesPath. The folders keep the plain repository names,
     so ../nuget, ../.octo/local-catalog, Find-OctoLaneRoot and Get-OctoBuildOrder resolve inside the environment and
     plain dotnet builds, Rider and Invoke-Build are isolated without extra properties.
@@ -19,6 +19,8 @@ $script:ManifestSchemaVersion = 1
 $script:DefaultBase = 'branches/main'
 $script:CatalogFolders = @('local-catalog', 'local-blueprint-catalog')
 $script:IgnoredSyncFiles = @('.catalog-index.lock', '.DS_Store')
+# Developer tools that live next to the lanes (<rootPath>/<repo>), not in the base lane; never built here.
+$script:ToolRepos = @('octo-tools', 'octo-devstack')
 
 # ---------------------------------------------------------------------------------------------------------------
 # Paths, names, manifest
@@ -92,7 +94,7 @@ function Write-OctoEnvironmentManifest {
         created       = $manifest['created']
         owner         = $manifest['owner']
         repos         = @($manifest['repos'] | ForEach-Object {
-                [ordered]@{ name = $_['name']; role = $_['role']; path = $_['path']; branch = $_['branch']; baseCommit = $_['baseCommit'] }
+                [ordered]@{ name = $_['name']; role = $_['role']; path = $_['path']; branch = $_['branch']; baseCommit = $_['baseCommit']; baseRef = $_['baseRef'] }
             })
         slot          = $manifest['slot']
     }
@@ -157,14 +159,89 @@ function Invoke-OctoEnvironmentGit {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
+function Get-OctoEnvironmentRepoSource {
+    # The main checkout an environment worktree of $repo is added from: <base>/<repo>, or for a developer tool
+    # (octo-tools, octo-devstack) the checkout next to the lanes, <rootPath>/<repo>. $null when neither is a git checkout.
+    param([Parameter(Mandatory = $true)] [string]$repo, [Parameter(Mandatory = $true)] [string]$basePath)
+    $folder = Join-Path $basePath $repo
+    if (Test-Path -LiteralPath (Join-Path $folder '.git')) { return $folder }
+    if ($script:ToolRepos -contains $repo) {
+        $folder = Join-Path (Get-OctoEnvironmentRootPath) $repo
+        if (Test-Path -LiteralPath (Join-Path $folder '.git')) { return $folder }
+    }
+    return $null
+}
+
+function Test-OctoEnvironmentToolRepo {
+    # octo-tools / octo-devstack: developer tools, never built by Invoke-BuildEnvironment (Get-OctoBuildOrder skips them).
+    param([string]$repo)
+    return ($script:ToolRepos -contains $repo)
+}
+
 function Resolve-OctoEnvironmentRepoName {
-    # Exact folder name in the base lane, or the name with "octo-" prepended. Throws when neither exists.
+    # Exact folder name in the base lane, or the name with "octo-" prepended; the developer tools octo-tools and
+    # octo-devstack also resolve next to the lanes (<rootPath>/<repo>). Throws when neither exists.
     param([Parameter(Mandatory = $true)] [string]$repo, [Parameter(Mandatory = $true)] [string]$basePath)
     foreach ($candidate in @($repo, "octo-$repo")) {
-        $folder = Join-Path $basePath $candidate
-        if (Test-Path -LiteralPath (Join-Path $folder '.git')) { return $candidate }
+        if (Get-OctoEnvironmentRepoSource -repo $candidate -basePath $basePath) { return $candidate }
     }
-    throw "Repository '$repo' is not a git checkout in $basePath."
+    throw "Repository '$repo' is not a git checkout in $basePath$(if (($script:ToolRepos -contains $repo) -or ($script:ToolRepos -contains "octo-$repo")) { " or $(Get-OctoEnvironmentRootPath)" })."
+}
+
+function Resolve-OctoEnvironmentBase {
+    <#
+        The commit a new environment worktree starts from, for one main checkout.
+        Default: the upstream of the checkout's current branch (branches/main: origin/main), fetched first; a checkout
+        without an upstream (detached HEAD, local-only branch) uses origin's default branch (origin/HEAD, else
+        origin/main, origin/master). -localBase, or no usable remote ref: the checkout's HEAD.
+        Returns { Commit; Ref ('origin/main' | 'HEAD'); LocalCommit; Ahead; Behind (local HEAD against Commit);
+        Fetched; Warnings }.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$source, [switch]$localBase)
+    $head = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', 'HEAD')
+    if ($head.ExitCode -ne 0) { throw "git rev-parse HEAD failed in ${source}: $($head.Output -join ' ')" }
+    $local = [string]($head.Output | Select-Object -Last 1)
+    $result = [ordered]@{ Commit = $local; Ref = 'HEAD'; LocalCommit = $local; Ahead = 0; Behind = 0; Fetched = $false; Warnings = @() }
+    if ($localBase) { return [pscustomobject]$result }
+
+    $repo = Split-Path -Leaf $source
+    $remoteRef = $null
+    $upstream = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
+    if ($upstream.ExitCode -eq 0) { $remoteRef = [string]($upstream.Output | Select-Object -Last 1) }
+    if (-not $remoteRef -or $remoteRef -notmatch '^[^/]+/.+') {
+        $remoteRef = $null
+        $originHead = Invoke-OctoEnvironmentGit -path $source -arguments @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')
+        $candidates = @()
+        if ($originHead.ExitCode -eq 0) { $candidates += [string]($originHead.Output | Select-Object -Last 1) }
+        $candidates += 'origin/main', 'origin/master'
+        foreach ($candidate in $candidates) {
+            if ((Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$candidate")).ExitCode -eq 0) { $remoteRef = $candidate; break }
+        }
+    }
+    if (-not $remoteRef) {
+        $result.Warnings = @("${repo}: no upstream branch and no origin default branch - based on the local checkout's HEAD.")
+        return [pscustomobject]$result
+    }
+    $remote, $branch = $remoteRef -split '/', 2
+    $fetch = Invoke-OctoEnvironmentGit -path $source -arguments @('fetch', '--quiet', $remote, $branch)
+    $result.Fetched = $fetch.ExitCode -eq 0
+    if (-not $result.Fetched) { $result.Warnings += "${repo}: git fetch $remote $branch failed - $remoteRef is used as last fetched." }
+    $commit = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$remoteRef^{commit}")
+    if ($commit.ExitCode -ne 0) {
+        $result.Warnings += "${repo}: $remoteRef does not exist - based on the local checkout's HEAD."
+        return [pscustomobject]$result
+    }
+    $result.Commit = [string]($commit.Output | Select-Object -Last 1)
+    $result.Ref = $remoteRef
+    if ($result.Commit -ne $local) {
+        $count = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--left-right', '--count', "$local...$($result.Commit)")
+        if ($count.ExitCode -eq 0 -and ([string]($count.Output | Select-Object -Last 1)) -match '^(\d+)\s+(\d+)$') {
+            $result.Ahead = [int]$Matches[1]
+            $result.Behind = [int]$Matches[2]
+        }
+        $result.Warnings += "${repo}: the local checkout $source is $($result.Behind) commit(s) behind and $($result.Ahead) ahead of $remoteRef - the worktree starts from $remoteRef ($($result.Commit.Substring(0, [Math]::Min(10, $result.Commit.Length)))); pass -localBase to start from the local checkout instead."
+    }
+    return [pscustomobject]$result
 }
 
 function Get-OctoEnvironmentRepoState {
@@ -194,20 +271,28 @@ function Get-OctoEnvironmentRepoState {
 }
 
 function Add-OctoEnvironmentWorktree {
-    # Creates one worktree; returns the manifest entry. Throws on failure.
+    <#
+        Creates one worktree. Returns { Entry (manifest entry); Source (main checkout); CreatedBranch (the branch this
+        call created, $null when it existed or for a consumer); Base (Resolve-OctoEnvironmentBase) }. Throws on failure.
+        baseCommit in the manifest is the commit the worktree started from: the base commit (origin's, or the local
+        HEAD with -localBase) for a consumer and a new feature branch; for an existing feature branch its merge base
+        with the base commit. Commits on top of it that no remote has are the environment's unpushed work.
+    #>
     param(
         [Parameter(Mandatory = $true)] [string]$basePath,
         [Parameter(Mandatory = $true)] [string]$environmentPath,
         [Parameter(Mandatory = $true)] [string]$repo,
         [Parameter(Mandatory = $true)] [ValidateSet('feature', 'consumer')] [string]$role,
-        [string]$branchName = ''
+        [string]$branchName = '',
+        [switch]$localBase
     )
-    $source = Join-Path $basePath $repo
+    $source = Get-OctoEnvironmentRepoSource -repo $repo -basePath $basePath
+    if (-not $source) { throw "Repository '$repo' is not a git checkout in $basePath." }
     $target = Join-Path $environmentPath $repo
     if (Test-Path -LiteralPath $target) { throw "$target already exists." }
-    $head = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', 'HEAD')
-    if ($head.ExitCode -ne 0) { throw "git rev-parse HEAD failed in ${source}: $($head.Output -join ' ')" }
-    $baseCommit = [string]($head.Output | Select-Object -Last 1)
+    $base = Resolve-OctoEnvironmentBase -source $source -localBase:$localBase
+    $baseCommit = $base.Commit
+    $createdBranch = $null
 
     if ($role -eq 'consumer') {
         $add = Invoke-OctoEnvironmentGit -path $source -arguments @('worktree', 'add', '--detach', $target, $baseCommit)
@@ -219,14 +304,108 @@ function Add-OctoEnvironmentWorktree {
         if ($local.ExitCode -eq 0 -or $remote.ExitCode -eq 0) {
             # Existing branch (resumed work): check it out; git creates the tracking branch from origin when needed.
             $add = Invoke-OctoEnvironmentGit -path $source -arguments @('worktree', 'add', $target, $branchName)
+            if ($local.ExitCode -ne 0 -and $add.ExitCode -eq 0) { $createdBranch = $branchName }   # local tracking branch made by this call
+            $existing = if ($local.ExitCode -eq 0) { "refs/heads/$branchName" } else { "refs/remotes/origin/$branchName" }
+            $mergeBase = Invoke-OctoEnvironmentGit -path $source -arguments @('merge-base', $existing, $baseCommit)
+            if ($mergeBase.ExitCode -eq 0 -and $mergeBase.Output) { $baseCommit = [string]($mergeBase.Output | Select-Object -Last 1) }
+            # The branch decides where the worktree stands, not the base: no drift to report.
+            $base = [pscustomobject]@{ Commit = $baseCommit; Ref = $branchName; LocalCommit = $base.LocalCommit; Ahead = 0; Behind = 0; Fetched = $base.Fetched; Warnings = @() }
         }
         else {
-            $add = Invoke-OctoEnvironmentGit -path $source -arguments @('worktree', 'add', '-b', $branchName, $target, $baseCommit)
+            # --no-track: the feature branch must not get origin/main as its upstream (a plain push would target it).
+            $add = Invoke-OctoEnvironmentGit -path $source -arguments @('worktree', 'add', '--no-track', '-b', $branchName, $target, $baseCommit)
+            if ($add.ExitCode -eq 0) { $createdBranch = $branchName }
         }
         $branch = $branchName
     }
     if ($add.ExitCode -ne 0) { throw "git worktree add failed for ${repo}: $($add.Output -join ' ')" }
-    return [ordered]@{ name = $repo; role = $role; path = [IO.Path]::GetFullPath($target); branch = $branch; baseCommit = $baseCommit }
+    return [pscustomobject]@{
+        Entry         = [ordered]@{ name = $repo; role = $role; path = [IO.Path]::GetFullPath($target); branch = $branch; baseCommit = $baseCommit; baseRef = $base.Ref }
+        Source        = $source
+        CreatedBranch = $createdBranch
+        Base          = $base
+    }
+}
+
+function ConvertTo-OctoBaseDriftRow {
+    # One -Json row of baseDrift: a worktree that does not start from the base lane checkout's commit.
+    param([Parameter(Mandatory = $true)] $added)
+    return [ordered]@{
+        repo = $added.Entry['name']; role = $added.Entry['role']; baseRef = $added.Base.Ref; baseCommit = $added.Base.Commit
+        localCommit = $added.Base.LocalCommit; behind = $added.Base.Behind; ahead = $added.Base.Ahead
+    }
+}
+
+function Get-OctoEnvironmentFeedSnapshotReport {
+    <#
+        The environment's feed is a snapshot of the base lane's packages, built there from the LOCAL checkouts. With
+        worktrees based on origin (the default) two things can be out of step:
+          - rebuildInEnvironment: environment repositories whose worktree is newer than the base lane checkout
+            ($drift rows with behind > 0). Their seeded packages are older than their sources; Invoke-BuildEnvironment
+            rebuilds them into the environment feed.
+          - staleProducers: libraries OUTSIDE the environment that an environment repository consumes (transitively)
+            and whose base lane checkout is behind its upstream (fetched here; a failed fetch uses the ref as last fetched). Their
+            seeded packages can lack what the newer consumers need (CS0246); nothing in the environment rebuilds them.
+        Returns { rebuildInEnvironment; staleProducers = @({ repo; behind; upstream; consumedBy }); hints }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$env,
+        [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$manifest,
+        [Parameter(Mandatory = $true)] [string]$basePath,
+        [object[]]$drift = @()
+    )
+    $rebuild = @($drift | Where-Object { $_['behind'] -gt 0 -and -not (Test-OctoEnvironmentToolRepo -repo $_['repo']) } | ForEach-Object { $_['repo'] })
+    $stale = @()
+    if ($rebuild.Count -gt 0) {
+        $inEnvironment = @($manifest['repos'] | ForEach-Object { $_['name'] })
+        $set = @(Get-OctoEnvironmentRepoSet -manifest $manifest -basePath $basePath)
+        $graph = Get-OctoAffectedRepoGraph -repos $set -features @()
+        # producersOf[consumer] = producers it references
+        $producersOf = @{}
+        foreach ($producer in $graph.Consumers.Keys) {
+            foreach ($edge in $graph.Consumers[$producer]) {
+                if (-not $producersOf.ContainsKey($edge.Consumer)) { $producersOf[$edge.Consumer] = [System.Collections.Generic.List[string]]::new() }
+                if (-not $producersOf[$edge.Consumer].Contains($producer)) { $producersOf[$edge.Consumer].Add($producer) }
+            }
+        }
+        $consumedBy = @{}
+        foreach ($name in $rebuild) {
+            $seen = @{ $name = $true }
+            $queue = [System.Collections.Generic.Queue[string]]::new()
+            $queue.Enqueue($name)
+            while ($queue.Count -gt 0) {
+                $current = $queue.Dequeue()
+                if (-not $producersOf.ContainsKey($current)) { continue }
+                foreach ($producer in $producersOf[$current]) {
+                    if ($seen.ContainsKey($producer)) { continue }
+                    $seen[$producer] = $true
+                    $queue.Enqueue($producer)
+                    if ($inEnvironment -contains $producer) { continue }
+                    if (-not $consumedBy.ContainsKey($producer)) { $consumedBy[$producer] = [System.Collections.Generic.List[string]]::new() }
+                    if (-not $consumedBy[$producer].Contains($name)) { $consumedBy[$producer].Add($name) }
+                }
+            }
+        }
+        foreach ($entry in $set) {
+            if (-not $consumedBy.ContainsKey($entry.Name)) { continue }
+            $upstream = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
+            $ref = if ($upstream.ExitCode -eq 0) { [string]($upstream.Output | Select-Object -Last 1) } else { 'origin/main' }
+            if ($ref -match '^([^/]+)/(.+)$') { [void](Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('fetch', '--quiet', $Matches[1], $Matches[2])) }
+            $count = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-list', '--count', "HEAD..refs/remotes/$ref")
+            if ($count.ExitCode -ne 0) { continue }
+            $behind = [int]($count.Output | Select-Object -Last 1)
+            if ($behind -gt 0) { $stale += [ordered]@{ repo = $entry.Name; behind = $behind; upstream = $ref; consumedBy = @($consumedBy[$entry.Name]) } }
+        }
+    }
+    $hints = @()
+    if ($rebuild.Count -gt 0) {
+        $hints += "The feed was seeded with the packages $basePath built from its local checkouts; $($rebuild -join ', ') start from a newer commit than those packages. Invoke-BuildEnvironment -env $env rebuilds them into the environment feed."
+    }
+    if ($stale.Count -gt 0) {
+        $first = $stale[0]['repo']
+        $hints += "Libraries outside the environment are behind their upstream in ${basePath}: $(@($stale | ForEach-Object { "$($_['repo']) ($($_['behind']) behind $($_['upstream']), consumed by $($_['consumedBy'] -join ', '))" }) -join '; '). Their seeded packages may lack what the newer consumers need (CS0246). Either add them (Add-OctoEnvironmentRepo -env $env -repo $first -role consumer, then Invoke-BuildEnvironment), or update and rebuild them in the base lane and run Sync-OctoEnvironment -env $env."
+    }
+    return [ordered]@{ rebuildInEnvironment = $rebuild; staleProducers = $stale; hints = $hints }
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -950,7 +1129,22 @@ function Get-OctoEnvironmentAffected {
 .DESCRIPTION
     For every repository in -repos a git worktree <env>/<repo> is added from <base>/<repo> on the feature branch
     (-branchName, default <user>/AB#<id>_<desc>; an existing local or origin branch is checked out instead of
-    created). The environment gets nuget/, .nuget-packages/, .octo/local-catalog, .octo/local-blueprint-catalog
+    created). The developer tools octo-tools and octo-devstack live next to the lanes (<rootPath>/<repo>) and can be
+    named too; Invoke-BuildEnvironment does not build them.
+
+    Base: a new feature branch and every consumer worktree start from the upstream of the base checkout's current
+    branch (branches/main: origin/main), fetched first - not from the local checkout, which may be stale. A checkout
+    without an upstream uses origin's default branch. When the local checkout's HEAD differs, a warning names the
+    repository and how far it is behind/ahead (-Json: baseDrift). -localBase keeps the old behaviour (the local
+    checkout's HEAD). The manifest records baseCommit (the commit the worktree started from; for an existing branch
+    its merge base with the base) and baseRef (origin/main, HEAD, or the existing branch).
+    The feed is seeded from the base lane's packages, which were built from the LOCAL checkouts: the output says which
+    environment repositories are newer than those packages (Invoke-BuildEnvironment rebuilds them) and which
+    libraries outside the environment are behind their upstream in the base lane, with what to do (-Json: feedSnapshot).
+
+    Atomic: when anything fails (a worktree, the seeding, -addAffected), everything this call created is rolled back -
+    its worktrees, the environment folder and the branches it created, never a branch that existed before - and the
+    same call can be repeated after the cause is fixed (-Json: rolledBack). The environment gets nuget/, .nuget-packages/, .octo/local-catalog, .octo/local-blueprint-catalog
     (copied from the base lane by Sync-OctoEnvironment rules), logFiles/, an Octo.User.props declaring
     RestorePackagesPath=<env>/.nuget-packages plus OctoEnvironment/OctoEnvironmentBase (the base lane's own
     Octo.User.props is imported for its other settings), and .octo/environment.json (schemaVersion 1).
@@ -975,6 +1169,7 @@ function New-OctoEnvironment {
         [string]$owner = '',
         [string]$base = $script:DefaultBase,
         [switch]$addAffected,
+        [switch]$localBase,
         [switch]$Detailed,
         [switch]$Json
     )
@@ -1020,54 +1215,119 @@ function New-OctoEnvironment {
     }
 
     if (-not $PSCmdlet.ShouldProcess($environmentPath, "Create environment with feature worktree(s) $($repoNames -join ', ') on $branchName")) {
-        $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames }
+        $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames; localBase = [bool]$localBase }
         if ($Json) { Write-OctoJson -Command 'New-OctoEnvironment' -Data $plan }
         return
     }
 
-    foreach ($folder in @('nuget', '.nuget-packages', '.octo', 'logFiles')) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $environmentPath $folder) | Out-Null
-    }
-    Set-Content -LiteralPath (Join-Path $environmentPath 'Octo.User.props') -Value (Get-OctoEnvironmentUserPropsContent -env $env -base $relativeBase -basePath $basePath)
-    Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
-
+    # Atomic: everything below is rolled back when the call does not complete (failure, exception, Ctrl+C best-effort).
+    # The folder did not exist before (checked above), so all of it is this call's; only branches this call created
+    # are deleted, never one that existed before.
+    $created = [System.Collections.Generic.List[object]]::new()
     $errors = @()
-    foreach ($repo in $repoNames) {
-        try {
-            $manifest['repos'] = @($manifest['repos']) + @(Add-OctoEnvironmentWorktree -basePath $basePath -environmentPath $environmentPath -repo $repo -role feature -branchName $branchName)
-            Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
-        }
-        catch { $errors += $_.Exception.Message }
-    }
-    $sync = Invoke-OctoEnvironmentSync -environmentPath $environmentPath -basePath $basePath
-
+    $warnings = @()
+    $drift = @()
     $addedConsumers = @()
-    if ($addAffected -and $errors.Count -eq 0) {
-        $affected = Get-OctoEnvironmentAffected -manifest $manifest -basePath $basePath
-        foreach ($row in $affected.Graph.Affected) {
-            try {
-                $manifest['repos'] = @($manifest['repos']) + @(Add-OctoEnvironmentWorktree -basePath $basePath -environmentPath $environmentPath -repo $row.repo -role consumer)
-                Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
-                $addedConsumers += $row.repo
-            }
-            catch { $errors += $_.Exception.Message }
+    $sync = $null
+    $completed = $false
+    $rolledBack = $null
+    try {
+        foreach ($folder in @('nuget', '.nuget-packages', '.octo', 'logFiles')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $environmentPath $folder) | Out-Null
         }
+        Set-Content -LiteralPath (Join-Path $environmentPath 'Octo.User.props') -Value (Get-OctoEnvironmentUserPropsContent -env $env -base $relativeBase -basePath $basePath)
+        Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
+
+        $addWorktree = {
+            param([string]$repo, [string]$role)
+            $added = Add-OctoEnvironmentWorktree -basePath $basePath -environmentPath $environmentPath -repo $repo -role $role -branchName $branchName -localBase:$localBase
+            $created.Add($added)
+            $manifest['repos'] = @($manifest['repos']) + @($added.Entry)
+            Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
+            return $added
+        }
+        foreach ($repo in $repoNames) {
+            $added = & $addWorktree $repo 'feature'
+            $warnings += @($added.Base.Warnings)
+            if ($added.Base.Commit -ne $added.Base.LocalCommit) { $drift += ConvertTo-OctoBaseDriftRow -added $added }
+        }
+        $sync = Invoke-OctoEnvironmentSync -environmentPath $environmentPath -basePath $basePath
+        if ($addAffected) {
+            $affected = Get-OctoEnvironmentAffected -manifest $manifest -basePath $basePath
+            foreach ($row in $affected.Graph.Affected) {
+                $added = & $addWorktree $row.repo 'consumer'
+                $addedConsumers += $row.repo
+                $warnings += @($added.Base.Warnings)
+                if ($added.Base.Commit -ne $added.Base.LocalCommit) { $drift += ConvertTo-OctoBaseDriftRow -added $added }
+            }
+        }
+        $completed = $true
+    }
+    catch { $errors += $_.Exception.Message }
+    finally {
+        if (-not $completed) { $rolledBack = Undo-OctoEnvironmentCreation -environmentPath $environmentPath -created @($created) }
     }
 
-    $success = $errors.Count -eq 0
-    $global:LASTEXITCODE = if ($success) { 0 } else { 1 }
+    if (-not $completed) {
+        $global:LASTEXITCODE = 1
+        $errors += @($rolledBack.errors)
+        $message = "New-OctoEnvironment failed and was rolled back ($($rolledBack.worktrees.Count) worktree(s), $($rolledBack.branches.Count) branch(es) created by this call$(if ($rolledBack.folder) { ', the environment folder' }) removed); fix the cause and run the same call again: $($errors -join ' | ')"
+        if ($Json) {
+            Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{
+                    environment = $env; path = $environmentPath; branch = $branchName; error = $message; errors = $errors; rolledBack = $rolledBack
+                })
+        }
+        else { Write-Error $message }
+        return
+    }
+
+    $toolRepos = @($manifest['repos'] | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { $_['name'] })
+    $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath -drift $drift
+    $global:LASTEXITCODE = 0
     if ($Json) {
-        Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{
+        Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
                 environment = $env; path = $environmentPath; branch = $branchName; manifest = $manifest
-                consumersAdded = $addedConsumers; sync = (ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed); errors = $errors
+                consumersAdded = $addedConsumers; sync = (ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed); errors = @()
+                localBase = [bool]$localBase; baseDrift = $drift; feedSnapshot = $feedSnapshot; toolRepos = $toolRepos; warnings = $warnings
             })
         return
     }
     Write-Host "Environment $env at $environmentPath (base $basePath)" -ForegroundColor Green
-    foreach ($repo in $manifest['repos']) { Write-Host ("  {0,-9} {1}  {2}" -f $repo['role'], $repo['name'], $(if ($repo['branch']) { $repo['branch'] } else { "detached at $($repo['baseCommit'].Substring(0, [Math]::Min(10, $repo['baseCommit'].Length)))" })) }
+    foreach ($repo in $manifest['repos']) {
+        $short = $repo['baseCommit'].Substring(0, [Math]::Min(10, $repo['baseCommit'].Length))
+        Write-Host ("  {0,-9} {1}  {2}" -f $repo['role'], $repo['name'], $(if ($repo['branch']) { "$($repo['branch']) (from $($repo['baseRef']) $short)" } else { "detached at $($repo['baseRef']) $short" }))
+    }
     Write-OctoEnvironmentSyncSummary -sync $sync
-    foreach ($message in $errors) { Write-Warning $message }
-    if ($success) { Write-Host "Next: Invoke-BuildEnvironment -env $env -verifyTests" -ForegroundColor Cyan }
+    foreach ($message in $warnings) { Write-Warning $message }
+    foreach ($message in $feedSnapshot.hints) { Write-Warning $message }
+    if ($toolRepos.Count -gt 0) { Write-Host "  $($toolRepos -join ', '): developer tool(s), not built by Invoke-BuildEnvironment" -ForegroundColor DarkGray }
+    Write-Host "Next: Invoke-BuildEnvironment -env $env -verifyTests" -ForegroundColor Cyan
+}
+
+function Undo-OctoEnvironmentCreation {
+    # Rollback of a New-OctoEnvironment call that did not complete: the worktrees it added, the branches it created
+    # (never a branch that existed before) and the environment folder (it did not exist before the call).
+    param([Parameter(Mandatory = $true)] [string]$environmentPath, [object[]]$created = @())
+    $report = [ordered]@{ worktrees = @(); branches = @(); folder = $false; errors = @() }
+    foreach ($added in $created) {
+        $path = [string]$added.Entry['path']
+        if (Test-Path -LiteralPath $path) {
+            $remove = Invoke-OctoEnvironmentGit -path $added.Source -arguments @('worktree', 'remove', '--force', $path)
+            if ($remove.ExitCode -ne 0) { $report.errors += "rollback: git worktree remove failed for $($added.Entry['name']): $($remove.Output -join ' ')"; continue }
+        }
+        [void](Invoke-OctoEnvironmentGit -path $added.Source -arguments @('worktree', 'prune'))
+        $report.worktrees += $path
+        if ($added.CreatedBranch) {
+            $delete = Invoke-OctoEnvironmentGit -path $added.Source -arguments @('branch', '-D', $added.CreatedBranch)
+            if ($delete.ExitCode -eq 0) { $report.branches += "$($added.Entry['name']): $($added.CreatedBranch)" }
+            else { $report.errors += "rollback: git branch -D $($added.CreatedBranch) failed in $($added.Entry['name']): $($delete.Output -join ' ')" }
+        }
+    }
+    if ($report.errors.Count -eq 0 -and (Test-Path -LiteralPath $environmentPath)) {
+        try { Remove-Item -LiteralPath $environmentPath -Recurse -Force -ErrorAction Stop; $report.folder = $true }
+        catch { $report.errors += "rollback: $environmentPath could not be removed: $($_.Exception.Message)" }
+    }
+    return $report
 }
 
 <#
@@ -1108,12 +1368,12 @@ function Get-OctoEnvironment {
             owner    = $manifest['owner']
             created  = $manifest['created']
             slot     = $manifest['slot']
-            repos    = @($manifest['repos'] | ForEach-Object { [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; inPlace = (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath (Get-OctoEnvironmentPath -env $name)) } })
+            repos    = @($manifest['repos'] | ForEach-Object { [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; baseRef = $_['baseRef']; inPlace = (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath (Get-OctoEnvironmentPath -env $name)) } })
         }
         if ($env) {
             $row['repos'] = @($manifest['repos'] | ForEach-Object {
                     $state = Get-OctoEnvironmentRepoState -repo $_
-                    [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; inPlace = (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath (Get-OctoEnvironmentPath -env $name)); exists = $state.exists; dirty = $state.dirty; unpushed = $state.unpushed }
+                    [ordered]@{ name = $_['name']; role = $_['role']; branch = $_['branch']; path = $_['path']; baseCommit = $_['baseCommit']; baseRef = $_['baseRef']; inPlace = (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath (Get-OctoEnvironmentPath -env $name)); exists = $state.exists; dirty = $state.dirty; unpushed = $state.unpushed }
                 })
         }
         $rows += [pscustomobject]$row
@@ -1148,8 +1408,11 @@ function Get-OctoEnvironment {
     Adds a repository to an environment: a new feature or consumer worktree, or an existing worktree (-path).
 .DESCRIPTION
     -repo <name>: -role feature (default) creates <env>/<repo> on the branch of the environment's feature repositories
-    (or the default <user>/AB#<id>_<desc>); -role consumer creates a clean worktree detached at the base checkout's
-    commit, rebuilt against the environment's packages (read-only by convention). -addAffected also adds, as
+    (or the default <user>/AB#<id>_<desc>); -role consumer creates a clean detached worktree, rebuilt against the
+    environment's packages (read-only by convention). Both start from the upstream of the base checkout's branch
+    (origin/main, fetched), -localBase from the local checkout's HEAD - see New-OctoEnvironment (baseDrift,
+    feedSnapshot). octo-tools and octo-devstack (next to the lanes) can be added; they are not built.
+    Repeatable: worktrees added before a failure stay in the manifest, the same call adds what is missing. -addAffected also adds, as
     consumers, every affected repository on the path from a feature repository to -repo (Get-OctoAffectedRepos -target).
 
     -path <worktree>: adopts an existing linked worktree - an octo-claude-pm flat worktree <checkout>/wt-<lane>-<repo>
@@ -1180,6 +1443,7 @@ function Add-OctoEnvironmentRepo {
         [switch]$inPlace,
         [ValidateSet('feature', 'consumer')] [string]$role = 'feature',
         [switch]$addAffected,
+        [switch]$localBase,
         [switch]$Json
     )
 
@@ -1233,23 +1497,37 @@ function Add-OctoEnvironmentRepo {
         if ($Json) { Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; added = $plan }) }
         return
     }
+    # Repeatable, not atomic: every worktree that was added is in the manifest; after a failure the same call adds
+    # only what is still missing.
     $added = @()
     $errors = @()
+    $warnings = @()
+    $drift = @()
     foreach ($item in $toAdd) {
         try {
-            $manifest['repos'] = @($manifest['repos']) + @(Add-OctoEnvironmentWorktree -basePath $basePath -environmentPath $environmentPath -repo $item.Name -role $item.Role -branchName $branchName)
+            $new = Add-OctoEnvironmentWorktree -basePath $basePath -environmentPath $environmentPath -repo $item.Name -role $item.Role -branchName $branchName -localBase:$localBase
+            $manifest['repos'] = @($manifest['repos']) + @($new.Entry)
             Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
-            $added += [ordered]@{ name = $item.Name; role = $item.Role }
+            $added += [ordered]@{ name = $item.Name; role = $item.Role; baseRef = $new.Entry['baseRef']; baseCommit = $new.Entry['baseCommit'] }
+            $warnings += @($new.Base.Warnings)
+            if ($new.Base.Commit -ne $new.Base.LocalCommit) { $drift += ConvertTo-OctoBaseDriftRow -added $new }
         }
         catch { $errors += $_.Exception.Message }
     }
+    $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath -drift $drift
+    $toolRepos = @($added | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { $_['name'] })
     $success = $errors.Count -eq 0
     $global:LASTEXITCODE = if ($success) { 0 } else { 1 }
     if ($Json) {
-        Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{ environment = $env; added = $added; errors = $errors })
+        Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data (New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{
+                environment = $env; added = $added; errors = $errors; localBase = [bool]$localBase; baseDrift = $drift; feedSnapshot = $feedSnapshot; toolRepos = $toolRepos; warnings = $warnings
+            })
         return
     }
-    foreach ($item in $added) { Write-Host ("Added {0} {1} to {2}" -f $item.role, $item.name, $env) -ForegroundColor Green }
+    foreach ($item in $added) { Write-Host ("Added {0} {1} to {2} (from {3})" -f $item.role, $item.name, $env, $item.baseRef) -ForegroundColor Green }
+    foreach ($message in $warnings) { Write-Warning $message }
+    foreach ($message in $feedSnapshot.hints) { Write-Warning $message }
+    if ($toolRepos.Count -gt 0) { Write-Host "$($toolRepos -join ', '): developer tool(s), not built by Invoke-BuildEnvironment" -ForegroundColor DarkGray }
     foreach ($message in $errors) { Write-Warning $message }
 }
 
@@ -1264,7 +1542,7 @@ function Add-OctoEnvironmentExistingWorktree {
     catch { & $fail $_.Exception.Message; return }
     if ($present -contains $info.Repo) { & $fail "$($info.Repo) is already in $env."; return }
     if (Test-OctoPathInside -path $info.Path -parent $environmentPath) { & $fail "$($info.Path) already lies inside the environment folder $environmentPath."; return }
-    if ($info.Repo -in @('octo-tools', 'octo-devstack')) {
+    if (Test-OctoEnvironmentToolRepo -repo $info.Repo) {
         Write-Warning "$($info.Repo) is a developer tool, not built by Invoke-BuildEnvironment - it is only recorded."
     }
     $target = Join-Path $environmentPath $info.Repo
@@ -1481,7 +1759,8 @@ function Remove-OctoEnvironment {
     $errors = @()
     foreach ($repo in $owned) {
         # The main checkout that owns the worktree (adopted worktrees may come from another checkout than the base lane).
-        $owner = Join-Path $basePath $repo['name']
+        $owner = Get-OctoEnvironmentRepoSource -repo ([string]$repo['name']) -basePath $basePath
+        if (-not $owner) { $owner = Join-Path $basePath $repo['name'] }
         if (Test-Path -LiteralPath $repo['path']) {
             try { $owner = (Get-OctoWorktreeInfo -path $repo['path']).MainCheckout } catch { }
             # Clean by the check above; --force only lets git remove a worktree with submodules or ignored build output.
@@ -1532,6 +1811,8 @@ function Remove-OctoEnvironment {
     NuGet.Config in a temporary folder (mode 600 / current-user ACL, deleted after the build, also on failure) passed
     as RestoreConfigFile carries them, with the user-level NuGet.Config's credentials for the same sources
     (RestoreConfigFile replaces that file).
+    Developer tools in the environment (octo-tools, octo-devstack) are not built; -Json lists them in
+    environment.toolRepos, and an environment that holds only tools succeeds with nothing to build.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
     Before the build the kill scope of the environment is cleared: Invoke-KillDotnet -branchRootPath wt-<env>
     -additionalRoots <in-place worktrees> (Windows stops the matched dotnet processes, macOS/Linux list them);
@@ -1575,7 +1856,10 @@ function Invoke-BuildEnvironment {
     $credentials = @{}
     $credentialRepos = @()
     $environmentFeed = Join-Path $environmentPath 'nuget'
-    foreach ($repo in @($manifest['repos'] | Where-Object { Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath })) {
+    # Developer tools (octo-tools, octo-devstack) are part of the environment but never built: not in the build
+    # order, not passed to Invoke-BuildRange, and an in-place one is not in the kill scope (a daemon may run from it).
+    $toolRepos = @($manifest['repos'] | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { [string]$_['name'] })
+    foreach ($repo in @($manifest['repos'] | Where-Object { -not (Test-OctoEnvironmentToolRepo -repo $_['name']) -and (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath) })) {
         if (-not (Test-Path -LiteralPath $repo['path'] -PathType Container)) { & $fail "In-place worktree $($repo['path']) of $($repo['name']) does not exist."; return }
         $external[[string]$repo['name']] = [string]$repo['path']
         # Credentials in a source (user:password@, e.g. a resolved OctoNugetPrivateServer) never go on the dotnet
@@ -1594,7 +1878,25 @@ function Invoke-BuildEnvironment {
     }
     try { $order = @(Get-OctoBuildOrder -branchRootPath $environmentPath -excludeFrontend $false -excludeAdditional $false -additionalRepos $external) }
     catch { & $fail $_.Exception.Message; return }
-    if ($order.Count -eq 0) { & $fail "Environment $env holds no repository."; return }
+    if ($order.Count -eq 0) {
+        if ($toolRepos.Count -eq 0) { & $fail "Environment $env holds no repository."; return }
+        # Only developer tools: nothing to build is a result, not a failure.
+        $global:LASTEXITCODE = 0
+        $note = "Environment $env holds only developer tools ($($toolRepos -join ', ')) - nothing to build."
+        if ($EventsFile -and -not $DryRun) {
+            Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-BuildEnvironment' -Event 'plan' -Data ([ordered]@{ repos = @(); count = 0 })
+            Write-OctoBuildEvent -Path $EventsFile -Command 'Invoke-BuildEnvironment' -Event 'done' -Data ([ordered]@{ success = $true; failedRepo = $null; failedStep = $null; elapsedSeconds = 0 })
+        }
+        if ($Json) {
+            $data = [ordered]@{ success = $true; repositories = @(); note = $note; synced = $false
+                environment = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @(); inPlace = @{}; toolRepos = $toolRepos } }
+            if ($DryRun) { $data['whatIf'] = $true }
+            Write-OctoJson -Command 'Invoke-BuildEnvironment' -Data $data
+        }
+        else { Write-Host $note -ForegroundColor Yellow }
+        return
+    }
+    if ($toolRepos.Count -gt 0 -and -not $Json) { Write-Host "Not built (developer tools): $($toolRepos -join ', ')" -ForegroundColor DarkGray }
 
     # Kill scope: the lane matching of Invoke-KillDotnet over wt-<env> AND every in-place worktree (Windows stops the
     # matched dotnet processes, which could lock build output; macOS/Linux only list them).
@@ -1663,7 +1965,7 @@ function Invoke-BuildEnvironment {
         $data['error'] = "Invoke-BuildRange returned no JSON document: $($_.Exception.Message)"
         $exitCode = 1
     }
-    $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external }
+    $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external; toolRepos = $toolRepos }
     $data['synced'] = $null -ne $sync
     $data['killDotnet'] = $kill
     if ($null -ne $sync) { $data['sync'] = ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed }
