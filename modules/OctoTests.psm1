@@ -1660,7 +1660,7 @@ function Invoke-OctoTestRun {
         return
     }
 
-    & $emit 'plan' ([ordered]@{ repo = $repo; environment = $target.Environment; projects = @($planReport | ForEach-Object { [ordered]@{ project = $_.project; docker = $_.docker; noBuild = $_.noBuild; buildReason = $_.buildReason; skip = $_.skip } }); count = $plan.Count })
+    & $emit 'plan' ([ordered]@{ repo = $repo; environment = $target.Environment; projects = @($planReport | ForEach-Object { [ordered]@{ project = $_.project; runner = $_.runner; docker = $_.docker; noBuild = $_.noBuild; buildReason = $_.buildReason; skip = $_.skip; noMatch = $_.noMatch } }); count = $plan.Count })
     if (-not $Json) {
         Write-Host "Invoke-OctoTestRun ($configuration): $repo in $($target.LanePath) - $($runnable.Count) test project(s)" -ForegroundColor Cyan
     }
@@ -1817,7 +1817,7 @@ function Invoke-OctoTestRun {
             $logFile = Join-Path $runPath $(if ($frontend) { 'ng-test.log' } else { 'dotnet-test.log' })
             $result.resultsPath = $runPath
             $result.logFile = $logFile
-            & $emit 'testProjectStart' ([ordered]@{ repo = $repo; project = $name; index = $index; count = $plan.Count; docker = $item.Docker; noBuild = $item.NoBuild; buildReason = $item.BuildReason; calls = $(if ($frontend) { 1 } else { @($item.Calls).Count }) })
+            & $emit 'testProjectStart' ([ordered]@{ repo = $repo; project = $name; index = $index; count = $plan.Count; runner = $item.Runner; docker = $item.Docker; noBuild = $item.NoBuild; buildReason = $item.BuildReason; calls = $(if ($frontend) { 1 } else { @($item.Calls).Count }) })
             if (-not $Json) {
                 $mode = if ($item.NoBuild) { '--no-build' } else { "builds first: $($item.BuildReason)" }
                 Write-Host "==> $name ($mode)$(if ($item.Docker) { ' [test lock held]' })" -ForegroundColor Cyan

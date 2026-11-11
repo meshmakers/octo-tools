@@ -1344,6 +1344,7 @@ Describe 'Invoke-OctoTestRun' {
             $plan.count | Should -Be 2
             @($plan.projects.project) | Should -Be @('Sample.UnitTests', 'Sample.IntegrationTests')
             $plan.projects[1].docker | Should -BeTrue
+            @($plan.projects.runner) | Should -Be @('vstest', 'vstest')
 
             $start = $records[4]
             $start.project | Should -Be 'Sample.IntegrationTests'
@@ -1351,6 +1352,7 @@ Describe 'Invoke-OctoTestRun' {
             $start.count | Should -Be 2
             $start.docker | Should -BeTrue
             $start.noBuild | Should -BeTrue
+            $start.runner | Should -Be 'vstest'
 
             $projectDone = $records[5]
             $projectDone.success | Should -BeFalse
