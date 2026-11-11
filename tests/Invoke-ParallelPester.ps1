@@ -14,7 +14,8 @@
     code.
 
 .PARAMETER Path
-    Folder with the test files (default: the folder of this script) or single test files.
+    Folder with the test files, searched recursively like Invoke-Pester does (default: the folder of this script), or
+    single test files.
 
 .PARAMETER ThrottleLimit
     Processes at a time. Default: the number of processors, at most 8.
@@ -41,7 +42,8 @@ param(
 $files = @(foreach ($item in $Path) {
         $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($item)
         if (Test-Path -LiteralPath $resolved -PathType Container) {
-            Get-ChildItem -LiteralPath $resolved -Filter '*.Tests.ps1' -File
+            # Recursive, like Invoke-Pester: a failing file in a subfolder must not be left out.
+            Get-ChildItem -LiteralPath $resolved -Filter '*.Tests.ps1' -File -Recurse
         }
         elseif (Test-Path -LiteralPath $resolved -PathType Leaf) { Get-Item -LiteralPath $resolved }
         else { throw "Invoke-ParallelPester: $item does not exist." }

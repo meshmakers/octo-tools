@@ -146,11 +146,15 @@ Describe 'Add-OctoEnvironmentRepo -path (adopting existing worktrees)' {
 Describe 'Credentials file and adoption base commit (CodeRabbit on 7328531)' {
     It 'New-OctoRestoreConfigFile removes its folder and rethrows when writing the credentials fails' {
         InModuleScope OctoEnvironment {
-            $before = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'octo-restore-*' -ErrorAction SilentlyContinue).FullName
-            Mock Write-OctoRestoreConfigText { if ($text) { throw 'disk full' } else { [IO.File]::WriteAllText($path, '') } }
+            # The folder this call created, not a before/after listing of the temp folder: other test files run in
+            # parallel processes and create octo-restore-* folders there at the same time.
+            $script:WrittenConfigPaths = [System.Collections.Generic.List[string]]::new()
+            Mock Write-OctoRestoreConfigText { $script:WrittenConfigPaths.Add($path); if ($text) { throw 'disk full' } else { [IO.File]::WriteAllText($path, '') } }
             { New-OctoRestoreConfigFile -sources @('https://a.invalid/v3') -credentials @{ 'https://a.invalid/v3' = @{ User = 'u'; Password = 'secret' } } -userConfigPath '' } | Should -Throw '*disk full*'
-            $after = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'octo-restore-*' -ErrorAction SilentlyContinue).FullName
-            @($after | Where-Object { $before -notcontains $_ }) | Should -BeNullOrEmpty
+            $folders = @($script:WrittenConfigPaths | ForEach-Object { Split-Path -Parent $_ } | Select-Object -Unique)
+            $folders.Count | Should -Be 1
+            (Split-Path -Leaf $folders[0]) | Should -BeLike 'octo-restore-*'
+            Test-Path -LiteralPath $folders[0] | Should -BeFalse
         }
     }
 

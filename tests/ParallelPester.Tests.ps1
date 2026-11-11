@@ -39,7 +39,9 @@ Describe 'Invoke-ParallelPester' {
     }
 
     It 'fails the merged result when one file has a failed test, and names the test' {
-        $suite = New-SampleSuite 'red' @{ 'A.Tests.ps1' = $script:Passing; 'B.Tests.ps1' = $script:Failing }
+        # the failing file sits in a subfolder: found like Invoke-Pester finds it
+        $suite = New-SampleSuite 'red' @{ 'A.Tests.ps1' = $script:Passing }
+        [void](New-SampleSuite 'red/nested/deeper' @{ 'B.Tests.ps1' = $script:Failing })
 
         $result = & $script:Runner -Path $suite -PassThru
 

@@ -155,9 +155,6 @@ function Initialize-FakeWorkspaceTemplate {
 
 function Get-Doc([object[]]$output) { return (($output -join "`n") | ConvertFrom-Json) }
 
-# Once per file, before the first Describe: Pester keeps what exists in TestDrive when a block starts.
-Initialize-FakeWorkspaceTemplate
-
 # AfterAll of every file that dot-sourced this helper.
 function Restore-OctoEnvironmentTestState {
     foreach ($name in $script:SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $script:SavedEnv[$name]) }
@@ -166,3 +163,7 @@ function Restore-OctoEnvironmentTestState {
     $env:NUGET_PACKAGES = $script:PreviousNugetPackages
     if ($null -ne $script:PreviousRootPath) { $global:rootPath = $script:PreviousRootPath } else { Remove-Variable -Name rootPath -Scope Global -ErrorAction SilentlyContinue }
 }
+
+# Once per file, before the first Describe: Pester keeps what exists in TestDrive when a block starts. Last, so that
+# the AfterAll function above exists also when a git call of the template fails.
+Initialize-FakeWorkspaceTemplate
