@@ -422,6 +422,18 @@ Import-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99
 Invoke-Pester ./tests
 ```
 
+`Invoke-Pester ./tests` runs the test files one after the other (about three minutes). The same files in parallel
+processes, with one merged result that fails when any file fails (exit code 1):
+
+```powershell
+./tests/Invoke-ParallelPester.ps1                    # every *.Tests.ps1, up to 8 processes
+./tests/Invoke-ParallelPester.ps1 -ThrottleLimit 4   # fewer processes on a busy machine
+```
+
+Slow although nothing changed? Look at your temp folder (`[IO.Path]::GetTempPath()`): PowerShell's file cmdlets get
+slow below a folder with tens of thousands of entries. The tests keep their fixtures in Pester's `TestDrive` for
+that reason.
+
 # Customizing Windows Terminal Profile
 
 1. Create Environment Variable MESHMAKERS with path to the OctoMesh repository.
