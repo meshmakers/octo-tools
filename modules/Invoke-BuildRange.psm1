@@ -391,6 +391,45 @@ function New-OctoSolutionFilter {
     return $filterPath
 }
 
+function Invoke-OctoDotnetRestoreAndBuild {
+    <#
+    .SYNOPSIS
+        `dotnet restore`, then `dotnet build --no-restore`, both appended to the log - the same work as one
+        `dotnet build`, as two calls so the restore and the compile can be timed (AB#8831). No forced restore (-f):
+        NuGet re-extracts exactly the packages that were purged. A failed restore does not start the build.
+        Returns { ExitCode; RestoreSeconds; CompileSeconds; FailedIn (restore | build | $null) }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$target,
+        [Parameter(Mandatory = $true)] [string]$configuration,
+        [string[]]$propertyArgs = @(),
+        [Parameter(Mandatory = $true)] [string]$logFile
+    )
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    & dotnet restore $target "-p:Configuration=$configuration" -nodeReuse:false @propertyArgs *>> $logFile
+    $exitCode = $LASTEXITCODE
+    $restoreSeconds = $watch.Elapsed.TotalSeconds
+    if ($exitCode -ne 0) { return [pscustomobject]@{ ExitCode = $exitCode; RestoreSeconds = $restoreSeconds; CompileSeconds = 0.0; FailedIn = 'restore' } }
+    $watch.Restart()
+    & dotnet build $target -c $configuration --no-restore -nodeReuse:false @propertyArgs *>> $logFile
+    $exitCode = $LASTEXITCODE
+    return [pscustomobject]@{ ExitCode = $exitCode; RestoreSeconds = $restoreSeconds; CompileSeconds = $watch.Elapsed.TotalSeconds; FailedIn = $(if ($exitCode -ne 0) { 'build' } else { $null }) }
+}
+
+function Get-OctoRepoTimings {
+    # The measured parts of one repository's build for -Json and the repoDone event (seconds; 0 when a part did not
+    # run or cannot be told apart - build.ps1, frontend and zenon builds report only buildSeconds).
+    param($build = $null, $tests = $null, [double]$catalogSeconds = 0.0)
+    $value = { param($source, [string]$name) if ($null -ne $source -and $source.PSObject.Properties[$name] -and $null -ne $source.$name) { [double]$source.$name } else { 0.0 } }
+    return [ordered]@{
+        catalogSeconds     = $catalogSeconds
+        restoreSeconds     = & $value $build 'RestoreSeconds'
+        compileSeconds     = & $value $build 'CompileSeconds'
+        testRestoreSeconds = & $value $tests 'RestoreSeconds'
+        testCompileSeconds = & $value $tests 'CompileSeconds'
+    }
+}
+
 function Invoke-OctoBuildRangeRepo {
     # Builds one repository according to its plan entry. No forced restore (-f): the implicit
     # restore of `dotnet build` re-extracts exactly the packages that were purged from the global
@@ -434,9 +473,8 @@ function Invoke-OctoBuildRangeRepo {
         Write-Host "[$configuration] dotnet build $buildTarget $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" -ForegroundColor Green
     }
     "Invoke-BuildRange: dotnet build $buildTarget -c $configuration -nodeReuse:false $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" | Set-Content -Path $logFile
-    & dotnet build $buildTarget -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
-    $exitCode = $LASTEXITCODE
-    return [pscustomobject]@{ Success = ($exitCode -eq 0); LogFile = $logFile; ExitCode = $exitCode }
+    $step = Invoke-OctoDotnetRestoreAndBuild -target $buildTarget -configuration $configuration -propertyArgs $propertyArgs -logFile $logFile
+    return [pscustomobject]@{ Success = ($step.ExitCode -eq 0); LogFile = $logFile; ExitCode = $step.ExitCode; RestoreSeconds = $step.RestoreSeconds; CompileSeconds = $step.CompileSeconds; FailedIn = $step.FailedIn }
 }
 
 function Invoke-OctoBuildRangeTests {
@@ -460,9 +498,8 @@ function Invoke-OctoBuildRangeTests {
         Write-Host "[$configuration] verify tests compile: dotnet build $filter" -ForegroundColor Green
     }
     "Invoke-BuildRange -verifyTests: dotnet build $filter -c $configuration -nodeReuse:false $(Hide-OctoUrlCredentials ($propertyArgs -join ' '))" | Add-Content -Path $logFile
-    & dotnet build $filter -c $configuration -nodeReuse:false @propertyArgs *>> $logFile
-    $exitCode = $LASTEXITCODE
-    return [pscustomobject]@{ Success = ($exitCode -eq 0); Skipped = $false; LogFile = $logFile; ExitCode = $exitCode }
+    $step = Invoke-OctoDotnetRestoreAndBuild -target $filter -configuration $configuration -propertyArgs $propertyArgs -logFile $logFile
+    return [pscustomobject]@{ Success = ($step.ExitCode -eq 0); Skipped = $false; LogFile = $logFile; ExitCode = $step.ExitCode; RestoreSeconds = $step.RestoreSeconds; CompileSeconds = $step.CompileSeconds; FailedIn = $step.FailedIn }
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -515,7 +552,9 @@ function Invoke-OctoBuildRangeRepoStep {
     $entry = [pscustomobject]$request['entry']
     $properties = @{}
     foreach ($key in @($request['msbuildProperties'].Keys)) { $properties[[string]$key] = $request['msbuildProperties'][$key] }
-    $result = [ordered]@{ success = $false; logFile = $null; buildSeconds = 0.0; testSeconds = 0.0; tests = $null; error = $null }
+    $result = [ordered]@{ success = $false; logFile = $null; buildSeconds = 0.0; testSeconds = 0.0; tests = $null; error = $null; timings = $null }
+    $build = $null
+    $tests = $null
     $stage = 'build'
     try {
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -540,6 +579,7 @@ function Invoke-OctoBuildRangeRepoStep {
         if ($stage -eq 'tests') { $result.tests = [ordered]@{ success = $false; skipped = $false; logFile = $result.logFile } }
         else { $result.success = $false }
     }
+    $result.timings = Get-OctoRepoTimings -build $build -tests $tests
     Write-OctoJobFile -path ([string]$request['resultFile']) -text (ConvertTo-Json -InputObject $result -Depth 5)
 }
 
@@ -590,7 +630,7 @@ function Get-OctoRepoBuildJobState {
         result file is a failed build whose log is the child's error output.
     #>
     param([Parameter(Mandatory = $true)] $job)
-    $state = [ordered]@{ Done = $false; Phase = 'build'; Build = $null; Tests = $null; BuildSeconds = 0.0; TestSeconds = 0.0 }
+    $state = [ordered]@{ Done = $false; Phase = 'build'; Build = $null; Tests = $null; BuildSeconds = 0.0; TestSeconds = 0.0; Timings = $null }
     if (Test-Path -LiteralPath $job.PhaseFile) { $state.Phase = 'tests' }
     if (-not $job.Process.HasExited) { return [pscustomobject]$state }
     $state.Done = $true
@@ -601,6 +641,10 @@ function Get-OctoRepoBuildJobState {
         if ($null -ne $result.tests) { $state.Tests = [pscustomobject]@{ Success = [bool]$result.tests.success; Skipped = [bool]$result.tests.skipped; LogFile = $result.tests.logFile } }
         $state.BuildSeconds = [double]$result.buildSeconds
         $state.TestSeconds = [double]$result.testSeconds
+        if ($result.PSObject.Properties['timings'] -and $null -ne $result.timings) {
+            $state.Timings = [ordered]@{}
+            foreach ($property in $result.timings.PSObject.Properties) { $state.Timings[$property.Name] = [double]$property.Value }
+        }
     }
     else {
         # The child's own output lives in the run's temporary folder, which is deleted at the end: keep the diagnostic
@@ -922,6 +966,12 @@ function Write-OctoBuildRangePlan {
     Events: index is the start order (1..count) and repoDone repeats the index of its repoStart; plan and the
     -Json document carry parallel / maxParallel, plan.repos[] and -WhatIf repositories[] carry dependsOn.
 
+.PARAMETER refreshCatalogs
+    AB#8831: let every CK compile refresh the remote CK catalogs itself, as before. Without the switch the run reads
+    them at most once - before the first repository that uses a construction kit, and not at all while the caches are
+    younger than 30 minutes - and builds with OctoRefreshRemoteCatalogs=false (OctoCkCatalogRefresh.psm1: what that
+    means for the compile, and when it is not applied). -Json: catalogs { mode, usable, seconds, detail, repo }.
+
 .PARAMETER EventsFile
     Append build progress events to this file while the run is going (one JSON object per line,
     see Write-OctoBuildEvent): plan, then per repository repoStart, phase (build, tests, packages,
@@ -985,6 +1035,7 @@ function Invoke-BuildRange {
         [hashtable]$repoInputs = @{},
         [hashtable]$skipRepos = @{},
         [ValidateRange(1, 16)] [int]$maxParallel = 1,
+        [switch]$refreshCatalogs,
         [string]$EventsFile = '',
         [string]$EventsCommand = 'Invoke-BuildRange',
         [switch]$Json
@@ -1107,6 +1158,7 @@ function Invoke-OctoBuildRangeCore {
         [hashtable]$repoInputs = @{},
         [hashtable]$skipRepos = @{},
         [int]$maxParallel = 1,
+        [switch]$refreshCatalogs,
         [hashtable]$events,
         [switch]$Json
     )
@@ -1345,7 +1397,11 @@ function Invoke-OctoBuildRangeCore {
         if ($null -eq $dependsOn) { $dependsOn = @($planNames | Select-Object -First $i) }
         $entry | Add-Member -NotePropertyName DependsOn -NotePropertyValue @($dependsOn) -Force
         $entry | Add-Member -NotePropertyName Exclusive -NotePropertyValue ($entry.Mode -in @('script', 'frontend', 'zenon')) -Force
-        $entry | Add-Member -NotePropertyName CkWriter -NotePropertyValue ($parallel -and $entry.Mode -eq 'dotnet' -and (Test-OctoRepoHasCkModel -path $entry.Path)) -Force
+        # A ckModel.yaml or construction-kits.yaml anywhere in the repository: its build reads the CK catalogs (and
+        # usually publishes into the lane's local catalog). Such repositories never overlap in a parallel run.
+        $usesCk = $entry.Mode -eq 'dotnet' -and (Test-OctoRepoUsesCk -path $entry.Path)
+        $entry | Add-Member -NotePropertyName UsesCk -NotePropertyValue $usesCk -Force
+        $entry | Add-Member -NotePropertyName CkWriter -NotePropertyValue ($parallel -and $usesCk) -Force
     }
     # Only repositories that are going to be built: a run that skips everything replaces no output and must not
     # refuse (or, with -stopServices, stop) running services. The prediction counts a consumer of a rebuilt library as built.
@@ -1368,12 +1424,13 @@ function Invoke-OctoBuildRangeCore {
                     skipUnchanged    = [bool]$skipUnchangedEnabled
                     parallel         = $parallel
                     maxParallel      = $maxParallel
+                    refreshCatalogs  = [bool]$refreshCatalogs
                     configuration    = $configuration
                     nugetPath        = $nugetTarget
                     feedPath         = if ($privateFeed) { $nugetTarget } else { $null }
                     repoPaths        = $repoPathsReport
                     repositories     = @($plan | ForEach-Object {
-                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes); action = $_.Decision.Action; reason = $_.Decision.Reason; detail = $_.Decision.Detail; dependsOn = @($_.DependsOn); exclusive = [bool]($_.Exclusive -or $_.CkWriter) }
+                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes); action = $_.Decision.Action; reason = $_.Decision.Reason; detail = $_.Decision.Detail; dependsOn = @($_.DependsOn); exclusive = [bool]($_.Exclusive -or $_.CkWriter); usesCk = [bool]$_.UsesCk }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
                     msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
@@ -1458,6 +1515,10 @@ function Invoke-OctoBuildRangeCore {
                 buildSeconds   = $result.buildDuration.TotalSeconds
                 testSeconds    = $result.testDuration.TotalSeconds
                 packageSeconds = $result.packageDuration.TotalSeconds
+                catalogSeconds     = $(if ($result.timings) { $result.timings.catalogSeconds } else { 0.0 })
+                restoreSeconds     = $(if ($result.timings) { $result.timings.restoreSeconds } else { 0.0 })
+                compileSeconds     = $(if ($result.timings) { $result.timings.compileSeconds } else { 0.0 })
+                testRestoreSeconds = $(if ($result.timings) { $result.timings.testRestoreSeconds } else { 0.0 })
                 copied         = [int]$result.copiedCount
                 purged         = @($result.purged).Count
                 logFile        = $result.logFile
@@ -1472,6 +1533,29 @@ function Invoke-OctoBuildRangeCore {
         if ($null -eq $decision.Inputs -or $decision.Inputs.Source.Problem) { return $false }
         foreach ($id in @($decision.Inputs.Packages.Keys)) { if ($staleIds -contains $id) { return $false } }
         return $true
+    }
+    # AB#8831: the remote CK catalogs are read at most once per run, before the first repository that uses them.
+    $catalogRun = [ordered]@{ decided = $false; usable = $false; mode = $(if ($refreshCatalogs) { 'perCompile' } else { 'notNeeded' }); seconds = 0.0; detail = $(if ($refreshCatalogs) { '-refreshCatalogs: every CK compile refreshes the catalogs itself' } else { 'no repository that uses a construction kit was built' }); repo = $null }
+    $ensureCatalogs = {
+        param($entry)
+        if ($refreshCatalogs -or -not $entry.UsesCk -or $catalogRun.decided -or (Test-OctoCatalogPropertySet -properties $entry.MsBuildProperties)) { return 0.0 }
+        & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'catalogs' })
+        $read = Initialize-OctoRunCatalogs -laneRootPath $branchRootPath
+        $catalogRun.decided = $true
+        $catalogRun.usable = [bool]$read.usable
+        $catalogRun.mode = $read.mode
+        $catalogRun.seconds = [double]$read.seconds
+        $catalogRun.detail = $read.detail
+        $catalogRun.repo = $entry.Name
+        if (-not $Json) { Write-Host "    CK catalogs: $($read.mode) - $($read.detail)$(if ($read.usable) { '; CK compiles of this run do not refresh them again' })" -ForegroundColor $(if ($read.usable) { 'DarkGray' } else { 'Yellow' }) }
+        return [double]$read.seconds
+    }
+    # The MSBuild properties one repository is built with: its own, plus OctoRefreshRemoteCatalogs=false once the
+    # catalogs were read for the run (never over a value the caller passed). Not part of the stamp.
+    $propertiesFor = {
+        param($entry)
+        if ($catalogRun.usable -and $entry.UsesCk) { return (Add-OctoCatalogProperty -properties $entry.MsBuildProperties) }
+        return $entry.MsBuildProperties
     }
     $repoIndex = 0
     $failedNames = @()
@@ -1505,12 +1589,14 @@ function Invoke-OctoBuildRangeCore {
         }
         # Everything after the build step of one repository: package copy, cache purge, stamp, result, repoDone.
         $finishRepo = {
-            param($slot, $build, $tests, [TimeSpan]$buildDuration, [TimeSpan]$testDuration)
+            param($slot, $build, $tests, [TimeSpan]$buildDuration, [TimeSpan]$testDuration, $timings = $null)
             $entry = $slot.Entry
+            if ($null -eq $timings) { $timings = Get-OctoRepoTimings -build $build -tests $tests }
+            $timings.catalogSeconds = [double]$slot.CatalogSeconds
             $result = [ordered]@{
                 repo = $entry.Name; success = [bool]$build.Success; status = $(if ($build.Success) { 'built' } else { 'failed' })
                 reason = $slot.Decision.Reason; detail = $slot.Decision.Detail
-                buildDuration = $buildDuration; packageDuration = [TimeSpan]::Zero; testDuration = $testDuration
+                buildDuration = $buildDuration; packageDuration = [TimeSpan]::Zero; testDuration = $testDuration; timings = $timings
                 testsCompiled = if ($null -ne $tests -and -not $tests.Skipped) { [bool]$tests.Success } else { $null }
                 copiedCount = 0; purged = @(); staleSkipped = @(); logFile = $build.LogFile; msbuildProperties = @($entry.PropertyArgs)
             }
@@ -1585,7 +1671,7 @@ function Invoke-OctoBuildRangeCore {
                             $status[$entry.Name] = 'finished'
                             continue
                         }
-                        $slot = [pscustomobject]@{ Entry = $entry; Index = $repoIndex; Decision = $decision; Watch = [System.Diagnostics.Stopwatch]::StartNew(); Job = $null; Phase = 'build'; Reported = $false }
+                        $slot = [pscustomobject]@{ Entry = $entry; Index = $repoIndex; Decision = $decision; Watch = [System.Diagnostics.Stopwatch]::StartNew(); Job = $null; Phase = 'build'; Reported = $false; CatalogSeconds = 0.0 }
                         & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
                         & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
                         if ($entry.Mode -eq 'none') {
@@ -1603,6 +1689,8 @@ function Invoke-OctoBuildRangeCore {
                         if (-not $Json) { Write-Host "==> $($entry.Name)$(if ($skipUnchangedEnabled) { " ($($decision.Reason)$(if ($decision.Detail) { ": $($decision.Detail)" }))" }) [$($running.Count + 1) of $maxParallel running]" -ForegroundColor Cyan }
                         if ($purgeEnabled) { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
                         $status[$entry.Name] = 'running'
+                        # Here, never in a child: one read for the whole run, before the first repository that needs it.
+                        $slot.CatalogSeconds = & $ensureCatalogs $entry
                         if ($configuration -ieq 'DebugL' -and $entry.Mode -eq 'dotnet' -and -not $skipCkSync) {
                             # Writes the lane's local catalog: here, never in a child (CK repositories are serial).
                             [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.Path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
@@ -1612,7 +1700,7 @@ function Invoke-OctoBuildRangeCore {
                             $running.Add($slot)
                             $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
                             $savedRepoEnvironment = if ($entry.RestoreSources) { Set-OctoBuildEnvironment -environment @{ RestoreSources = $entry.RestoreSources } } else { $null }
-                            try { $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json }
+                            try { $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties (& $propertiesFor $entry) -Json:$Json }
                             finally { Restore-OctoBuildEnvironment -saved $savedRepoEnvironment }
                             $buildWatch.Stop()
                             & $finishRepo $slot $build $null $buildWatch.Elapsed ([TimeSpan]::Zero)
@@ -1623,7 +1711,7 @@ function Invoke-OctoBuildRangeCore {
                         foreach ($name in @($childEnvironment.Keys)) { $environment[$name] = $childEnvironment[$name] }
                         if ($entry.RestoreSources) { $environment['RestoreSources'] = [string]$entry.RestoreSources }
                         $running.Add($slot)
-                        $slot.Job = Start-OctoRepoBuildJob -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -verifyTests:$verify -environment $environment -workDirectory $workDirectory
+                        $slot.Job = Start-OctoRepoBuildJob -entry $entry -configuration $configuration -msbuildProperties (& $propertiesFor $entry) -verifyTests:$verify -environment $environment -workDirectory $workDirectory
                     }
                 }
                 # 2. Collect what finished.
@@ -1633,7 +1721,7 @@ function Invoke-OctoBuildRangeCore {
                     if (-not $state.Done) { continue }
                     $progress = $true
                     # Still in $running while its packages are copied: a throw in there reaches the cleanup below.
-                    & $finishRepo $slot $state.Build $state.Tests ([TimeSpan]::FromSeconds($state.BuildSeconds)) ([TimeSpan]::FromSeconds($state.TestSeconds))
+                    & $finishRepo $slot $state.Build $state.Tests ([TimeSpan]::FromSeconds($state.BuildSeconds)) ([TimeSpan]::FromSeconds($state.TestSeconds)) $state.Timings
                     [void]$running.Remove($slot)
                 }
                 if ($running.Count -eq 0) {
@@ -1699,6 +1787,11 @@ function Invoke-OctoBuildRangeCore {
         $events.LogFile = $null
         & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
         if (-not $Json) { Write-Host "==> $($entry.Name)$(if ($skipUnchangedEnabled -and $entry.Mode -ne 'none') { " ($($decision.Reason)$(if ($decision.Detail) { ": $($decision.Detail)" }))" })" -ForegroundColor Cyan }
+        $catalogSeconds = 0.0
+        if ($entry.Mode -ne 'none') {
+            $events.Phase = 'catalogs'
+            $catalogSeconds = & $ensureCatalogs $entry
+        }
         $events.Phase = 'build'
         & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
         $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1712,7 +1805,7 @@ function Invoke-OctoBuildRangeCore {
             if ($configuration -ieq 'DebugL' -and $entry.Mode -eq 'dotnet' -and -not $skipCkSync) {
                 [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.Path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
             }
-            $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
+            $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties (& $propertiesFor $entry) -Json:$Json
             $buildWatch.Stop()
             $tests = $null
             $testWatch = [System.Diagnostics.Stopwatch]::new()
@@ -1720,7 +1813,7 @@ function Invoke-OctoBuildRangeCore {
                 $events.Phase = 'tests'
                 & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'tests' })
                 $testWatch.Start()
-                $tests = Invoke-OctoBuildRangeTests -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json
+                $tests = Invoke-OctoBuildRangeTests -entry $entry -configuration $configuration -msbuildProperties (& $propertiesFor $entry) -Json:$Json
                 $testWatch.Stop()
             }
         }
@@ -1737,6 +1830,7 @@ function Invoke-OctoBuildRangeCore {
             buildDuration   = $buildWatch.Elapsed
             packageDuration = [TimeSpan]::Zero
             testDuration    = $testWatch.Elapsed
+            timings         = Get-OctoRepoTimings -build $build -tests $tests -catalogSeconds $catalogSeconds
             testsCompiled   = if ($null -ne $tests -and -not $tests.Skipped) { [bool]$tests.Success } else { $null }
             copiedCount     = 0
             purged          = @()
@@ -1849,6 +1943,7 @@ function Invoke-OctoBuildRangeCore {
                 failedRepos    = @(if ($failedNames.Count -gt 0) { $failedNames } elseif ($failed) { $failed.Name })
                 parallel       = $parallel
                 maxParallel    = $maxParallel
+                catalogs       = [ordered]@{ mode = $catalogRun.mode; usable = [bool]$catalogRun.usable; seconds = $catalogRun.seconds; detail = $catalogRun.detail; repo = $catalogRun.repo }
                 lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                 packageCaches  = @($globalPackagesPath)
                 feedPath       = if ($privateFeed) { $nugetTarget } else { $null }
@@ -1866,6 +1961,10 @@ function Invoke-OctoBuildRangeCore {
                             reason                 = $_.reason
                             detail                 = $_.detail
                             buildSeconds           = $_.buildDuration.TotalSeconds
+                            catalogSeconds         = $(if ($_.timings) { $_.timings.catalogSeconds } else { 0.0 })
+                            restoreSeconds         = $(if ($_.timings) { $_.timings.restoreSeconds } else { 0.0 })
+                            compileSeconds         = $(if ($_.timings) { $_.timings.compileSeconds } else { 0.0 })
+                            testRestoreSeconds     = $(if ($_.timings) { $_.timings.testRestoreSeconds } else { 0.0 })
                             testCompileSeconds     = $_.testDuration.TotalSeconds
                             testsCompiled          = $_.testsCompiled
                             packageSeconds         = $_.packageDuration.TotalSeconds

@@ -225,6 +225,9 @@ function Invoke-BuildAll {
         [switch]$DryRun,
         # AB#7974: skip the sync of private-only intermediate CK versions into <lane>/.octo/local-catalog (DebugL).
         [switch]$skipCkSync,
+        # AB#8831: let every CK compile refresh the remote CK catalogs itself (as before). Default: the run reads them
+        # at most once, before the first repository that uses a construction kit (OctoCkCatalogRefresh.psm1).
+        [switch]$refreshCatalogs,
         # Do not call Invoke-KillDotnet (the caller stops the lane's processes itself).
         [switch]$skipKill,
         # Progress events, one JSON line each (Write-OctoBuildEvent). Not written by -DryRun.
@@ -280,6 +283,7 @@ function Invoke-BuildAllCore {
         [hashtable]$msbuildPropertiesPerRepo = @{},
         [switch]$DryRun,
         [switch]$skipCkSync,
+        [switch]$refreshCatalogs,
         [switch]$skipKill,
         [hashtable]$events = @{},
         [switch]$Json
@@ -507,6 +511,8 @@ function Invoke-BuildAllCore {
     $repoIndex = 0
     $firstFailedRepo = $null
     $runError = $null
+    # AB#8831: one read of the remote CK catalogs for the whole run (see OctoCkCatalogRefresh.psm1).
+    $catalogRun = [ordered]@{ decided = $false; usable = $false; mode = $(if ($refreshCatalogs) { 'perCompile' } else { 'notNeeded' }); seconds = 0.0; detail = $null; repo = $null }
     try {
         foreach ($entry in $plan) {
             $repoIndex++
@@ -526,11 +532,24 @@ function Invoke-BuildAllCore {
             if ($configuration -ieq "DebugL" -and -not $skipCkSync) {
                 [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
             }
+            $buildProperties = $repoProperties[$entry.name]
+            $catalogSeconds = 0.0
+            if (-not $refreshCatalogs -and $repoModes[$entry.name] -eq 'dotnet' -and -not (Test-OctoCatalogPropertySet -properties $buildProperties) -and (Test-OctoRepoUsesCk -path $entry.path)) {
+                if (-not $catalogRun.decided) {
+                    & $emit 'phase' ([ordered]@{ repo = $entry.name; phase = 'catalogs' })
+                    $read = Initialize-OctoRunCatalogs -laneRootPath $branchRootPath
+                    $catalogRun.decided = $true; $catalogRun.usable = [bool]$read.usable; $catalogRun.mode = $read.mode
+                    $catalogRun.seconds = [double]$read.seconds; $catalogRun.detail = $read.detail; $catalogRun.repo = $entry.name
+                    $catalogSeconds = [double]$read.seconds
+                    if (-not $Json) { Write-Host "CK catalogs: $($read.mode) - $($read.detail)" -ForegroundColor $(if ($read.usable) { 'DarkGray' } else { 'Yellow' }) }
+                }
+                if ($catalogRun.usable) { $buildProperties = Add-OctoCatalogProperty -properties $buildProperties }
+            }
             # A failed package copy (Copy-NuGetPackages throws) leaves the dependent repositories without the new
             # packages: the repository counts as failed and the run stops.
             $copyError = $null
             try {
-                [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $repoProperties[$entry.name] -events $events
+                [Boolean]$buildStatus = Compile-Repo -branch $branch -path $entry.path -configuration $configuration -laneSettings $repoLaneSettings -msbuildProperties $buildProperties -events $events
             }
             catch {
                 if ($_.FullyQualifiedErrorId -notlike 'OctoPackageCopyFailed*') { throw }
@@ -550,6 +569,7 @@ function Invoke-BuildAllCore {
                     buildSeconds   = $repoStopWatch.Elapsed.TotalSeconds
                     testSeconds    = 0
                     packageSeconds = 0
+                    catalogSeconds = $catalogSeconds
                     copied         = $null
                     purged         = $null
                     logFile        = $events.LogFile
@@ -599,6 +619,7 @@ function Invoke-BuildAllCore {
                 elapsedSeconds    = $stopWatch.Elapsed.TotalSeconds
             }
         }
+        $data.catalogs = [ordered]@{ mode = $catalogRun.mode; usable = [bool]$catalogRun.usable; seconds = $catalogRun.seconds; detail = $catalogRun.detail; repo = $catalogRun.repo }
         if ($runError) { $data.error = "Package copy failed, the run stopped: $runError" }
         Write-OctoJson -Command 'Invoke-BuildAll' -Data $data
         if ($runError) { Write-Error $data.error }

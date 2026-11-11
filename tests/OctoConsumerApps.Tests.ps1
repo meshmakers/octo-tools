@@ -12,7 +12,7 @@
 BeforeAll {
     $modules = Join-Path $PSScriptRoot '../modules'
     foreach ($module in 'OctoJsonOutput', 'Get-OctoLaneBuildSettings', 'OctoBuildOrder', 'Copy-NuGetPackages', 'Invoke-KillDotnet', 'Stop-Octo', 'Invoke-Publish',
-        'Invoke-BuildAll', 'Sync-OctoCkIntermediateVersions', 'OctoBuildStamp', 'Invoke-BuildRange', 'OctoEnvironment', 'OctoTests') {
+        'Invoke-BuildAll', 'Sync-OctoCkIntermediateVersions', 'OctoBuildStamp', 'OctoCkCatalogRefresh', 'Invoke-BuildRange', 'OctoEnvironment', 'OctoTests') {
         Import-Module (Join-Path $modules "$module.psm1") -Force
     }
 

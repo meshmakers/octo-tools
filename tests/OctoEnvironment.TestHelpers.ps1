@@ -18,6 +18,7 @@ Import-Module (Join-Path $modules 'Invoke-Publish.psm1') -Force
 Import-Module (Join-Path $modules 'Invoke-BuildAll.psm1') -Force
 Import-Module (Join-Path $modules 'Sync-OctoCkIntermediateVersions.psm1') -Force
 Import-Module (Join-Path $modules 'OctoBuildStamp.psm1') -Force
+Import-Module (Join-Path $modules 'OctoCkCatalogRefresh.psm1') -Force
 Import-Module (Join-Path $modules 'Invoke-BuildRange.psm1') -Force
 Import-Module (Join-Path $modules 'OctoEnvironment.psm1') -Force
 
@@ -42,6 +43,16 @@ Set-Content -Path $gitEnv.GIT_CONFIG_GLOBAL -Value "[init]`n`tdefaultBranch = ma
 # more - those tests mock the job functions (Start-OctoRepoBuildJob / Get-OctoRepoBuildJobState) instead.
 $script:PreviousMaxParallelDefault = $global:PSDefaultParameterValues['Invoke-BuildEnvironment:maxParallel']
 $global:PSDefaultParameterValues['Invoke-BuildEnvironment:maxParallel'] = 1
+
+# AB#8831: nothing in these files reads the developer's package cache, CK catalog caches or octo-ckc. The user-level
+# package cache "does not exist" (an environment is filled from it otherwise), the remote CK catalog caches are fresh
+# files in TestDrive (no refresh is due), and there is no octo-ckc.
+Mock -ModuleName OctoEnvironment Get-OctoGlobalPackageCachePath { Join-Path $TestDrive 'no-user-level-package-cache' }
+Mock -ModuleName OctoCkCatalogRefresh Resolve-OctoCkc { $null }
+$script:PreviousCkCacheDirectory = $env:OCTO_CK_CACHE_DIRECTORY
+$env:OCTO_CK_CACHE_DIRECTORY = Join-Path $TestDrive 'ck-cache'
+New-Item -ItemType Directory -Force -Path $env:OCTO_CK_CACHE_DIRECTORY | Out-Null
+foreach ($name in 'public-github-catalog-cache.json', 'private-github-catalog-cache.json') { Set-Content -Path (Join-Path $env:OCTO_CK_CACHE_DIRECTORY $name) -Value '{}' }
 
 $script:PreviousRootPath = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue
 $script:PreviousNugetPackages = $env:NUGET_PACKAGES
@@ -161,6 +172,7 @@ function Restore-OctoEnvironmentTestState {
     if ($null -ne $script:PreviousMaxParallelDefault) { $global:PSDefaultParameterValues['Invoke-BuildEnvironment:maxParallel'] = $script:PreviousMaxParallelDefault }
     else { $global:PSDefaultParameterValues.Remove('Invoke-BuildEnvironment:maxParallel') }
     $env:NUGET_PACKAGES = $script:PreviousNugetPackages
+    $env:OCTO_CK_CACHE_DIRECTORY = $script:PreviousCkCacheDirectory
     if ($null -ne $script:PreviousRootPath) { $global:rootPath = $script:PreviousRootPath } else { Remove-Variable -Name rootPath -Scope Global -ErrorAction SilentlyContinue }
 }
 

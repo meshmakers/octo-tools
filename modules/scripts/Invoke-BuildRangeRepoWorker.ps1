@@ -16,7 +16,7 @@ param(
 $ErrorActionPreference = 'Stop'
 try {
     $modules = Split-Path -Parent $PSScriptRoot
-    foreach ($name in @('OctoJsonOutput', 'Get-OctoLaneBuildSettings', 'OctoBuildOrder', 'OctoBuildStamp', 'Invoke-BuildRange')) {
+    foreach ($name in @('OctoJsonOutput', 'Get-OctoLaneBuildSettings', 'OctoBuildOrder', 'OctoBuildStamp', 'OctoCkCatalogRefresh', 'Invoke-BuildRange')) {
         Import-Module (Join-Path $modules "$name.psm1") -Force
     }
     Invoke-OctoBuildRangeRepoStep -requestFile $RequestFile

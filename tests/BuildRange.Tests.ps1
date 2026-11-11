@@ -22,6 +22,7 @@ BeforeAll {
     Import-Module (Join-Path $modules 'Invoke-Publish.psm1') -Force
     Import-Module (Join-Path $modules 'Sync-OctoCkIntermediateVersions.psm1') -Force
     Import-Module (Join-Path $modules 'OctoBuildStamp.psm1') -Force
+    Import-Module (Join-Path $modules 'OctoCkCatalogRefresh.psm1') -Force
     Import-Module (Join-Path $modules 'Invoke-BuildRange.psm1') -Force
 
     function New-FakeSln([string]$repoPath, [string]$name, [string[]]$projects) {
@@ -529,17 +530,35 @@ Describe 'MSBuild property pass-through (-msbuildProperties)' {
         Should -Invoke -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo -Times 2 -Exactly -ParameterFilter { $msbuildProperties.ContinuousIntegrationBuild -eq 'true' }
     }
 
-    It 'the range build step puts them on the dotnet build command line' {
+    It 'the range build step puts them on the dotnet restore and the dotnet build command line (two calls, timed)' {
         InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
-            $script:dotnetArgs = $null
-            Mock dotnet { $script:dotnetArgs = $args -join ' '; $global:LASTEXITCODE = 0 }
+            $script:dotnetCalls = @()
+            Mock dotnet { $script:dotnetCalls += ($args -join ' '); $global:LASTEXITCODE = 0 }
             $repo = [pscustomobject]@{ Name = 'pester-octo-sdk'; Path = (Join-Path $fake.Checkout 'octo-sdk'); Group = 'pinned' }
             $entry = (Get-OctoBuildRangePlan -repos @($repo) -globalPackagesPath $fake.Cache)[0]
 
             $result = Invoke-OctoBuildRangeRepo -entry $entry -configuration DebugL -msbuildProperties @{ OctoPublishCkModel = 'false' } -Json
 
             $result.Success | Should -BeTrue
-            $script:dotnetArgs | Should -Match '^build .*\.slnf -c DebugL -nodeReuse:\s?false -p:OctoPublishCkModel=false'
+            $script:dotnetCalls.Count | Should -Be 2
+            $script:dotnetCalls[0] | Should -Match '^restore .*\.slnf -p:Configuration=DebugL -nodeReuse:\s?false -p:OctoPublishCkModel=false'
+            $script:dotnetCalls[1] | Should -Match '^build .*\.slnf -c DebugL --no-restore -nodeReuse:\s?false -p:OctoPublishCkModel=false'
+            $result.RestoreSeconds | Should -BeGreaterOrEqual 0
+            $result.CompileSeconds | Should -BeGreaterOrEqual 0
+            $result.FailedIn | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'a failed restore does not start the build' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $script:dotnetCalls = @()
+            Mock dotnet { $script:dotnetCalls += ($args -join ' '); $global:LASTEXITCODE = 1 }
+            $repo = [pscustomobject]@{ Name = 'pester-octo-sdk'; Path = (Join-Path $fake.Checkout 'octo-sdk'); Group = 'pinned' }
+            $entry = (Get-OctoBuildRangePlan -repos @($repo) -globalPackagesPath $fake.Cache)[0]
+            $result = Invoke-OctoBuildRangeRepo -entry $entry -configuration DebugL -Json
+            $result.Success | Should -BeFalse
+            $result.FailedIn | Should -Be 'restore'
+            $script:dotnetCalls.Count | Should -Be 1
         }
     }
 }
@@ -1470,5 +1489,73 @@ Describe 'Invoke-Build checks the restore exit code' {
 
         @($script:dotnetCalls) | Should -Be @('restore', 'build')
         $json.data.success | Should -BeTrue
+    }
+}
+
+Describe 'Invoke-Build and Invoke-BuildAll read the remote CK catalogs at most once (AB#8831)' {
+    BeforeEach {
+        $script:fake = New-FakeCheckout
+        $script:savedCkCache = $env:OCTO_CK_CACHE_DIRECTORY
+        $env:OCTO_CK_CACHE_DIRECTORY = Join-Path $TestDrive "ck-cache-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Force -Path $env:OCTO_CK_CACHE_DIRECTORY | Out-Null
+        foreach ($name in 'public-github-catalog-cache.json', 'private-github-catalog-cache.json') {
+            Set-Content -Path (Join-Path $env:OCTO_CK_CACHE_DIRECTORY $name) -Value '{}'
+            (Get-Item (Join-Path $env:OCTO_CK_CACHE_DIRECTORY $name)).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-3)
+        }
+        $script:ckcCalls = 0
+        Mock -ModuleName OctoCkCatalogRefresh Resolve-OctoCkc { 'fake-octo-ckc' }
+        Mock -ModuleName OctoCkCatalogRefresh Invoke-OctoCkcRefresh { $script:ckcCalls++; [pscustomobject]@{ ExitCode = 0; Output = @() } }
+        # octo-sdk uses a construction kit, octo-construction-kit-engine does not
+        $src = Get-ChildItem (Join-Path $fake.Checkout 'octo-sdk/src') -Directory | Select-Object -First 1
+        Set-Content -Path (Join-Path $src.FullName 'ckModel.yaml') -Value "ckLanguage: 1`nmodelId: Test"
+    }
+    AfterEach { $env:OCTO_CK_CACHE_DIRECTORY = $script:savedCkCache }
+
+    It 'Invoke-Build reads them once and builds with OctoRefreshRemoteCatalogs=false; -refreshCatalogs and a repository without a construction kit do not' {
+        Import-Module (Join-Path $PSScriptRoot '../modules/Invoke-Build.psm1') -Force
+        $script:dotnetCalls = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName Invoke-Build dotnet { $script:dotnetCalls.Add($args -join ' '); $global:LASTEXITCODE = 0 }
+
+        $doc = (Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -Json) -join "`n" | ConvertFrom-Json
+        $script:ckcCalls | Should -Be 1
+        $doc.data.catalogs.mode | Should -Be 'refreshed'
+        $doc.data.restoreSeconds | Should -BeGreaterOrEqual 0
+        $doc.data.compileSeconds | Should -BeGreaterOrEqual 0
+        $script:dotnetCalls[0] | Should -Match '^restore .* -p:OctoRefreshRemoteCatalogs=false'
+        $script:dotnetCalls[1] | Should -Match '^build .* -p:OctoRefreshRemoteCatalogs=false'
+
+        $script:dotnetCalls.Clear()
+        $doc = (Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -refreshCatalogs -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.catalogs.mode | Should -Be 'perCompile'
+        ($script:dotnetCalls -join ' ') | Should -Not -Match 'OctoRefreshRemoteCatalogs'
+
+        $script:dotnetCalls.Clear()
+        $doc = (Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-construction-kit-engine') -configuration DebugL -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.catalogs.mode | Should -Be 'notNeeded'
+        ($script:dotnetCalls -join ' ') | Should -Not -Match 'OctoRefreshRemoteCatalogs'
+        $script:ckcCalls | Should -Be 1
+
+        # the caller decided (Invoke-BuildAll passes the property): nothing is read
+        $script:dotnetCalls.Clear()
+        Invoke-Build -repositoryPath (Join-Path $fake.Checkout 'octo-sdk') -configuration DebugL -msbuildProperties @{ OctoRefreshRemoteCatalogs = 'false' } -Json | Out-Null
+        $script:ckcCalls | Should -Be 1
+    }
+
+    It 'Invoke-BuildAll reads them once for the whole run and hands the property to the repositories that use a construction kit' {
+        $script:compiled = [System.Collections.Generic.List[object]]::new()
+        Mock -ModuleName Invoke-BuildAll Compile-Repo { $script:compiled.Add([pscustomobject]@{ Repo = (Split-Path -Leaf $path); Refresh = $msbuildProperties['OctoRefreshRemoteCatalogs'] }); $true }
+        Mock -ModuleName Invoke-BuildAll Invoke-KillDotnet { }
+        $doc = (Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json) -join "`n" | ConvertFrom-Json
+        $script:ckcCalls | Should -Be 1
+        $doc.data.catalogs.mode | Should -Be 'refreshed'
+        $doc.data.catalogs.repo | Should -Be 'octo-sdk'
+        ($script:compiled | Where-Object Repo -eq 'octo-sdk').Refresh | Should -Be 'false'
+        ($script:compiled | Where-Object Repo -eq 'octo-construction-kit-engine').Refresh | Should -BeNullOrEmpty
+
+        $script:compiled.Clear()
+        $doc = (Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -refreshCatalogs -Json) -join "`n" | ConvertFrom-Json
+        $doc.data.catalogs.mode | Should -Be 'perCompile'
+        ($script:compiled | Where-Object Repo -eq 'octo-sdk').Refresh | Should -BeNullOrEmpty
+        $script:ckcCalls | Should -Be 1
     }
 }
