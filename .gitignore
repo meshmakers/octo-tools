@@ -403,3 +403,6 @@ FodyWeavers.xsd
 /infrastructure/local-root-ca.crt
 
 .claude/setting.local.json
+# Local agent and browser tooling state (never part of the repository; AB#8831)
+.playwright-mcp/
+.claude/worktrees/
