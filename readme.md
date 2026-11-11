@@ -237,6 +237,27 @@ Get-OctoTestLock
 - `-EventsFile <file>` writes progress events (plan, lock wait, per project start and result, done) in the format of
   the build events, for octo-devstack.
 
+**Running a Docker-heavy suite another way** (plain `dotnet test`, Rider, a script)? Take the same lock, so it and
+`Invoke-OctoTestRun` never overlap:
+
+```powershell
+$lock = Enter-OctoTestLock -TimeoutSeconds 1800 -Run @{ command = 'dotnet test (by hand)'; lane = $PWD.Path; repo = 'octo-asset-repo-services'; projects = @('AssetRepositoryServices.IntegrationTests') }
+if (-not $lock.Acquired) { throw "Test lock is held by pid $($lock.Owner['pid']) ($($lock.Owner['repo'])) - see Get-OctoTestLock" }
+try { dotnet test tests/AssetRepositoryServices.IntegrationTests -c DebugL }
+finally { Exit-OctoTestLock -Id $lock.Id | Out-Null }
+```
+
+Lock file contract (for a caller that is not PowerShell): the lock is the file `$OCTO_TEST_LOCK_PATH`, or
+`$XDG_STATE_HOME/octo-tools/locks/docker-tests.lock` (default `~/.local/state/...`; Windows
+`%LOCALAPPDATA%\octo-tools\locks\docker-tests.lock`). It exists exactly while somebody holds the lock and contains
+one JSON object: `schemaVersion` (1), `id` (the owner's handle), `pid` and `processStartTime` (ISO-8601 UTC) of the
+owning process, `since` (ISO-8601 UTC), `user`, `host`, `command`, `lane`, `environment`, `repo`, `projects`. To take
+it, write the complete object to a file of another name in the same folder and move it onto the lock path **without
+overwriting** (hard link + unlink, or a rename that fails when the target exists); when the move fails, somebody else
+holds it. To release it, delete the file if its `id` is yours. A lock is stale when no process has `pid`, or the
+process with that `pid` started at another time than `processStartTime` (2 seconds tolerance); only then may it be
+replaced. The owner must live as long as the tests run - record the pid of the process that waits for them.
+
 # Feature environments
 
 A feature environment is a small lane of its own at `<rootPath>/wt-<env>` for one work item - the lane folder of the
