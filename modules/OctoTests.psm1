@@ -384,6 +384,130 @@ function Remove-OctoTestLock {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+# Docker capacity and limits for test containers (AB#8835)
+# ---------------------------------------------------------------------------------------------------------------
+
+function Invoke-OctoDocker {
+    # The one place that calls the docker CLI (tests mock it). Returns { ExitCode; Output (string[]) }; exit code 127
+    # when docker is not installed.
+    param([Parameter(Mandatory = $true)] [string[]]$arguments)
+    if (-not (Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ ExitCode = 127; Output = @('the docker command is not on PATH') }
+    }
+    $output = @(& docker @arguments 2>&1 | ForEach-Object { "$_" })
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+}
+
+function ConvertTo-OctoByteCount {
+    # "6.154GiB", "572KiB", "3g", "1.5 GB", "2048" -> bytes; $null when it is no size.
+    param([string]$text)
+    if ([string]$text -notmatch '^\s*(?<number>\d+(\.\d+)?)\s*(?<unit>[kKmMgGtT]?)(?<binary>i?)[bB]?\s*$') { return $null }
+    $number = [double]::Parse($Matches['number'], [Globalization.CultureInfo]::InvariantCulture)
+    $power = switch ($Matches['unit'].ToLowerInvariant()) { 'k' { 1 } 'm' { 2 } 'g' { 3 } 't' { 4 } default { 0 } }
+    # docker prints kB/MB/GB (1000) and KiB/MiB/GiB (1024); a bare "3g" as in `docker run --memory 3g` is 1024-based.
+    $base = if ($Matches['binary'] -or $text -notmatch '[bB]\s*$') { 1024 } else { 1000 }
+    return [long]($number * [Math]::Pow($base, $power))
+}
+
+function Get-OctoDockerCapacity {
+    <#
+        What the Docker engine has and what its running containers use right now: { Available; Error; MemoryBytes;
+        Cpus; UsedBytes; FreeBytes; Containers = @({ Name; MemoryBytes }) }. On Docker Desktop the engine is one VM
+        that the kind cluster (MongoDB, CrateDB, RabbitMQ of the local stack) and every test container share.
+        Available is $false when docker cannot be asked; the caller decides what that means.
+    #>
+    $info = Invoke-OctoDocker -arguments @('info', '--format', '{{.MemTotal}} {{.NCPU}}')
+    $line = @($info.Output | Where-Object { $_ -match '^\d+ \d+$' }) | Select-Object -Last 1
+    if ($info.ExitCode -ne 0 -or -not $line) {
+        return [pscustomobject]@{ Available = $false; Error = "docker info failed: $((@($info.Output) | Select-Object -Last 1))"; MemoryBytes = $null; Cpus = $null; UsedBytes = $null; FreeBytes = $null; Containers = @() }
+    }
+    $memory = [long]($line -split ' ')[0]
+    $cpus = [int]($line -split ' ')[1]
+    $stats = Invoke-OctoDocker -arguments @('stats', '--no-stream', '--format', '{{.Name}}|{{.MemUsage}}')
+    $containers = @()
+    if ($stats.ExitCode -eq 0) {
+        $containers = @(foreach ($row in $stats.Output) {
+                if ($row -notmatch '^(?<name>[^|]+)\|(?<used>[^/]+)/') { continue }
+                $used = ConvertTo-OctoByteCount -text $Matches['used']
+                if ($null -ne $used) { [pscustomobject]@{ Name = $Matches['name']; MemoryBytes = $used } }
+            })
+    }
+    $usedTotal = [long](($containers | Measure-Object MemoryBytes -Sum).Sum)
+    return [pscustomobject]@{
+        Available = $true; Error = $(if ($stats.ExitCode -ne 0) { "docker stats failed: $((@($stats.Output) | Select-Object -Last 1))" })
+        MemoryBytes = $memory; Cpus = $cpus; UsedBytes = $usedTotal; FreeBytes = [Math]::Max([long]0, [long]($memory - $usedTotal)); Containers = $containers
+    }
+}
+
+function Invoke-OctoDockerLimitPass {
+    <#
+        One pass of the limiter: every running container Testcontainers started (label org.testcontainers=true) that
+        was not seen before gets its CPU and memory limit with `docker update` - from outside the test code. The
+        resource reaper (ryuk) is left alone. $State.Seen remembers the ids, $State.Limited collects
+        { id; name; image; success; error }.
+        A limit set this way starts a moment after the container did: a process that sized itself to the whole VM at
+        start (a JVM heap, a database cache) keeps that size; the memory limit then is a ceiling that kills it when it
+        grows past it. Limits at creation need the test fixture (see the readme).
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$State,
+        [double]$Cpus = 0,
+        [string]$Memory = ''
+    )
+    if ($Cpus -le 0 -and -not $Memory) { return }
+    $list = Invoke-OctoDocker -arguments @('ps', '--no-trunc', '--filter', 'label=org.testcontainers=true', '--filter', 'status=running', '--format', '{{.ID}}|{{.Image}}|{{.Names}}')
+    if ($list.ExitCode -ne 0) { return }
+    foreach ($row in $list.Output) {
+        $parts = ([string]$row) -split '\|', 3
+        if ($parts.Count -lt 3 -or $parts[0] -notmatch '^[0-9a-f]{12,}$') { continue }
+        $id = $parts[0]
+        if ($State.Seen.Contains($id)) { continue }
+        [void]$State.Seen.Add($id)
+        if ($parts[1] -match '(^|/)ryuk(:|$)|testcontainers/ryuk') { continue }
+        $arguments = @('update')
+        if ($Cpus -gt 0) { $arguments += @('--cpus', $Cpus.ToString([Globalization.CultureInfo]::InvariantCulture)) }
+        if ($Memory) { $arguments += @('--memory', $Memory, '--memory-swap', $Memory) }
+        $arguments += $id
+        $update = Invoke-OctoDocker -arguments $arguments
+        [void]$State.Limited.Add([ordered]@{
+                id = $id.Substring(0, 12); name = $parts[2]; image = $parts[1]; success = ($update.ExitCode -eq 0)
+                error = $(if ($update.ExitCode -ne 0) { [string](@($update.Output) | Select-Object -Last 1) })
+            })
+    }
+}
+
+function Start-OctoDockerLimiter {
+    # Runs Invoke-OctoDockerLimitPass every second in a background thread until Stop-OctoDockerLimiter. Returns the
+    # handle { Job; State }, or $null when no limit is set.
+    param([double]$Cpus = 0, [string]$Memory = '')
+    if ($Cpus -le 0 -and -not $Memory) { return $null }
+    $state = [hashtable]::Synchronized(@{
+            Stop    = $false
+            Seen    = [System.Collections.Generic.HashSet[string]]::new()
+            Limited = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+        })
+    $job = Start-ThreadJob -ArgumentList $PSCommandPath, $state, $Cpus, $Memory -ScriptBlock {
+        param([string]$modulePath, $state, [double]$cpus, [string]$memory)
+        $module = Import-Module $modulePath -PassThru -Force
+        while (-not $state.Stop) {
+            try { & $module { param($s, $c, $m) Invoke-OctoDockerLimitPass -State $s -Cpus $c -Memory $m } $state $cpus $memory } catch { $null = $_ }
+            Start-Sleep -Milliseconds 1000
+        }
+    }
+    return [pscustomobject]@{ Job = $job; State = $state }
+}
+
+function Stop-OctoDockerLimiter {
+    # Stops the limiter thread and returns what it limited.
+    param($Limiter)
+    if ($null -eq $Limiter) { return @() }
+    $Limiter.State.Stop = $true
+    [void](Wait-Job -Job $Limiter.Job -Timeout 10)
+    Remove-Job -Job $Limiter.Job -Force -ErrorAction SilentlyContinue
+    return @($Limiter.State.Limited)
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Test projects of a repository
 # ---------------------------------------------------------------------------------------------------------------
 
@@ -1259,6 +1383,23 @@ function Format-OctoTestDuration {
 .PARAMETER dockerLock
     Auto (default): lock for projects with a Testcontainers reference. Always: for every project. Never: no lock.
 
+.PARAMETER dockerCheck
+    Refuse (default): do not start the Docker-heavy projects when the Docker engine has less free memory than
+    -minDockerFreeMemoryGiB (failedStep "docker"). Warn: start them anyway. Off: do not ask docker. The test
+    containers share the engine (on Docker Desktop one VM) with the kind cluster of the local stack.
+
+.PARAMETER minDockerFreeMemoryGiB
+    Free memory of the Docker engine the Docker-heavy projects need: its total memory minus what the running
+    containers use (default 3).
+
+.PARAMETER dockerCpus
+    CPU limit for every container Testcontainers starts during the run (default 4, 0 = none), set with
+    `docker update` about a second after the container started.
+
+.PARAMETER dockerMemory
+    Memory limit for those containers (default 4g, '' = none). A ceiling: the container is killed when it grows past
+    it.
+
 .PARAMETER lockTimeoutSeconds
     How long to wait for the machine-wide test lock (default 1800). 0 = fail at once when it is taken.
 
@@ -1299,6 +1440,10 @@ function Invoke-OctoTestRun {
         [int]$lockTimeoutSeconds = 1800,
         [int]$lockPollMilliseconds = 2000,
         [string]$lockPath = '',
+        [ValidateSet('Refuse', 'Warn', 'Off')] [string]$dockerCheck = 'Refuse',
+        [double]$minDockerFreeMemoryGiB = 3,
+        [double]$dockerCpus = 4,
+        [string]$dockerMemory = '4g',
         [string]$configuration = 'DebugL',
         [int]$maxFailures = 50,
         [switch]$includePassed,
@@ -1434,6 +1579,13 @@ function Invoke-OctoTestRun {
     catch { & $fail $_.Exception.Message; return }
     $displayProperties = @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties | ForEach-Object { Hide-OctoUrlCredentials $_ })
     $lockNeeded = @($runnable | Where-Object { $_.Docker }).Count -gt 0
+    if ($dockerMemory -and $null -eq (ConvertTo-OctoByteCount -text $dockerMemory)) { & $fail "-dockerMemory '$dockerMemory' is no size (e.g. 4g, 2048m, or '' for no limit)."; return }
+    if ($lockNeeded) {
+        # For test fixtures that set the limits when they create a container (the only way to limit it from its first
+        # moment): the same values the run applies from outside afterwards.
+        if ($dockerCpus -gt 0) { $runEnvironment['OCTO_TEST_CONTAINER_CPUS'] = $dockerCpus.ToString([Globalization.CultureInfo]::InvariantCulture) }
+        if ($dockerMemory) { $runEnvironment['OCTO_TEST_CONTAINER_MEMORY_BYTES'] = [string](ConvertTo-OctoByteCount -text $dockerMemory) }
+    }
     $lockFile = if ([string]::IsNullOrWhiteSpace($lockPath)) { Get-OctoTestLockPath } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($lockPath) }
 
     $planReport = @($plan | ForEach-Object {
@@ -1506,6 +1658,28 @@ function Invoke-OctoTestRun {
     $results = [System.Collections.Generic.List[object]]::new()
     $lockState = [ordered]@{ required = $lockNeeded; path = $lockFile; acquired = $false; waitedSeconds = 0.0; staleRemoved = @(); blockedBy = $null }
     $lockId = $null
+    $limiter = $null
+    # AB#8835: what the Docker engine had when the Docker-heavy projects started, and what was limited.
+    $dockerState = [ordered]@{
+        required = $lockNeeded; checked = $false; check = $(if ($dockerCheck -eq 'Off') { 'off' } else { $null }); available = $null
+        memoryGiB = $null; cpus = $null; usedGiB = $null; freeGiB = $null; minFreeGiB = $minDockerFreeMemoryGiB; containers = @(); message = $null
+        limits = [ordered]@{ cpus = $(if ($dockerCpus -gt 0) { $dockerCpus } else { $null }); memory = $(if ($dockerMemory) { $dockerMemory } else { $null }) }
+        limited = @()
+    }
+    # The projects from $from on (0-based index into the plan) did not run.
+    $markNotRun = {
+        param([int]$from, [string]$note)
+        foreach ($pending in @($plan | Select-Object -Skip $from)) {
+            $results.Add([ordered]@{
+                    project = $pending.Project.Name; path = $pending.Project.Path; state = 'notRun'; success = $false; exitCode = $null
+                    docker = $pending.Docker; dockerReason = $pending.DockerReason; noBuild = $pending.NoBuild; buildReason = $pending.BuildReason
+                    filters = @($pending.Filters | Where-Object { $_ }); rerunCount = $pending.RerunCount
+                    total = 0; passed = 0; failed = 0; skipped = 0; durationSeconds = 0.0; failedTests = @(); truncated = $false
+                    passedTests = @(); passedTruncated = $false; errors = @(); runner = $pending.Runner
+                    note = $note; resultsPath = $null; trx = @(); logFile = $null
+                })
+        }
+    }
     $failedStep = $null
     $failedProject = $null
     $runError = $null
@@ -1581,20 +1755,50 @@ function Invoke-OctoTestRun {
                     $failedStep = 'lock'
                     $failedProject = $name
                     $runError = "The machine-wide test lock $lockFile is held by $(Format-OctoTestLockOwner -owner $lock.Owner); waited $([Math]::Round($lock.WaitedSeconds)) s (-lockTimeoutSeconds $lockTimeoutSeconds). The Docker-heavy project(s) $((@($runnable | Where-Object { $_.Docker } | ForEach-Object { $_.Project.Name })) -join ', ') were not run."
-                    foreach ($pending in @($plan | Select-Object -Skip ($index - 1))) {
-                        $results.Add([ordered]@{
-                                project = $pending.Project.Name; path = $pending.Project.Path; state = 'notRun'; success = $false; exitCode = $null
-                                docker = $pending.Docker; dockerReason = $pending.DockerReason; noBuild = $pending.NoBuild; buildReason = $pending.BuildReason
-                                filters = @($pending.Filters | Where-Object { $_ }); rerunCount = $pending.RerunCount
-                                total = 0; passed = 0; failed = 0; skipped = 0; durationSeconds = 0.0; failedTests = @(); truncated = $false; errors = @()
-                                note = 'not run: the machine-wide test lock was not available'; resultsPath = $null; trx = @(); logFile = $null
-                            })
-                    }
+                    & $markNotRun ($index - 1) 'not run: the machine-wide test lock was not available'
                     break   # reported below like every other result
                 }
                 $lockId = $lock.Id
                 $lockState.acquired = $true
                 & $emit 'lockAcquired' ([ordered]@{ path = $lockFile; waitedSeconds = $lock.WaitedSeconds })
+
+                # AB#8835: the test containers share the Docker engine (on Docker Desktop one VM) with the kind cluster
+                # of the local stack. Checked with the lock held, so no other test run changes the picture.
+                if ($dockerCheck -ne 'Off') {
+                    $capacity = Get-OctoDockerCapacity
+                    $dockerState.checked = $true
+                    $dockerState.available = [bool]$capacity.Available
+                    if (-not $capacity.Available) {
+                        # Cannot be judged from here (no CLI, another Docker host): the tests decide.
+                        $dockerState.check = 'unavailable'
+                        $dockerState.message = "Docker capacity not checked: $($capacity.Error)"
+                        if (-not $Json) { Write-Warning $dockerState.message }
+                    }
+                    else {
+                        $gib = { param([long]$bytes) [Math]::Round($bytes / 1GB, 1) }
+                        $dockerState.memoryGiB = & $gib $capacity.MemoryBytes
+                        $dockerState.cpus = $capacity.Cpus
+                        $dockerState.usedGiB = & $gib $capacity.UsedBytes
+                        $dockerState.freeGiB = & $gib $capacity.FreeBytes
+                        $dockerState.containers = @($capacity.Containers | Sort-Object MemoryBytes -Descending | Select-Object -First 5 | ForEach-Object { [ordered]@{ name = $_.Name; memoryGiB = (& $gib $_.MemoryBytes) } })
+                        if ($capacity.FreeBytes -lt ($minDockerFreeMemoryGiB * 1GB)) {
+                            $top = @($dockerState.containers | ForEach-Object { "$($_.name) $($_.memoryGiB) GiB" }) -join ', '
+                            $dockerState.message = "The Docker engine has $($dockerState.freeGiB) GiB of $($dockerState.memoryGiB) GiB free (running containers use $($dockerState.usedGiB) GiB: $top); the Docker-heavy tests need at least $minDockerFreeMemoryGiB GiB (-minDockerFreeMemoryGiB) or they starve the local stack's MongoDB, CrateDB and RabbitMQ in the same engine. Stop a stack you do not need, give the Docker VM more memory, or pass -dockerCheck Warn to run anyway."
+                            if ($dockerCheck -eq 'Refuse') {
+                                $dockerState.check = 'refused'
+                                $failedStep = 'docker'
+                                $failedProject = $name
+                                $runError = "$($dockerState.message) The Docker-heavy project(s) $((@($runnable | Where-Object { $_.Docker } | ForEach-Object { $_.Project.Name })) -join ', ') were not run."
+                                & $markNotRun ($index - 1) 'not run: the Docker engine has too little free memory'
+                                break
+                            }
+                            $dockerState.check = 'warned'
+                            if (-not $Json) { Write-Warning $dockerState.message }
+                        }
+                        else { $dockerState.check = 'ok' }
+                    }
+                }
+                $limiter = Start-OctoDockerLimiter -Cpus $dockerCpus -Memory $dockerMemory
             }
 
             $runPath = Join-Path $item.ResultsPath $runStamp
@@ -1737,6 +1941,8 @@ function Invoke-OctoTestRun {
 
             # Release the lock as soon as the last Docker-heavy project is through.
             if ($lockId -and @($plan | Select-Object -Skip $index | Where-Object { $_.Docker -and -not $_.Skip }).Count -eq 0) {
+                $dockerState.limited = @(Stop-OctoDockerLimiter -Limiter $limiter)
+                $limiter = $null
                 [void](Exit-OctoTestLock -Id $lockId -LockPath $lockFile)
                 $lockId = $null
                 & $emit 'lockReleased' ([ordered]@{ path = $lockFile })
@@ -1751,6 +1957,7 @@ function Invoke-OctoTestRun {
         $finished = $true
     }
     finally {
+        if ($limiter) { $dockerState.limited = @(Stop-OctoDockerLimiter -Limiter $limiter) }
         if ($lockId) {
             [void](Exit-OctoTestLock -Id $lockId -LockPath $lockFile)
             & $emit 'lockReleased' ([ordered]@{ path = $lockFile })
@@ -1796,6 +2003,7 @@ function Invoke-OctoTestRun {
         lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
         msbuildProperties = $displayProperties
         lock           = $lockState
+        docker         = $dockerState
         resultsPath    = $resultsRoot
         projects       = @($results)
     }

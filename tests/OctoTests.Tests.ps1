@@ -283,6 +283,80 @@ Describe 'Machine-wide test lock' {
     }
 }
 
+Describe 'Docker capacity and limits (AB#8835)' {
+    It 'reads sizes the way docker prints and takes them' {
+        InModuleScope OctoTests {
+            ConvertTo-OctoByteCount '6.154GiB' | Should -Be ([long](6.154 * 1GB))
+            ConvertTo-OctoByteCount '572KiB' | Should -Be (572 * 1KB)
+            ConvertTo-OctoByteCount '1.5GB' | Should -Be 1500000000
+            ConvertTo-OctoByteCount '4g' | Should -Be (4 * 1GB)
+            ConvertTo-OctoByteCount '2048m' | Should -Be (2048 * 1MB)
+            ConvertTo-OctoByteCount '1024' | Should -Be 1024
+            ConvertTo-OctoByteCount 'lots' | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'adds up what the running containers use and what is left' {
+        InModuleScope OctoTests {
+            Mock Invoke-OctoDocker {
+                if ($arguments[0] -eq 'info') { return [pscustomobject]@{ ExitCode = 0; Output = @('WARNING: fixture warning', '16745033728 16') } }
+                return [pscustomobject]@{ ExitCode = 0; Output = @('kind-control-plane|6.154GiB / 15.6GiB', 'relay|572KiB / 15.6GiB', 'not a row') }
+            }
+            $capacity = Get-OctoDockerCapacity
+            $capacity.Available | Should -BeTrue
+            $capacity.MemoryBytes | Should -Be 16745033728
+            $capacity.Cpus | Should -Be 16
+            @($capacity.Containers.Name) | Should -Be @('kind-control-plane', 'relay')
+            $capacity.UsedBytes | Should -Be ([long](6.154 * 1GB) + 572 * 1KB)
+            $capacity.FreeBytes | Should -Be (16745033728 - $capacity.UsedBytes)
+
+            Mock Invoke-OctoDocker { [pscustomobject]@{ ExitCode = 1; Output = @('Cannot connect to the Docker daemon') } }
+            $down = Get-OctoDockerCapacity
+            $down.Available | Should -BeFalse
+            $down.Error | Should -Match 'Cannot connect'
+        }
+    }
+
+    It 'limits each new Testcontainers container once with docker update and leaves the resource reaper alone' {
+        InModuleScope OctoTests {
+            $script:Updates = [System.Collections.Generic.List[string]]::new()
+            $script:Running = @(
+                'aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111|testcontainers/ryuk:0.14.0|testcontainers-ryuk-1',
+                'bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222|mongo:8.0.15|fixture-mongo')
+            Mock Invoke-OctoDocker {
+                if ($arguments[0] -eq 'ps') {
+                    ($arguments -join ' ') | Should -Match '--filter label=org\.testcontainers=true --filter status=running'
+                    return [pscustomobject]@{ ExitCode = 0; Output = $script:Running }
+                }
+                $script:Updates.Add($arguments -join ' ')
+                $failed = $arguments[-1] -like 'cccc*'
+                return [pscustomobject]@{ ExitCode = $(if ($failed) { 1 } else { 0 }); Output = @($(if ($failed) { 'fixture: cannot update' })) }
+            }
+            $state = @{ Seen = [System.Collections.Generic.HashSet[string]]::new(); Limited = [System.Collections.ArrayList]::new() }
+            Invoke-OctoDockerLimitPass -State $state -Cpus 2.5 -Memory '4g'
+            Invoke-OctoDockerLimitPass -State $state -Cpus 2.5 -Memory '4g'
+            @($script:Updates) | Should -Be @('update --cpus 2.5 --memory 4g --memory-swap 4g bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222')
+            $state.Limited.Count | Should -Be 1
+            $state.Limited[0].id | Should -Be 'bbbbbbbbbbbb'
+            $state.Limited[0].name | Should -Be 'fixture-mongo'
+            $state.Limited[0].success | Should -BeTrue
+
+            # a container that starts later is limited too; a failed update is reported, not thrown
+            $script:Running += 'cccccccccccc3333333333333333333333333333333333333333333333333333|rabbitmq:3|fixture-rabbit'
+            Invoke-OctoDockerLimitPass -State $state -Cpus 2.5
+            $script:Updates[-1] | Should -Be 'update --cpus 2.5 cccccccccccc3333333333333333333333333333333333333333333333333333'
+            $state.Limited[1].success | Should -BeFalse
+            $state.Limited[1].error | Should -Be 'fixture: cannot update'
+
+            # no limit set: docker is not asked
+            $script:Updates.Clear()
+            Invoke-OctoDockerLimitPass -State @{ Seen = [System.Collections.Generic.HashSet[string]]::new(); Limited = [System.Collections.ArrayList]::new() }
+            Should -Invoke Invoke-OctoDocker -Times 0 -ParameterFilter { $arguments[0] -eq 'update' -and $arguments.Count -eq 1 }
+            $script:Updates.Count | Should -Be 0
+        }
+    }
+}
+
 Describe 'TRX parsing' {
     It 'reads totals, duration and the failed tests with message and first stack frame' {
         InModuleScope OctoTests -Parameters @{ file = (Join-Path $script:Fixtures 'mixed.trx') } {
@@ -550,6 +624,19 @@ Describe 'Invoke-OctoTestRun' {
         }
         # Never the developer's NuGet.Config.
         Mock -ModuleName OctoEnvironment Get-OctoUserNuGetConfigFile { Join-Path $TestDrive 'no-user-nuget.config' }
+        # Never the real Docker engine: a canned engine with 16 GiB and a kind node that uses 6 GiB, and no limiter
+        # thread (it would call the real docker CLI from another runspace).
+        $script:DockerCalls = [System.Collections.Generic.List[string]]::new()
+        $script:DockerUsed = '6GiB'
+        Mock -ModuleName OctoTests Invoke-OctoDocker {
+            $script:DockerCalls.Add($arguments -join ' ')
+            if ($arguments[0] -eq 'info') { return [pscustomobject]@{ ExitCode = 0; Output = @('17179869184 16') } }
+            if ($arguments[0] -eq 'stats') { return [pscustomobject]@{ ExitCode = 0; Output = @("kind-control-plane|$($script:DockerUsed) / 16GiB", 'octo-kind-s3-relay|572KiB / 16GiB') } }
+            return [pscustomobject]@{ ExitCode = 0; Output = @() }
+        }
+        $script:LimiterStarts = [System.Collections.Generic.List[object]]::new()
+        Mock -ModuleName OctoTests Start-OctoDockerLimiter { $script:LimiterStarts.Add([pscustomobject]@{ Cpus = $Cpus; Memory = $Memory }); return [pscustomobject]@{ Fixture = $true } }
+        Mock -ModuleName OctoTests Stop-OctoDockerLimiter { if ($Limiter) { return @([ordered]@{ id = 'abcdef012345'; name = 'fixture-mongo'; image = 'mongo:8'; success = $true; error = $null }) }; return @() }
         Mock -ModuleName OctoTests Invoke-OctoDotnetTest {
             $projectName = [IO.Path]::GetFileNameWithoutExtension($(if ($arguments[1] -eq '--project') { $arguments[2] } else { $arguments[1] }))
             $resultsDirectory = $arguments[[Array]::IndexOf($arguments, '--results-directory') + 1]
@@ -568,6 +655,8 @@ Describe 'Invoke-OctoTestRun' {
                     Logger            = $logger
                     LogFile           = $logFile
                     WorkingDirectory  = $workingDirectory
+                    ContainerCpus     = $env:OCTO_TEST_CONTAINER_CPUS
+                    ContainerMemory   = $env:OCTO_TEST_CONTAINER_MEMORY_BYTES
                     NugetPackages     = $env:NUGET_PACKAGES
                     RestoreSources    = $env:RestoreSources
                     LockOwner         = if (Test-Path $script:LockPath) { (Get-Content $script:LockPath -Raw | ConvertFrom-Json) } else { $null }
@@ -856,6 +945,91 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.success | Should -BeFalse
             $doc.data.error | Should -Match 'fixture failure'
             Test-Path $script:LockPath | Should -BeFalse
+        }
+    }
+
+    Context 'Docker engine shared with the local stack (AB#8835)' {
+        It 'checks the free memory of the engine with the lock held, limits the test containers and reports both' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -lockPath $script:LockPath -Json)
+            $docker = $doc.data.docker
+            $docker.required | Should -BeTrue
+            $docker.checked | Should -BeTrue
+            $docker.check | Should -Be 'ok'
+            $docker.memoryGiB | Should -Be 16
+            $docker.cpus | Should -Be 16
+            $docker.usedGiB | Should -Be 6
+            $docker.freeGiB | Should -Be 10
+            $docker.minFreeGiB | Should -Be 3
+            $docker.containers[0].name | Should -Be 'kind-control-plane'
+            $docker.limits.cpus | Should -Be 4
+            $docker.limits.memory | Should -Be '4g'
+            @($docker.limited.name) | Should -Be @('fixture-mongo')
+            $script:LimiterStarts.Count | Should -Be 1
+            $script:LimiterStarts[0].Cpus | Should -Be 4
+            $script:LimiterStarts[0].Memory | Should -Be '4g'
+            # the limits are also handed to the test process, for fixtures that set them at creation
+            $integration = $script:Calls | Where-Object Project -eq 'Sample.IntegrationTests'
+            $integration.ContainerCpus | Should -Be '4'
+            $integration.ContainerMemory | Should -Be '4294967296'
+            $env:OCTO_TEST_CONTAINER_CPUS | Should -BeNullOrEmpty
+        }
+
+        It 'refuses the Docker-heavy projects when the engine has too little free memory; the others still run' {
+            $script:DockerUsed = '14.2GiB'
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeFalse
+            $doc.data.failedStep | Should -Be 'docker'
+            $doc.data.error | Should -Match '1[.,]8 GiB of 16 GiB free'
+            $doc.data.error | Should -Match 'kind-control-plane 14[.,]2 GiB'
+            $doc.data.error | Should -Match '-dockerCheck Warn'
+            $doc.data.docker.check | Should -Be 'refused'
+            @($script:Calls.Project) | Should -Be @('Sample.UnitTests')
+            ($doc.data.projects | Where-Object project -eq 'Sample.IntegrationTests').state | Should -Be 'notRun'
+            ($doc.data.projects | Where-Object project -eq 'Sample.IntegrationTests').note | Should -Match 'too little free memory'
+            $script:LimiterStarts.Count | Should -Be 0
+            Test-Path $script:LockPath | Should -BeFalse
+        }
+
+        It 'only warns with -dockerCheck Warn, takes -minDockerFreeMemoryGiB, and asks nothing with -dockerCheck Off' {
+            $script:DockerUsed = '14.2GiB'
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -dockerCheck Warn -lockPath $script:LockPath -Json)
+            $doc.data.docker.check | Should -Be 'warned'
+            $doc.data.docker.message | Should -Match 'starve the local stack'
+            @($script:Calls.Project) | Should -Be @('Sample.UnitTests', 'Sample.IntegrationTests')
+
+            Reset-TestDotnet
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -minDockerFreeMemoryGiB 1 -lockPath $script:LockPath -Json)
+            $doc.data.docker.check | Should -Be 'ok'
+
+            Reset-TestDotnet
+            $script:DockerCalls.Clear()
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -dockerCheck Off -dockerCpus 0 -dockerMemory '' -lockPath $script:LockPath -Json)
+            $doc.data.docker.check | Should -Be 'off'
+            $doc.data.docker.checked | Should -BeFalse
+            $doc.data.docker.limits.cpus | Should -BeNullOrEmpty
+            $script:DockerCalls.Count | Should -Be 0
+            @($script:Calls.Project) | Should -Be @('Sample.UnitTests', 'Sample.IntegrationTests')
+            ($script:Calls | Where-Object Project -eq 'Sample.IntegrationTests').ContainerCpus | Should -BeNullOrEmpty
+        }
+
+        It 'runs when docker cannot be asked, and never asks for a run without Docker-heavy projects' {
+            Mock -ModuleName OctoTests Invoke-OctoDocker { [pscustomobject]@{ ExitCode = 127; Output = @('the docker command is not on PATH') } }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -lockPath $script:LockPath -Json)
+            $doc.data.docker.check | Should -Be 'unavailable'
+            $doc.data.docker.message | Should -Match 'not on PATH'
+            @($script:Calls.Project) | Should -Be @('Sample.UnitTests', 'Sample.IntegrationTests')
+
+            Reset-TestDotnet
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.UnitTests -lockPath $script:LockPath -Json)
+            $doc.data.docker.required | Should -BeFalse
+            $doc.data.docker.checked | Should -BeFalse
+            Should -Invoke -ModuleName OctoTests Invoke-OctoDocker -Times 1 -Exactly   # only the first run asked (docker info)
+        }
+
+        It 'refuses a -dockerMemory that is no size' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -dockerMemory 'lots' -lockPath $script:LockPath -Json -ErrorAction SilentlyContinue)
+            $doc.data.failedStep | Should -Be 'preflight'
+            $doc.data.error | Should -Match "-dockerMemory 'lots' is no size"
         }
     }
 

@@ -234,6 +234,23 @@ Get-OctoTestLock
   shows the owner (pid, since when, which run). A lock whose owner process is gone is replaced by the next run;
   `Remove-OctoTestLock` removes it at once - and refuses while the owner still runs. `-dockerLock Always` takes the
   lock for a project the marker misses, `-dockerLock Never` skips it.
+- **Test containers do not starve the local stack.** On Docker Desktop the test containers and the kind cluster of
+  the local stack (MongoDB, CrateDB, RabbitMQ) share one VM. Before the Docker-heavy projects start, the run checks
+  the engine's free memory (`docker info` minus what the running containers use) and refuses them below
+  `-minDockerFreeMemoryGiB` (default 3; `-dockerCheck Warn` runs anyway, `Off` skips the check). While they run,
+  every container Testcontainers starts is limited to `-dockerCpus` (default 4) and `-dockerMemory` (default `4g`)
+  with `docker update` - no change to the test code needed. That limit lands about a second after the container
+  started; a fixture that wants it from the first moment reads the values the run puts into its environment:
+
+  ```csharp
+  new MongoDbBuilder().WithCreateParameterModifier(p =>
+  {
+      if (long.TryParse(Environment.GetEnvironmentVariable("OCTO_TEST_CONTAINER_MEMORY_BYTES"), out var memory))
+      { p.HostConfig.Memory = memory; p.HostConfig.MemorySwap = memory; }
+      if (double.TryParse(Environment.GetEnvironmentVariable("OCTO_TEST_CONTAINER_CPUS"), NumberStyles.Float, CultureInfo.InvariantCulture, out var cpus))
+      { p.HostConfig.NanoCPUs = (long)(cpus * 1_000_000_000); }
+  })
+  ```
 - **Every kind of test project.** VSTest projects (xunit with `Microsoft.NET.Test.Sdk`) and projects on
   Microsoft.Testing.Platform (TUnit, xunit.v3 in a repository whose `global.json` selects that runner, e.g.
   octo-bot-services or octo-communication-operator) both run; the result says which runner a project used. `-filter`
