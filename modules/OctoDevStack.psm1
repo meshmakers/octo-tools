@@ -10,7 +10,10 @@
 
     Getting it uses the existing cmdlets: `Invoke-CloneMainRepos -devTools` clones meshmakers/octo-devstack
     next to octo-tools, and Start-OctoDevStackDaemon builds it with Invoke-Build when the build is missing.
-    Stopping the daemon never stops the stack services it started; the next daemon adopts them.
+    Stopping the daemon never stops the stack services it started; the next daemon adopts them. Builds go on
+    too (the next daemon re-attaches to them), but other sessions poll them: Stop-OctoDevStackDaemon and
+    Start-OctoDevStackDaemon -Restart ask the daemon first (GET /api/daemon, restart.safe) and refuse while a
+    build runs or waits unless -Force is given (AB#8812).
 #>
 
 $script:DllRelativePath = 'bin/Release/net10.0/octo-devstack.dll'
@@ -52,6 +55,39 @@ function Test-OctoDevStackHealth([int]$Port) {
     }
     catch {
         return $false
+    }
+}
+
+function Get-OctoDevStackHealth([int]$Port) {
+    # The /health document ({ status, pid, version, commit, development, ... }), $null when nothing answers.
+    try { return Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2 -ErrorAction Stop }
+    catch { return $null }
+}
+
+function Get-OctoDevStackDaemonStatus([int]$Port) {
+    # GET /api/daemon (read-only): { daemon: { pid, version, commit, development, ... }, restart: { safe, blockers,
+    # warnings, builds, leases }, history }. $null when the daemon does not have the endpoint (a version before
+    # AB#8812 answers 404) or does not answer in time. The tests mock this seam; they never call a daemon.
+    try { return Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/daemon" -TimeoutSec 3 -ErrorAction Stop }
+    catch { return $null }
+}
+
+function Get-OctoDevStackRestartCheck([int]$Port) {
+    # What the daemon says about a restart now, in one shape: available = it has the check; safe = no build runs
+    # or waits; blockers / warnings as it words them; version / commit / development of the running binaries.
+    $status = Get-OctoDevStackDaemonStatus -Port $Port
+    $restart = if ($status) { $status.restart } else { $null }
+    if (-not $restart -or $null -eq $restart.safe) {
+        return [pscustomobject]@{ available = $false; safe = $null; blockers = @(); warnings = @(); version = $null; commit = $null; development = $null }
+    }
+    return [pscustomobject]@{
+        available   = $true
+        safe        = [bool]$restart.safe
+        blockers    = @($restart.blockers | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        warnings    = @($restart.warnings | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        version     = if ($status.daemon) { $status.daemon.version } else { $null }
+        commit      = if ($status.daemon) { $status.daemon.commit } else { $null }
+        development = if ($status.daemon) { $status.daemon.development } else { $null }
     }
 }
 
@@ -143,7 +179,12 @@ function Start-OctoDevStackDaemon {
         Starts the octo-devstack daemon on http://127.0.0.1:<Port> (in the background by default).
 
     .DESCRIPTION
-        - octo-devstack already answers on the port: nothing is started.
+        - octo-devstack already answers on the port: nothing is started - unless -Restart is given: then the
+          daemon is asked whether a restart is safe (GET /api/daemon); while a build runs or waits it is refused
+          and the builds are named, -Force restarts anyway (the builds go on and the next daemon re-attaches to
+          them). A daemon without that check (older version) is restarted with a warning.
+        - -Rebuild: builds Release again before the start. Only together with -Restart or when no daemon runs
+          on the port: the build replaces the binaries the running daemon was loaded from.
         - Another program holds the port: refused, the process is named.
         - No checkout: `Invoke-CloneMainRepos -devTools` clones it next to octo-tools (or pass -Path).
         - No build: built with Invoke-Build -configuration Release.
@@ -153,8 +194,20 @@ function Start-OctoDevStackDaemon {
         - -Foreground: runs in this console.
         Claude Code: `claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:<Port>/mcp`.
 
+    .PARAMETER Restart
+        Stop a running octo-devstack on the port first (see above), then start.
+
+    .PARAMETER Force
+        With -Restart: restart although builds run or wait.
+
+    .PARAMETER Rebuild
+        Build Release again (Invoke-Build) before the start.
+
     .PARAMETER Json
-        { success, exitCode, alreadyRunning, started, built, pid, port, mcpUrl, statusPage, logPath[, error] }.
+        { success, exitCode, alreadyRunning, started, restarted, built, pid, port, mcpUrl, statusPage, logPath,
+          version, commit, restartSafe, blockers, warnings[, refused][, error] }. version / commit are those of
+        the daemon that answers after the call; restartSafe / blockers / warnings what the daemon that ran
+        before said (restartSafe null: nothing ran, or it has no check).
     #>
     [CmdletBinding()]
     param(
@@ -162,6 +215,9 @@ function Start-OctoDevStackDaemon {
         [int]$Port = 5090,
         [switch]$Foreground,
         [int]$HealthTimeoutSeconds = 30,
+        [switch]$Restart,
+        [switch]$Force,
+        [switch]$Rebuild,
         [switch]$Json
     )
 
@@ -171,7 +227,10 @@ function Start-OctoDevStackDaemon {
     $url = "http://127.0.0.1:$Port"
     $statePath = Get-OctoDevStackStatePath
     $logPath = Join-Path $statePath 'daemon.log'
-    $data = @{ alreadyRunning = $false; started = $false; built = $false; pid = $null; port = $Port; mcpUrl = "$url/mcp"; statusPage = "$url/"; logPath = $logPath }
+    $data = @{
+        alreadyRunning = $false; started = $false; restarted = $false; built = $false; pid = $null; port = $Port; mcpUrl = "$url/mcp"; statusPage = "$url/"
+        logPath = $logPath; version = $null; commit = $null; restartSafe = $null; blockers = @(); warnings = @()
+    }
 
     if ($Foreground -and $Json) {
         Write-OctoDevStackResult $command $Json $false $data '-Foreground runs the daemon in this console and cannot be combined with -Json.'
@@ -180,9 +239,35 @@ function Start-OctoDevStackDaemon {
 
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $ours = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
-    if ($ours -or ($listeners.Count -eq 0 -and (Test-OctoDevStackHealth -Port $Port))) {
+    $stopped = $false
+    if ($ours -and $Restart) {
+        # The stop asks the daemon first and refuses while builds run or wait (unless -Force).
+        $stop = Stop-OctoDevStackDaemon -Port $Port -Force:$Force -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $data.restartSafe = $stop.data.restartSafe
+        $data.blockers = @($stop.data.blockers)
+        $data.warnings = @($stop.data.warnings)
+        if (-not $stop.data.success) {
+            $data.alreadyRunning = $true
+            $data.pid = $ours.pid
+            $data.version = $stop.data.version
+            $data.commit = $stop.data.commit
+            if ($stop.data.refused) { $data.refused = $true }
+            Write-OctoDevStackResult $command $Json $false $data "Not restarted: $($stop.data.error)"
+            return
+        }
+        $stopped = $true
+        $listeners = @()
+        $ours = $null
+    }
+    if ($ours -or ($listeners.Count -eq 0 -and -not $stopped -and (Test-OctoDevStackHealth -Port $Port))) {
         $data.alreadyRunning = $true
         if ($ours) { $data.pid = $ours.pid }
+        $health = Get-OctoDevStackHealth -Port $Port
+        if ($health) { $data.version = $health.version; $data.commit = $health.commit }
+        if ($Rebuild) {
+            Write-OctoDevStackResult $command $Json $false $data "octo-devstack runs on $url from the binaries -Rebuild would replace. Pass -Restart with it (refused while builds run or wait), or stop the daemon first."
+            return
+        }
         if (-not $Json) { Write-Host "octo-devstack is already running on $url$(if ($ours) { " (PID $($ours.pid))" }) - MCP $url/mcp" -ForegroundColor Green }
         Write-OctoDevStackResult $command $Json $true $data $null
         return
@@ -196,7 +281,7 @@ function Start-OctoDevStackDaemon {
         Write-OctoDevStackResult $command $Json $false $data "No octo-devstack checkout in $repoPath. Run Invoke-CloneMainRepos -devTools (clones it next to octo-tools) or pass -Path."
         return
     }
-    if (-not (Test-Path -LiteralPath $dll)) {
+    if ($Rebuild -or -not (Test-Path -LiteralPath $dll)) {
         if ($Json) { Invoke-Build -repositoryPath $repoPath -configuration Release -Json | Out-Null } else { Invoke-Build -repositoryPath $repoPath -configuration Release }
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dll)) {
             Write-OctoDevStackResult $command $Json $false $data "Invoke-Build -repositoryPath $repoPath -configuration Release failed (see $(Join-Path $repoPath 'Invoke-Build.log'))."
@@ -243,8 +328,12 @@ function Start-OctoDevStackDaemon {
         Start-Sleep -Milliseconds 500
     }
     $data.started = $true
+    $data.restarted = $stopped
+    $health = Get-OctoDevStackHealth -Port $Port
+    if ($health) { $data.version = $health.version; $data.commit = $health.commit }
     if (-not $Json) {
-        Write-Host "octo-devstack is running (PID $processId)" -ForegroundColor Green
+        $what = if ($data.version) { ", version $($data.version)$(if ($data.commit) { " commit $($data.commit)" })" } else { '' }
+        Write-Host "octo-devstack is running (PID $processId$what)$(if ($stopped) { ' - restarted' })" -ForegroundColor Green
         Write-Host "  MCP:         $url/mcp"
         Write-Host "  Status page: $url/"
         Write-Host "  Log:         $logPath"
@@ -264,18 +353,30 @@ function Stop-OctoDevStackDaemon {
         program on the port is refused. macOS/Linux: SIGTERM, SIGKILL after -TimeoutSeconds; Windows:
         Stop-Process. "stopped" is reported only after the process is gone.
 
+        Before it stops anything it asks the daemon whether a restart is safe (GET /api/daemon, read-only):
+        while a build runs or waits the stop is refused and the builds and their owners are named - other
+        sessions poll them. -Force stops anyway (running builds go on, queued ones are restored, the next
+        daemon re-attaches to them). Sessions that hold a stack lease are listed as a warning; they do not
+        block. A daemon without that check (a version before AB#8812) is stopped with a warning.
+
+    .PARAMETER Force
+        Stop although builds run or wait.
+
     .PARAMETER Json
-        { success, exitCode, stopped, pid, port[, error] }.
+        { success, exitCode, stopped, pid, port, restartSafe, blockers, warnings, version, commit[, refused][, error] }.
+        restartSafe is null when nothing ran or the daemon has no check; refused = true when the stop was
+        refused because builds run or wait.
     #>
     [CmdletBinding()]
     param(
         [int]$Port = 5090,
         [int]$TimeoutSeconds = 15,
+        [switch]$Force,
         [switch]$Json
     )
 
     $command = 'Stop-OctoDevStackDaemon'
-    $data = @{ stopped = $false; pid = $null; port = $Port }
+    $data = @{ stopped = $false; pid = $null; port = $Port; restartSafe = $null; blockers = @(); warnings = @(); version = $null; commit = $null }
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $target = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
     if (-not $target) {
@@ -290,6 +391,25 @@ function Stop-OctoDevStackDaemon {
     }
 
     $data.pid = $target.pid
+    $check = Get-OctoDevStackRestartCheck -Port $Port
+    if ($check.available) {
+        $data.restartSafe = $check.safe
+        $data.blockers = @($check.blockers)
+        $data.warnings = @($check.warnings)
+        $data.version = $check.version
+        $data.commit = $check.commit
+        if (-not $check.safe -and -not $Force) {
+            $data.refused = $true
+            $why = if ($check.blockers.Count -gt 0) { $check.blockers -join '; ' } else { 'the daemon reports restart.safe = false' }
+            Write-OctoDevStackResult $command $Json $false $data "octo-devstack (PID $($target.pid)) is busy, nothing stopped: $why. Wait for the builds (build_list) or pass -Force - they go on and the next daemon re-attaches to them."
+            return
+        }
+        if (-not $check.safe) { Write-Warning "Stopping octo-devstack although it is busy (-Force): $($check.blockers -join '; ')" }
+        foreach ($warning in $check.warnings) { Write-Warning $warning }
+    }
+    else {
+        Write-Warning "octo-devstack on port $Port has no restart check (GET /api/daemon; a version before AB#8812, or it did not answer): it is stopped without knowing whether builds run."
+    }
     try {
         if (Test-OctoDevStackWindows) {
             Stop-Process -Id $target.pid -Force -ErrorAction Stop

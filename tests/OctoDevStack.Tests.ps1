@@ -4,7 +4,8 @@
 
     Nothing real is built, started or stopped: Invoke-Build, the lsof/ps/kill seams
     (Get-OctoDevStackListeningPids, Get-OctoDevStackProcessCommandLine, Send-OctoDevStackSignal), Start-Process,
-    Stop-Process, the /health probe and the detached launcher are mocked. The native tools are never mocked by
+    Stop-Process, the /health probe, the daemon's restart check (Get-OctoDevStackDaemonStatus, the seam around
+    GET /api/daemon - no test ever calls a daemon) and the detached launcher are mocked. The native tools are never mocked by
     name: Pester cannot mock a command that does not exist (lsof on Windows), and `kill` / `ps` are aliases of
     Stop-Process / Get-Process there. The checkout is a fake folder in TestDrive and the state folder is
     redirected there (OCTO_DEVSTACK_STATE).
@@ -26,8 +27,24 @@ BeforeAll {
     $script:Stubs = @()
     foreach ($name in 'Get-NetTCPConnection', 'Get-CimInstance', 'Invoke-Build') {
         if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
-            New-Item -Path "function:global:$name" -Value { } | Out-Null
+            # Invoke-Build's stub declares the parameters the mocks and their filters read.
+            $stub = if ($name -eq 'Invoke-Build') { { param([string]$repositoryPath, [string]$configuration, [switch]$Json) } } else { { } }
+            New-Item -Path "function:global:$name" -Value $stub | Out-Null
             $script:Stubs += $name
+        }
+    }
+
+    # What GET /api/daemon answers: idle, or busy with one running and one queued build.
+    function script:New-DaemonStatus([switch]$Busy, [string[]]$Warnings = @()) {
+        $blockers = if ($Busy) {
+            @('build b3-104847 of reimar/AB#8797_x (env ab8797) is running (pid 22029); it would go on and be re-attached, but its owner polls it now',
+                'build b4-104900 of agent-2 (repo octo-a) is queued; the next start restores it in its place')
+        }
+        else { @() }
+        return [pscustomobject]@{
+            daemon  = [pscustomobject]@{ pid = 902; version = '1.0.0'; commit = 'c343ff279dc8'; development = $false }
+            restart = [pscustomobject]@{ safe = (-not $Busy); blockers = $blockers; warnings = $Warnings; builds = @(); leases = @() }
+            history = @()
         }
     }
 
@@ -79,6 +96,109 @@ Describe 'Start-OctoDevStackDaemon' {
         Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
         Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { }
         Mock -ModuleName OctoDevStack Invoke-Build { $global:LASTEXITCODE = 0 }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackHealth { [pscustomobject]@{ status = 'ok'; pid = 4242; version = '1.0.0'; commit = 'c343ff279dc8' } }
+        Mock -ModuleName OctoDevStack Stop-Process { }
+        $script:KillCalls = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName OctoDevStack Send-OctoDevStackSignal { $script:KillCalls.Add("-$Signal $ProcessId") }
+    }
+
+    Context '-Restart' {
+        BeforeEach {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { 902 }
+            Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll --url http://127.0.0.1:5090' }
+            # 902 is the running daemon (gone after its SIGTERM), 4242 the new one.
+            Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $ProcessId -ne 902 -or $script:KillCalls.Count -eq 0 }
+            Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $true }
+        }
+
+        It 'stops an idle daemon, starts it again and reports the version that answers' {
+            $path = New-FakeCheckout 'restart-idle' -Built
+
+            $json = Start-OctoDevStackDaemon -Path $path -Restart -Json | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.restarted | Should -BeTrue
+            $json.data.started | Should -BeTrue
+            $json.data.alreadyRunning | Should -BeFalse
+            $json.data.pid | Should -Be 4242
+            $json.data.restartSafe | Should -BeTrue
+            $json.data.version | Should -Be '1.0.0'
+            $json.data.commit | Should -Be 'c343ff279dc8'
+            $script:KillCalls | Should -Be @('-TERM 902')
+            Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 1
+            Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
+        }
+
+        It 'refuses while builds run or wait: nothing stopped, nothing started, the builds are named' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus -Busy }
+            $path = New-FakeCheckout 'restart-busy' -Built
+
+            $json = Start-OctoDevStackDaemon -Path $path -Restart -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeFalse
+            $json.data.refused | Should -BeTrue
+            $json.data.restarted | Should -BeFalse
+            $json.data.alreadyRunning | Should -BeTrue
+            $json.data.restartSafe | Should -BeFalse
+            $json.data.blockers | Should -HaveCount 2
+            $json.data.error | Should -BeLike 'Not restarted:*b3-104847*-Force*'
+            $script:KillCalls | Should -HaveCount 0
+            Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+        }
+
+        It 'restarts a busy daemon with -Force and still reports what was running' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus -Busy }
+            $path = New-FakeCheckout 'restart-force' -Built
+
+            $json = Start-OctoDevStackDaemon -Path $path -Restart -Force -Json -WarningAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.restarted | Should -BeTrue
+            $json.data.restartSafe | Should -BeFalse
+            $json.data.blockers | Should -HaveCount 2
+            $script:KillCalls | Should -Be @('-TERM 902')
+        }
+
+        It 'builds Release again with -Rebuild after the stop, never under the running daemon' {
+            $path = New-FakeCheckout 'restart-rebuild' -Built
+            $script:BuiltWhileRunning = $null
+            Mock -ModuleName OctoDevStack Invoke-Build { $script:BuiltWhileRunning = ($script:KillCalls.Count -eq 0); $global:LASTEXITCODE = 0 }
+
+            $json = Start-OctoDevStackDaemon -Path $path -Restart -Rebuild -Json | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.built | Should -BeTrue
+            $script:BuiltWhileRunning | Should -BeFalse
+            Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 1 -ParameterFilter { $configuration -eq 'Release' }
+        }
+
+        It 'refuses -Rebuild without -Restart while the daemon runs from those binaries' {
+            $path = New-FakeCheckout 'rebuild-running' -Built
+
+            $json = Start-OctoDevStackDaemon -Path $path -Rebuild -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeFalse
+            $json.data.alreadyRunning | Should -BeTrue
+            $json.data.error | Should -BeLike '*-Rebuild would replace*-Restart*'
+            $script:KillCalls | Should -HaveCount 0
+            Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
+        }
+
+        It 'starts normally when nothing runs' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+            $script:HealthCalls = 0
+            Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:HealthCalls++; $script:HealthCalls -ge 2 }
+            $path = New-FakeCheckout 'restart-nothing' -Built
+
+            $json = Start-OctoDevStackDaemon -Path $path -Restart -Json | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.started | Should -BeTrue
+            $json.data.restarted | Should -BeFalse
+            $json.data.restartSafe | Should -BeNullOrEmpty
+            $script:KillCalls | Should -HaveCount 0
+        }
     }
 
     It 'does nothing when octo-devstack already listens on the port' {
@@ -219,6 +339,82 @@ Describe 'Stop-OctoDevStackDaemon' {
         Mock -ModuleName OctoDevStack Stop-Process { }
         $script:KillCalls = [System.Collections.Generic.List[string]]::new()
         Mock -ModuleName OctoDevStack Send-OctoDevStackSignal { $script:KillCalls.Add("-$Signal $ProcessId") }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus }
+    }
+
+    Context 'restart check (GET /api/daemon)' {
+        BeforeEach {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { 902 }
+            Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'dotnet /x/octo-devstack/bin/Release/net10.0/octo-devstack.dll' }
+            Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
+        }
+
+        It 'refuses while builds run or wait and names them; nothing is signalled' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus -Busy }
+
+            $json = Stop-OctoDevStackDaemon -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeFalse
+            $json.data.exitCode | Should -Be 1
+            $json.data.stopped | Should -BeFalse
+            $json.data.refused | Should -BeTrue
+            $json.data.restartSafe | Should -BeFalse
+            $json.data.blockers | Should -HaveCount 2
+            $json.data.blockers[0] | Should -BeLike 'build b3-104847 of reimar/AB#8797_x*'
+            $json.data.error | Should -BeLike '*PID 902*busy, nothing stopped*b4-104900*-Force*'
+            $json.data.version | Should -Be '1.0.0'
+            $json.data.commit | Should -Be 'c343ff279dc8'
+            $script:KillCalls | Should -HaveCount 0
+            Should -Invoke -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus -Times 1 -ParameterFilter { $Port -eq 5090 }
+        }
+
+        It 'stops a busy daemon with -Force, with a warning that names the builds' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus -Busy }
+
+            $json = Stop-OctoDevStackDaemon -Force -Json -WarningVariable warnings -WarningAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.stopped | Should -BeTrue
+            $json.data.restartSafe | Should -BeFalse
+            $json.data.blockers | Should -HaveCount 2
+            $json.data.PSObject.Properties.Name | Should -Not -Contain 'refused'
+            "$warnings" | Should -BeLike '*although it is busy (-Force)*b3-104847*'
+            $script:KillCalls | Should -Be @('-TERM 902')
+        }
+
+        It 'stops an idle daemon; held leases are a warning, not a refusal' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus -Warnings "slot 'ab8797' is leased to env:ab8797 until 14:00; the lease and the running services are kept" }
+
+            $json = Stop-OctoDevStackDaemon -Port 5099 -Json -WarningVariable warnings -WarningAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.stopped | Should -BeTrue
+            $json.data.restartSafe | Should -BeTrue
+            $json.data.blockers | Should -HaveCount 0
+            $json.data.warnings | Should -HaveCount 1
+            "$warnings" | Should -BeLike '*leased to env:ab8797*'
+            Should -Invoke -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus -Times 1 -ParameterFilter { $Port -eq 5099 }
+        }
+
+        It 'stops a daemon that has no restart check, with a warning (older version, or no answer)' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { }
+
+            $json = Stop-OctoDevStackDaemon -Json -WarningVariable warnings -WarningAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $json.data.stopped | Should -BeTrue
+            $json.data.restartSafe | Should -BeNullOrEmpty
+            "$warnings" | Should -BeLike '*has no restart check*'
+            $script:KillCalls | Should -Be @('-TERM 902')
+        }
+
+        It 'does not ask a program that is not octo-devstack' {
+            Mock -ModuleName OctoDevStack Get-OctoDevStackProcessCommandLine { 'node server.js' }
+
+            $null = Stop-OctoDevStackDaemon -Json -ErrorAction SilentlyContinue
+
+            Should -Invoke -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus -Times 0
+        }
     }
 
     It 'sends SIGTERM only to the octo-devstack listener on the port' {
