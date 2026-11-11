@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Canned fixture for tests/OctoTests.Tests.ps1 (AB#8813): the test host went away, no single result, counters only. -->
+<TestRun id="33333333-3333-3333-3333-333333333333" name="fixture" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Times creation="2026-11-11T08:00:00.0000000+00:00" queuing="2026-11-11T08:00:00.0000000+00:00" start="2026-11-11T08:00:00.0000000+00:00" finish="2026-11-11T08:00:01.0000000+00:00" />
+  <ResultSummary outcome="Failed">
+    <Counters total="3" executed="3" passed="1" failed="1" error="1" timeout="0" aborted="0" inconclusive="0" passedButRunAborted="0" notRunnable="0" notExecuted="0" disconnected="0" warning="0" completed="0" inProgress="0" pending="0" />
+    <RunInfos>
+      <RunInfo computerName="fixture" outcome="Error" timestamp="2026-11-11T08:00:01.0000000+00:00">
+        <Text>The fixture test host process exited before the run finished.</Text>
+      </RunInfo>
+    </RunInfos>
+  </ResultSummary>
+</TestRun>
