@@ -41,13 +41,18 @@ function Invoke-Build {
         # Print the lane environment this build would use and exit without running dotnet.
         [switch]$DryRun,
         [hashtable]$msbuildProperties = @{},
+        # AB#8831: let every CK compile refresh the remote CK catalogs itself (as before). Default: a repository that
+        # uses a construction kit reads them at most once (not at all while the caches are younger than 30 minutes)
+        # and builds with OctoRefreshRemoteCatalogs=false - see OctoCkCatalogRefresh.psm1. A caller that passes
+        # OctoRefreshRemoteCatalogs in -msbuildProperties (Invoke-BuildAll does) decides itself.
+        [switch]$refreshCatalogs,
         # Progress events, one JSON line each (Write-OctoBuildEvent).
         [string]$EventsFile = '',
         [switch]$Json
     )
 
     if ($DryRun -or [string]::IsNullOrWhiteSpace($EventsFile)) {
-        Invoke-BuildMain -configuration $configuration -repositoryPath $repositoryPath -laneIsolation $laneIsolation -DryRun:$DryRun -msbuildProperties $msbuildProperties -Json:$Json
+        Invoke-BuildMain -configuration $configuration -repositoryPath $repositoryPath -laneIsolation $laneIsolation -DryRun:$DryRun -msbuildProperties $msbuildProperties -refreshCatalogs:$refreshCatalogs -Json:$Json
         return
     }
 
@@ -57,7 +62,7 @@ function Invoke-Build {
     $events = New-OctoBuildEventState -Path $EventsFile -Command 'Invoke-Build'
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        Invoke-BuildMain -configuration $configuration -repositoryPath $repositoryPath -laneIsolation $laneIsolation -msbuildProperties $msbuildProperties -events $events -Json:$Json
+        Invoke-BuildMain -configuration $configuration -repositoryPath $repositoryPath -laneIsolation $laneIsolation -msbuildProperties $msbuildProperties -refreshCatalogs:$refreshCatalogs -events $events -Json:$Json
     }
     finally {
         # Also after a throw: repoDone(success=false) once the repository had started, then done. Best-effort on Ctrl+C.
@@ -73,6 +78,7 @@ function Invoke-BuildMain {
         [string]$laneIsolation,
         [switch]$DryRun,
         [hashtable]$msbuildProperties = @{},
+        [switch]$refreshCatalogs,
         $events = $null,
         [switch]$Json
     )
@@ -98,7 +104,7 @@ function Invoke-BuildMain {
     # Set for this build only and restored afterwards; empty outside a lane and in main (legacy behaviour).
     $savedEnvironment = Set-OctoBuildEnvironment -environment $buildEnvironment.environment
     try {
-        Invoke-BuildCore -configuration $configuration -repositoryPath $repositoryPath -propertyArgs $propertyArgs -events $events -Json:$Json
+        Invoke-BuildCore -configuration $configuration -repositoryPath $repositoryPath -propertyArgs $propertyArgs -msbuildProperties $msbuildProperties -refreshCatalogs:$refreshCatalogs -events $events -Json:$Json
     }
     finally {
         Restore-OctoBuildEnvironment -saved $savedEnvironment
@@ -112,6 +118,10 @@ function Invoke-BuildCore {
         [string[]]$propertyArgs = @(),
         # -EventsFile state (New-OctoBuildEventState); this function writes plan/repoStart/phase/repoDone and the result. $null = no events.
         $events = $null,
+        # The properties behind $propertyArgs and the caller's -refreshCatalogs: the one read of the remote CK
+        # catalogs (AB#8831) happens here, inside the repository's progress (phase "catalogs").
+        [hashtable]$msbuildProperties = @{},
+        [switch]$refreshCatalogs,
         [switch]$Json
     )
     $logFile = Join-Path $repositoryPath "Invoke-Build.log"
@@ -143,12 +153,28 @@ function Invoke-BuildCore {
     }
     $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    # AB#8831: one read of the remote CK catalogs, then the CK compiles of this build do not refresh them again.
+    # After repoStart, as its own phase: the read can take minutes and belongs to the repository's duration.
+    $catalogs = [ordered]@{ mode = $(if ($refreshCatalogs) { 'perCompile' } else { 'notNeeded' }); usable = $false; seconds = 0.0; detail = $null }
+    if (-not $refreshCatalogs -and -not (Test-OctoCatalogPropertySet -properties $msbuildProperties) -and (Test-OctoRepoUsesCk -path $repositoryPath)) {
+        & $setPhase 'catalogs'
+        $laneRoot = Find-OctoLaneRoot -path $repositoryPath
+        if (-not $laneRoot) { $laneRoot = Split-Path -Parent ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))) }
+        $read = Initialize-OctoRunCatalogs -laneRootPath $laneRoot
+        $catalogs.mode = $read.mode; $catalogs.usable = [bool]$read.usable; $catalogs.seconds = [double]$read.seconds; $catalogs.detail = $read.detail
+        if (-not $Json) { Write-Host "CK catalogs: $($read.mode) - $($read.detail)" -ForegroundColor $(if ($read.usable) { 'DarkGray' } else { 'Yellow' }) }
+        if ($read.usable) { $propertyArgs = @(ConvertTo-OctoMsBuildPropertyArgs -properties (Add-OctoCatalogProperty -properties $msbuildProperties)) }
+    }
+
     if (-not $Json) {
         Write-Host "[$configuration] Restore nuget packages $repositoryPath" -ForegroundColor Green
     }
     & $setPhase 'restore'
+    $restoreWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $compileWatch = [System.Diagnostics.Stopwatch]::new()
     dotnet restore $repositoryPath -p:Configuration=$configuration @propertyArgs -f > $logFile
     $exitCode = $LASTEXITCODE
+    $restoreWatch.Stop()
     $failedStep = $null
     if ($exitCode -ne 0) {
         # A failed restore must not fall through to the build (which would report its own result).
@@ -162,8 +188,11 @@ function Invoke-BuildCore {
             Write-Host "[$configuration] Building repository $repositoryPath" -ForegroundColor Green
         }
         & $setPhase 'build'
-        dotnet build $repositoryPath -c $configuration @propertyArgs >> $logFile
+        $compileWatch.Start()
+        # --no-restore: the restore above did it; compileSeconds is the build alone.
+        dotnet build $repositoryPath -c $configuration --no-restore @propertyArgs >> $logFile
         $exitCode = $LASTEXITCODE
+        $compileWatch.Stop()
         if ($exitCode -ne 0) { $failedStep = 'build' }
         if (-not $Json) {
             if ($exitCode -ne 0) {
@@ -188,6 +217,9 @@ function Invoke-BuildCore {
                 buildSeconds   = $buildWatch.Elapsed.TotalSeconds
                 testSeconds    = 0
                 packageSeconds = 0
+                catalogSeconds = $(if ($catalogs) { [double]$catalogs.seconds } else { 0.0 })
+                restoreSeconds = $restoreWatch.Elapsed.TotalSeconds
+                compileSeconds = $compileWatch.Elapsed.TotalSeconds
                 copied         = 0
                 purged         = 0
                 logFile        = $logFile
@@ -201,8 +233,11 @@ function Invoke-BuildCore {
 
     if ($Json) {
         Write-OctoJson -Command 'Invoke-Build' -Data (New-OctoActionResult -Success $state -ExitCode $exitCode -Extra @{
-            configuration = $configuration
-            logFile       = $logFile
+            configuration  = $configuration
+            logFile        = $logFile
+            restoreSeconds = $restoreWatch.Elapsed.TotalSeconds
+            compileSeconds = $compileWatch.Elapsed.TotalSeconds
+            catalogs       = $catalogs
         })
         return
     }

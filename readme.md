@@ -376,6 +376,14 @@ Remove-OctoEnvironment -env ab8625-enum-null
   failure nothing new starts and the running repositories finish. Measured with real builds of a throw-away
   workspace (one library, six independent consumers, one repository on top): 24.7 s sequential, 20-22 s with 2,
   17-18 s with 4; the gain grows with the number of independent repositories.
+- **A first build without the waiting** (AB#8831). Two things used to eat a first environment build: every CK
+  compile re-read both remote CK catalogs (1-2.5 minutes each time), and a new environment downloaded all
+  third-party packages again (2-5 GB). Now a build run reads the catalogs at most once - not at all while they were
+  read in the last 30 minutes; when that one read is not possible (no `octo-ckc`, it fails) every CK compile
+  refreshes them itself as before, and a `construction-kits.yaml` restore always does - and `New-OctoEnvironment` fills `wt-<env>/.nuget-packages` from a local cache (APFS
+  clones on macOS: seconds, no disk space, and copy-on-write, so environments cannot change each other's
+  packages). `-refreshCatalogs` restores the per-compile refresh, `-skipPackageCacheSeed` the empty cache;
+  `Initialize-OctoEnvironmentPackageCache -env <env>` fills the cache of an existing environment.
 - **Snapshot, not live.** Main's packages and catalogs are copied when the environment is created and refreshed only
   on request (`Sync-OctoEnvironment`, `-syncMain`). Packages built in the environment always win; catalog indexes
   changed on both sides are merged. Main's feed is never added as a second NuGet source.

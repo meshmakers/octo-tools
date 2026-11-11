@@ -1253,6 +1253,178 @@ function Get-OctoEnvironmentAffected {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+# Package cache of a new environment (AB#8831)
+# ---------------------------------------------------------------------------------------------------------------
+
+function Get-OctoGlobalPackageCachePath {
+    # The user-level NuGet package cache (mocked in the tests; the real one is only ever read).
+    return Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget/packages'
+}
+
+function Get-OctoPackageCacheSeedSource {
+    # Where an environment's package cache is filled from: the base lane's cache when it has one, else the
+    # user-level cache. $null when neither exists.
+    param([Parameter(Mandatory = $true)] [string]$basePath)
+    # A cache counts when it holds at least one version that would be copied: a base lane cache with nothing but
+    # local builds (or unfinished extractions) must not hide the user-level cache.
+    foreach ($candidate in @((Join-Path $basePath '.nuget-packages'), (Get-OctoGlobalPackageCachePath))) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
+        foreach ($idFolder in [IO.Directory]::EnumerateDirectories($candidate)) {
+            $id = [IO.Path]::GetFileName($idFolder)
+            foreach ($versionFolder in [IO.Directory]::EnumerateDirectories($idFolder)) {
+                if (Test-OctoPackageVersionEligible -id $id -versionFolder $versionFolder) { return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($candidate)) }
+            }
+        }
+    }
+    return $null
+}
+
+function Test-OctoPackageVersionEligible {
+    # A version folder a cache may hand to another: not a local build (meshmakers.*/999.0.0), and completely
+    # extracted (NuGet writes .nupkg.metadata last).
+    param([Parameter(Mandatory = $true)] [string]$id, [Parameter(Mandatory = $true)] [string]$versionFolder)
+    if ($id -like 'meshmakers.*' -and [IO.Path]::GetFileName($versionFolder) -eq '999.0.0') { return $false }
+    return (Test-Path -LiteralPath (Join-Path $versionFolder '.nupkg.metadata') -PathType Leaf)
+}
+
+function Get-OctoPackageCopyMethod {
+    <#
+        How package folders get from one cache into another:
+          clone  macOS, both folders on the same APFS volume: `cp -c` (clonefile). The copy has its own files that
+                 share the data blocks until one side is written (copy-on-write) - nothing an environment does to its
+                 cache can reach another cache, deleting included, and it costs neither time nor disk space.
+          copy   everything else: a plain copy.
+        Hardlinks are never used: a hardlink is the same file under two names, so a write through one cache (a tool
+        patching a file, a re-extraction over an existing folder) would change the other environment's package.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$source, [Parameter(Mandatory = $true)] [string]$target)
+    if (-not $IsMacOS) { return 'copy' }
+    try {
+        $devices = @(& /usr/bin/stat -f '%d' $source $target 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $devices.Count -eq 2 -and $devices[0] -eq $devices[1]) { return 'clone' }
+    }
+    catch { }
+    return 'copy'
+}
+
+function Copy-OctoPackageFolder {
+    # Copies one folder (a package id or one version of it) to a target that does not exist yet. Throws on failure.
+    # All or nothing: the bytes go to a temporary sibling that is renamed into place; a copy that fails halfway
+    # leaves no folder a later run would take for a complete package.
+    param([Parameter(Mandatory = $true)] [string]$source, [Parameter(Mandatory = $true)] [string]$target, [Parameter(Mandatory = $true)] [string]$method)
+    $temporary = Join-Path (Split-Path -Parent $target) (".seeding-{0}-{1}" -f $PID, [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        Copy-OctoPackageFolderRaw -source $source -target $temporary -method $method
+        [IO.Directory]::Move($temporary, $target)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Copy-OctoPackageFolderRaw {
+    # The copy itself (clone or plain) to a target that does not exist. Throws on failure; may leave a partial target.
+    param([Parameter(Mandatory = $true)] [string]$source, [Parameter(Mandatory = $true)] [string]$target, [Parameter(Mandatory = $true)] [string]$method)
+    if ($method -eq 'clone') {
+        $output = @(& /bin/cp -Rc $source $target 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "cp -Rc $source $target failed: $($output -join ' ')" }
+        return
+    }
+    Copy-Item -LiteralPath $source -Destination $target -Recurse -Force -ErrorAction Stop
+}
+
+function Invoke-OctoPackageCacheSeed {
+    <#
+        Fills a package cache from another local one instead of the network (AB#8831): every <id>/<version> folder
+        of $source that $target lacks - third-party packages only. Never copied:
+          - meshmakers.*/999.0.0, the local builds: an environment gets them from its own feed, another lane's build
+            of the same version must not slip in;
+          - a version folder without .nupkg.metadata (NuGet writes it last): an extraction that did not finish.
+        Existing folders of the target are left alone. Returns { source; target; method; packages; alreadyPresent;
+        skippedLocalBuilds; skippedIncomplete; sizeBytes; seconds; errors; dryRun }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$source,
+        [Parameter(Mandatory = $true)] [string]$target,
+        [switch]$dryRun
+    )
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $report = [ordered]@{ source = $source; target = $target; method = $null; packages = 0; alreadyPresent = 0; skippedLocalBuilds = 0; skippedIncomplete = 0; sizeBytes = [long]0; seconds = 0.0; errors = @(); dryRun = [bool]$dryRun }
+    if (-not $dryRun -and -not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Force -Path $target | Out-Null }
+    $report.method = Get-OctoPackageCopyMethod -source $source -target $(if (Test-Path -LiteralPath $target) { $target } else { Split-Path -Parent $target })
+    $sizeOf = {
+        param([string]$folder)
+        $total = [long]0
+        foreach ($file in [IO.Directory]::EnumerateFiles($folder, '*', [IO.SearchOption]::AllDirectories)) { $total += ([IO.FileInfo]::new($file)).Length }
+        return $total
+    }
+    foreach ($idFolder in @([IO.Directory]::EnumerateDirectories($source) | Sort-Object)) {
+        $id = [IO.Path]::GetFileName($idFolder)
+        $targetId = Join-Path $target $id
+        $versions = @([IO.Directory]::EnumerateDirectories($idFolder))
+        $wanted = @()
+        foreach ($versionFolder in $versions) {
+            $version = [IO.Path]::GetFileName($versionFolder)
+            if ($id -like 'meshmakers.*' -and $version -eq '999.0.0') { $report.skippedLocalBuilds++; continue }
+            if (-not (Test-Path -LiteralPath (Join-Path $versionFolder '.nupkg.metadata') -PathType Leaf)) { $report.skippedIncomplete++; continue }
+            if (Test-Path -LiteralPath (Join-Path $targetId $version)) { $report.alreadyPresent++; continue }
+            $wanted += $versionFolder
+        }
+        if ($wanted.Count -eq 0) { continue }
+        try {
+            if ($dryRun) { foreach ($versionFolder in $wanted) { $report.sizeBytes += & $sizeOf $versionFolder } }
+            elseif ($wanted.Count -eq $versions.Count -and -not (Test-Path -LiteralPath $targetId)) {
+                # The whole id in one call (one process instead of one per version).
+                Copy-OctoPackageFolder -source $idFolder -target $targetId -method $report.method
+                $report.sizeBytes += & $sizeOf $idFolder
+            }
+            else {
+                if (-not (Test-Path -LiteralPath $targetId)) { New-Item -ItemType Directory -Force -Path $targetId | Out-Null }
+                foreach ($versionFolder in $wanted) {
+                    Copy-OctoPackageFolder -source $versionFolder -target (Join-Path $targetId ([IO.Path]::GetFileName($versionFolder))) -method $report.method
+                    $report.sizeBytes += & $sizeOf $versionFolder
+                }
+            }
+            $report.packages += $wanted.Count
+        }
+        catch {
+            $report.errors += "${id}: $($_.Exception.Message)"
+            # No empty id folder stays behind either.
+            if ((Test-Path -LiteralPath $targetId -PathType Container) -and @([IO.Directory]::EnumerateFileSystemEntries($targetId) | Select-Object -First 1).Count -eq 0) { Remove-Item -LiteralPath $targetId -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    $report.seconds = $watch.Elapsed.TotalSeconds
+    return $report
+}
+
+function Invoke-OctoEnvironmentPackageCacheSeed {
+    # The seeding of one environment: source selection and the rule when it happens without being asked for.
+    # $automatic (New-OctoEnvironment): only where it is cheap - a clone, or a copy of the base lane's own cache;
+    # copying the whole user-level cache (tens of GB) is left to an explicit Initialize-OctoEnvironmentPackageCache.
+    param(
+        [Parameter(Mandatory = $true)] [string]$environmentPath,
+        [Parameter(Mandatory = $true)] [string]$basePath,
+        [string]$source = '',
+        [switch]$automatic,
+        [switch]$dryRun
+    )
+    $target = Join-Path $environmentPath '.nuget-packages'
+    if ([string]::IsNullOrWhiteSpace($source)) { $source = Get-OctoPackageCacheSeedSource -basePath $basePath }
+    else { $source = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($source)) }
+    $skipped = { param([string]$why) [ordered]@{ source = $source; target = $target; method = $null; packages = 0; alreadyPresent = 0; skippedLocalBuilds = 0; skippedIncomplete = 0; sizeBytes = [long]0; seconds = 0.0; errors = @(); dryRun = [bool]$dryRun; skipped = $why } }
+    if (-not $source -or -not (Test-Path -LiteralPath $source -PathType Container)) { return & $skipped 'no local package cache to copy from (base lane cache, user-level cache)' }
+    if (Test-OctoPathInside -path $source -parent $target) { return & $skipped 'the source is the environment cache itself' }
+    if ($automatic) {
+        $method = Get-OctoPackageCopyMethod -source $source -target $(if (Test-Path -LiteralPath $target) { $target } else { $environmentPath })
+        $isBaseCache = (Test-OctoPathInside -path $source -parent $basePath)
+        if ($method -ne 'clone' -and -not $isBaseCache) {
+            return & $skipped "cloning is not available here and $source is the user-level cache - a full copy is only made on request: Initialize-OctoEnvironmentPackageCache -env $(Split-Path -Leaf $environmentPath | ForEach-Object { $_ -replace '^wt-', '' })"
+        }
+    }
+    return Invoke-OctoPackageCacheSeed -source $source -target $target -dryRun:$dryRun
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Cmdlets
 # ---------------------------------------------------------------------------------------------------------------
 
@@ -1278,6 +1450,14 @@ function Get-OctoEnvironmentAffected {
     The feed is seeded from the base lane's packages, which were built from the LOCAL checkouts: the output says which
     environment repositories are newer than those packages (Invoke-BuildEnvironment rebuilds them) and which
     libraries outside the environment are behind their upstream in the base lane, with what to do (-Json: feedSnapshot).
+
+    Package cache (AB#8831): <env>/.nuget-packages is filled from a local cache - the base lane's .nuget-packages,
+    else ~/.nuget/packages - instead of downloading 2-5 GB on the first restore: third-party packages only, never
+    meshmakers.*/999.0.0 (those come from the environment's feed). On macOS the folders are APFS clones (`cp -c`):
+    no time, no disk space, and copy-on-write, so two environments cannot change each other's packages; hardlinks
+    are not used for that reason. Elsewhere it is a plain copy, made automatically only from the base lane's cache
+    (Initialize-OctoEnvironmentPackageCache copies from the user-level cache on request). -skipPackageCacheSeed
+    turns it off. -Json: packageCache { source, method, packages, sizeBytes, seconds, ... }.
 
     Atomic: when anything fails (a worktree, the seeding, -addAffected), everything this call created is rolled back -
     its worktrees, the environment folder and the branches it created, never a branch that existed before - and the
@@ -1307,6 +1487,7 @@ function New-OctoEnvironment {
         [string]$base = $script:DefaultBase,
         [switch]$addAffected,
         [switch]$localBase,
+        [switch]$skipPackageCacheSeed,
         [switch]$Detailed,
         [switch]$Json
     )
@@ -1422,9 +1603,18 @@ function New-OctoEnvironment {
     }
 
     $toolRepos = @($manifest['repos'] | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { $_['name'] })
+    # AB#8831: third-party packages from a local cache instead of the network. After the transaction: an environment
+    # without a filled cache is complete, its first restore just downloads them.
+    $packageCache = $null
+    if (-not $skipPackageCacheSeed) {
+        try { $packageCache = Invoke-OctoEnvironmentPackageCacheSeed -environmentPath $environmentPath -basePath $basePath -automatic }
+        catch { $warnings += "The package cache was not filled from a local cache: $($_.Exception.Message)" }
+        if ($packageCache -and @($packageCache.errors).Count -gt 0) { $warnings += "The package cache was filled with errors ($(@($packageCache.errors).Count)): $(@($packageCache.errors | Select-Object -First 3) -join '; ')" }
+    }
     $global:LASTEXITCODE = 0
     if ($Json) {
         Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
+                packageCache = $packageCache
                 environment = $env; path = $environmentPath; branch = $branchName; manifest = $manifest
                 consumersAdded = $addedConsumers; sync = (ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed); errors = @()
                 localBase = [bool]$localBase; baseDrift = $drift; feedSnapshot = $feedSnapshot; toolRepos = $toolRepos; warnings = $warnings
@@ -1437,6 +1627,7 @@ function New-OctoEnvironment {
         Write-Host ("  {0,-9} {1}  {2}" -f $repo['role'], $repo['name'], $(if ($repo['branch']) { "$($repo['branch']) (from $($repo['baseRef']) $short)" } else { "detached at $($repo['baseRef']) $short" }))
     }
     Write-OctoEnvironmentSyncSummary -sync $sync
+    if ($packageCache) { Write-OctoPackageCacheSeedSummary -report $packageCache }
     foreach ($message in $warnings) { Write-Warning $message }
     foreach ($message in $feedSnapshot.hints) { Write-Warning $message }
     if ($toolRepos.Count -gt 0) { Write-Host "  $($toolRepos -join ', '): developer tool(s), not built by Invoke-BuildEnvironment" -ForegroundColor DarkGray }
@@ -1740,6 +1931,66 @@ function Add-OctoEnvironmentExistingWorktree {
     }
 }
 
+function Write-OctoPackageCacheSeedSummary {
+    param([Parameter(Mandatory = $true)] $report)
+    if ($report['skipped']) { Write-Host "  package cache: not filled - $($report['skipped'])" -ForegroundColor DarkGray; return }
+    Write-Host ("  package cache: {0} package version(s), {1:N1} GB from {2} ({3}, {4:N1} s){5}" -f $report['packages'], ($report['sizeBytes'] / 1GB), $report['source'], $report['method'], $report['seconds'], $(if ($report['dryRun']) { ' - dry run' })) -ForegroundColor DarkGray
+}
+
+<#
+.SYNOPSIS
+    Fills an environment's package cache from a local cache instead of the network (AB#8831).
+.DESCRIPTION
+    Copies every third-party package version the environment's <env>/.nuget-packages lacks from -source (default:
+    the base lane's .nuget-packages when it has one, else ~/.nuget/packages). Never meshmakers.*/999.0.0 - the local
+    builds come from the environment's own feed - and never a half-extracted version folder. Folders the environment
+    already has are left alone, so the call is repeatable.
+    macOS, same APFS volume: clones (`cp -c`, copy-on-write: no time, no space, and nothing one environment does to
+    its cache reaches another). Everywhere else a plain copy. Never hardlinks.
+    New-OctoEnvironment does this on its own; use this cmdlet for an environment created before, or to top it up.
+.EXAMPLE
+    Initialize-OctoEnvironmentPackageCache -env ab8625-enum-null -Json
+#>
+function Initialize-OctoEnvironmentPackageCache {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)] [string]$env,
+        [string]$source = '',
+        [switch]$Json
+    )
+    try {
+        $manifest = Read-OctoEnvironmentManifest -env $env
+        if ($null -eq $manifest) { throw "Environment $env does not exist." }
+        $environmentPath = Get-OctoEnvironmentPath -env $env
+        $basePath = Get-OctoEnvironmentBasePath -base ([string]$manifest['base'])
+        if (-not [string]::IsNullOrWhiteSpace($source) -and -not (Test-Path -LiteralPath $source -PathType Container)) { throw "Package cache $source does not exist." }
+        # -Json is for callers without a terminal: never wait for a confirmation there (-Confirm, or a
+        # $ConfirmPreference that makes this cmdlet ask).
+        if ($Json -and -not $WhatIfPreference -and "$ConfirmPreference" -in @('Low', 'Medium')) { throw "Initialize-OctoEnvironmentPackageCache -Json does not prompt: drop -Confirm (or `$ConfirmPreference = '$ConfirmPreference')." }
+        $dryRun = -not $PSCmdlet.ShouldProcess((Join-Path $environmentPath '.nuget-packages'), 'Fill the package cache from a local cache')
+        $report = Invoke-OctoEnvironmentPackageCacheSeed -environmentPath $environmentPath -basePath $basePath -source $source -dryRun:$dryRun
+    }
+    catch {
+        $global:LASTEXITCODE = 1
+        if ($Json) { Write-OctoJson -Command 'Initialize-OctoEnvironmentPackageCache' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ environment = $env; error = $_.Exception.Message }) }
+        else { Write-Error $_.Exception.Message }
+        return
+    }
+    $success = @($report.errors).Count -eq 0 -and -not $report['skipped']
+    $global:LASTEXITCODE = if ($success) { 0 } else { 1 }
+    if ($Json) {
+        $data = New-OctoActionResult -Success $success -ExitCode $global:LASTEXITCODE -Extra @{ environment = $env }
+        foreach ($key in $report.Keys) { $data[$key] = $report[$key] }
+        if ($report['skipped']) { $data['error'] = $report['skipped'] }
+        Write-OctoJson -Command 'Initialize-OctoEnvironmentPackageCache' -Data $data
+        return
+    }
+    Write-Host "Package cache of $env" -ForegroundColor Green
+    Write-OctoPackageCacheSeedSummary -report $report
+    Write-Host ("  left alone: {0} already there, {1} local build(s) (meshmakers.*/999.0.0), {2} incomplete" -f $report['alreadyPresent'], $report['skippedLocalBuilds'], $report['skippedIncomplete']) -ForegroundColor DarkGray
+    foreach ($message in @($report.errors)) { Write-Warning $message }
+}
+
 <#
 .SYNOPSIS
     Refreshes an environment's snapshot of the base lane: feed, CK catalog and blueprint catalog.
@@ -1978,6 +2229,11 @@ function Remove-OctoEnvironment {
     on in the package graph is finished, each in its own child process with its own environment. Repositories with
     a CK model, and build.ps1 / frontend / zenon repositories, do not overlap (see Invoke-BuildRange -maxParallel).
     After a failure nothing new starts and the running repositories finish. -Json: parallel, maxParallel, failedRepos.
+    The remote CK catalogs are read at most once per run (AB#8831): before the first repository that uses a
+    construction kit - not at all while the caches are younger than 30 minutes - and the CK compiles of the run build
+    with OctoRefreshRemoteCatalogs=false (OctoCkCatalogRefresh.psm1). -refreshCatalogs lets every CK compile refresh
+    them itself, as before. -Json: catalogs { mode, usable, seconds, detail, repo }; per repository catalogSeconds,
+    restoreSeconds, compileSeconds and testRestoreSeconds (also on the repoDone event).
     Developer tools in the environment (octo-tools, octo-devstack) are not built; -Json lists them in
     environment.toolRepos, and an environment that holds only tools succeeds with nothing to build.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
@@ -2000,6 +2256,7 @@ function Invoke-BuildEnvironment {
         [string[]]$skip = @(),
         [switch]$buildUnchanged,
         [ValidateRange(1, 16)] [int]$maxParallel = 2,
+        [switch]$refreshCatalogs,
         [switch]$syncMain,
         [switch]$verifyTests,
         [switch]$includeTests,
@@ -2149,6 +2406,7 @@ function Invoke-BuildEnvironment {
         EventsCommand   = 'Invoke-BuildEnvironment'
         recordStamps    = $true
         maxParallel     = $maxParallel
+        refreshCatalogs = [bool]$refreshCatalogs
         skipUnchanged   = -not $buildUnchanged
         repoInputs      = $repoInputs
     }
@@ -2210,5 +2468,6 @@ Export-ModuleMember -Function @(
     'Sync-OctoEnvironment',
     'Get-OctoAffectedRepos',
     'Remove-OctoEnvironment',
+    'Initialize-OctoEnvironmentPackageCache',
     'Invoke-BuildEnvironment'
 )
