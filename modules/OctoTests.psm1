@@ -520,8 +520,10 @@ function Get-OctoTestProjects {
 function Get-OctoFrontendTestProjects {
     <#
         The frontend test projects of a repository (AB#8819): every folder (outside node_modules/dist/..., at most four
-        levels deep) that holds an angular.json and a package.json with a "test" script. Each entry has the shape of
-        Get-OctoTestProjects plus Kind = 'frontend': Name (the folder name), Path (its package.json), Directory.
+        levels deep) that holds an angular.json and a package.json with a "test" script; the search goes on below a
+        workspace without one. Each entry has the shape of Get-OctoTestProjects plus Kind = 'frontend': Name (the folder
+        name; the folder path relative to the repository, with dots, when two workspaces share a folder name), Path (its
+        package.json), Directory.
     #>
     param([Parameter(Mandatory = $true)] [string]$repositoryPath)
     $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
@@ -541,12 +543,20 @@ function Get-OctoFrontendTestProjects {
                     RelativePath = ([IO.Path]::GetRelativePath($root, $package) -replace '\\', '/'); Directory = $item.Path
                     AssemblyName = (Split-Path -Leaf $item.Path); Docker = $false; DockerReason = $null; ProjectReferences = @()
                 }
+                continue   # an Angular workspace with tests holds no further one
             }
-            continue   # an Angular workspace holds no further one
         }
         if ($item.Depth -ge 4) { continue }
         foreach ($child in @(Get-ChildItem -LiteralPath $item.Path -Directory -ErrorAction SilentlyContinue | Where-Object { $skip -notcontains $_.Name -and -not $_.LinkType } | Sort-Object Name)) {
             $queue.Enqueue([pscustomobject]@{ Path = $child.FullName; Depth = $item.Depth + 1 })
+        }
+    }
+    # Two workspaces in folders of the same name (apps/web, tools/web) would share the results folder, last-result.json
+    # and the -project name: those get their folder path relative to the repository as the name (apps.web, tools.web).
+    foreach ($group in @($projects | Group-Object Name | Where-Object Count -gt 1)) {
+        foreach ($entry in $group.Group) {
+            $relative = ([IO.Path]::GetRelativePath($root, $entry.Directory) -replace '[\\/]+', '.').Trim('.')
+            if ($relative) { $entry.Name = $relative; $entry.AssemblyName = $relative }
         }
     }
     return $projects
@@ -1251,6 +1261,7 @@ function Invoke-OctoTestRun {
                 buildReason  = $_.BuildReason
                 filters      = @($_.Filters | Where-Object { $_ })
                 rerunCount   = $_.RerunCount
+                rerunFiles   = @($_.RerunFiles | Where-Object { $_ })
                 skip         = $_.Skip
             }
         })
@@ -1287,7 +1298,11 @@ function Invoke-OctoTestRun {
             Write-Host "  $($item.Project.Name)$(if ($item.Docker) { '  [docker: ' + $item.DockerReason + ']' })" -ForegroundColor Green
             if ($item.Skip) { Write-Host "    skipped: $($item.Skip)" -ForegroundColor Yellow; continue }
             Write-Host "    $(if ($item.NoBuild) { '--no-build' } else { 'builds first' }): $($item.BuildReason)"
-            if ($null -ne $item.RerunCount) { Write-Host "    reruns $($item.RerunCount) failed test(s) in $(@($item.Filters).Count) dotnet test call(s)" }
+            if ($null -ne $item.RerunCount -and (Test-OctoFrontendTestProject $item.Project)) {
+                Write-Host "    reruns $($item.RerunCount) failed test(s): npx ng test with --include for $(@($item.RerunFiles).Count) spec file(s)"
+                foreach ($file in @($item.RerunFiles)) { Write-Host "      --include $file" }
+            }
+            elseif ($null -ne $item.RerunCount) { Write-Host "    reruns $($item.RerunCount) failed test(s) in $(@($item.Filters).Count) dotnet test call(s)" }
             elseif ($filter) { Write-Host "    filter: $filter" }
         }
         Write-Host ''

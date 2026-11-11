@@ -144,6 +144,7 @@ function Get-OctoBuildOrder {
     # Consumer apps (AB#8819): only in a feature environment, and only the repositories its manifest names - a lane
     # such as branches/main holds energy-community or voest-app too, and Invoke-BuildAll must not start building them.
     $appDirectories = @()
+    $manifestAppNames = @()
     $manifestPath = Join-Path (Join-Path $branchRootPath '.octo') 'environment.json'
     if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
         $manifest = $null
@@ -151,6 +152,7 @@ function Get-OctoBuildOrder {
         foreach ($entry in @($(if ($manifest) { $manifest.repos }) | Where-Object { $null -ne $_ })) {
             $name = [string]$entry.name
             if ([string]::IsNullOrWhiteSpace($name) -or $name -like 'mm-*' -or $name -like 'octo-*') { continue }
+            $manifestAppNames += $name
             $folder = Join-Path $branchRootPath $name
             if ((Test-Path -LiteralPath $folder -PathType Container) -and (Test-Path -LiteralPath (Join-Path $folder 'build.ps1') -PathType Leaf)) {
                 $appDirectories += [pscustomobject]@{ Name = $name; Info = (Get-Item -LiteralPath $folder) }
@@ -170,6 +172,10 @@ function Get-OctoBuildOrder {
     }
     $octoDirectories = @($octoDirectories | Sort-Object Name)
     $mmDirectories = @($mmDirectories | Sort-Object Name)
+    # Apps in manifest order, whether their folder is in the environment or an in-place worktree (-additionalRepos);
+    # an app the manifest does not name comes after them.
+    $appDirectories = @(@($manifestAppNames | ForEach-Object { $wanted = $_; $appDirectories | Where-Object { $_.Name -ieq $wanted } | Select-Object -First 1 }) +
+        @($appDirectories | Where-Object { $manifestAppNames -notcontains $_.Name }) | Where-Object { $null -ne $_ })
 
     if ($excludeFrontend -eq $true) {
         $octoDirectories = @($octoDirectories | Where-Object { $_.Name -notlike "octo-frontend-*" })

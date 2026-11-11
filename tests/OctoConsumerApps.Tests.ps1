@@ -12,7 +12,7 @@
 BeforeAll {
     $modules = Join-Path $PSScriptRoot '../modules'
     foreach ($module in 'OctoJsonOutput', 'Get-OctoLaneBuildSettings', 'OctoBuildOrder', 'Copy-NuGetPackages', 'Invoke-KillDotnet', 'Stop-Octo', 'Invoke-Publish',
-        'Invoke-BuildAll', 'Sync-OctoCkIntermediateVersions', 'Invoke-BuildRange', 'OctoEnvironment', 'OctoTests') {
+        'Invoke-BuildAll', 'Sync-OctoCkIntermediateVersions', 'OctoBuildStamp', 'Invoke-BuildRange', 'OctoEnvironment', 'OctoTests') {
         Import-Module (Join-Path $modules "$module.psm1") -Force
     }
 
@@ -92,6 +92,22 @@ Describe 'Get-OctoBuildOrder with consumer apps' {
         @(Get-OctoBuildOrder -branchRootPath $environment -excludeAdditional $true).Name | Should -Not -Contain 'voest-app'
     }
 
+    It 'keeps the manifest order when an app is an in-place worktree (-additionalRepos)' {
+        $lane = New-TestLane
+        $elsewhere = Join-Path $lane.Root 'elsewhere/zz-inplace-app'
+        [void](New-TestApp $elsewhere)
+        # The manifest names the in-place app first, then two apps of the environment folder.
+        $environment = New-TestEnvironment $lane.Root 'ab5-apps' @('voest-app', 'energy-community')
+        $manifestPath = Join-Path $environment '.octo/environment.json'
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $manifest['repos'] = @([ordered]@{ name = 'zz-inplace-app'; role = 'feature'; path = $elsewhere; branch = 'x'; baseCommit = 'abc' }) + @($manifest['repos'])
+        Set-Content -Path $manifestPath -Value (ConvertTo-Json -InputObject $manifest -Depth 5)
+
+        $order = @(Get-OctoBuildOrder -branchRootPath $environment -additionalRepos @{ 'zz-inplace-app' = $elsewhere; 'aa-unlisted-app' = $elsewhere })
+
+        @($order | Where-Object { $_.Group -eq 'app' } | ForEach-Object Name) | Should -Be @('zz-inplace-app', 'voest-app', 'energy-community', 'aa-unlisted-app')
+    }
+
     It 'leaves out a manifest repository without build.ps1 and a folder the manifest does not name' {
         $lane = New-TestLane
         $environment = New-TestEnvironment $lane.Root 'ab2-apps' @('my-app', 'docs-only')
@@ -147,6 +163,92 @@ Describe 'Frontend test projects' {
             $report.FailedTests[0].StackFrame | Should -Be 'src/app/orders/order.service.spec.ts:42:18'
             $report.FailedTests[1].Message | Should -BeLike "ENOENT*'../../data/template.yaml'"
         }
+    }
+}
+
+Describe 'Frontend test projects in unusual layouts' {
+    It 'gives two workspaces in folders of the same name distinct names, and looks below a workspace without a test script' {
+        $lane = New-TestLane
+        $repo = Join-Path $lane.Main 'multi-app'
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo '.git') | Out-Null
+        foreach ($folder in 'apps/web', 'tools/web', 'shell', 'shell/projects/inner') {
+            New-Item -ItemType Directory -Force -Path (Join-Path $repo $folder) | Out-Null
+            Set-Content -Path (Join-Path $repo "$folder/angular.json") -Value '{}'
+            $scripts = if ($folder -eq 'shell') { '{ "start": "ng serve" }' } else { '{ "test": "ng test" }' }
+            Set-Content -Path (Join-Path $repo "$folder/package.json") -Value "{ ""scripts"": $scripts }"
+        }
+
+        InModuleScope OctoTests -Parameters @{ repo = $repo } {
+            $projects = @(Get-OctoFrontendTestProjects -repositoryPath $repo)
+            @($projects.Name | Sort-Object) | Should -Be @('apps.web', 'inner', 'tools.web')
+            ($projects | Where-Object Name -eq 'tools.web').Directory | Should -Be (Join-Path $repo 'tools/web')
+            (Resolve-OctoTestProject -name 'apps.web' -projects $projects).Directory | Should -Be (Join-Path $repo 'apps/web')
+        }
+
+        # Each one keeps its own results folder and last-result.json.
+        Mock -ModuleName OctoTests Invoke-OctoFrontendTest {
+            $output = @($arguments | Where-Object { $_ -like '--output-file=*' }) | Select-Object -First 1
+            Copy-Item -Path (Join-Path $script:Fixtures 'mixed.junit.xml') -Destination $output.Substring('--output-file='.Length)
+            return 1
+        }
+        $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo multi-app -Json)
+        @($doc.data.projects.project | Sort-Object) | Should -Be @('apps.web', 'inner', 'tools.web')
+        foreach ($name in 'apps.web', 'tools.web') {
+            Test-Path (Join-Path $lane.Main "logFiles/test-results/multi-app/$name/last-result.json") | Should -BeTrue
+        }
+    }
+}
+
+Describe 'A consumer app and the frontend libraries it builds against' {
+    BeforeAll {
+        $script:SavedGit = @{}
+        $gitEnv = @{
+            GIT_CONFIG_GLOBAL = (Join-Path $TestDrive 'gitconfig'); GIT_CONFIG_NOSYSTEM = '1'
+            GIT_AUTHOR_NAME = 'Pester'; GIT_AUTHOR_EMAIL = 'pester@example.invalid'; GIT_COMMITTER_NAME = 'Pester'; GIT_COMMITTER_EMAIL = 'pester@example.invalid'
+        }
+        foreach ($name in $gitEnv.Keys) { $script:SavedGit[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $gitEnv[$name]) }
+        Set-Content -Path $gitEnv.GIT_CONFIG_GLOBAL -Value "[init]`n`tdefaultBranch = main"
+        function Initialize-TestGitRepo([string]$path) {
+            if (Test-Path (Join-Path $path '.git')) { Remove-Item (Join-Path $path '.git') -Recurse -Force }
+            Set-Content -Path (Join-Path $path '.gitignore') -Value "node_modules/`nbin/`ndist/"
+            foreach ($arguments in @(@('init', '-q'), @('add', '-A'), @('commit', '-q', '-m', 'initial'))) {
+                $output = & git -C $path @arguments 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "git $($arguments -join ' ') failed in ${path}: $output" }
+            }
+        }
+    }
+    AfterAll {
+        foreach ($name in $script:SavedGit.Keys) { [Environment]::SetEnvironmentVariable($name, $script:SavedGit[$name]) }
+    }
+
+    It 'builds the unchanged app again when octo-frontend-libraries was built after it' {
+        $lane = New-TestLane
+        $environment = New-TestEnvironment $lane.Root 'ab6-apps' @('octo-frontend-libraries', 'my-app')
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/build.ps1') -Value '# builds the libraries'
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/index.ts') -Value 'export const a = 1;'
+        Initialize-TestGitRepo (Join-Path $environment 'octo-frontend-libraries')
+        Initialize-TestGitRepo (Join-Path $environment 'my-app')
+        $script:built = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { $script:built.Add($entry.Name); [pscustomobject]@{ Success = $true; LogFile = $null } }
+        $run = { param([string]$from = 'octo-frontend-libraries') Get-Doc (Invoke-BuildRange -branch 'wt-ab6-apps' -from $from -to my-app -excludeFrontend $false -skipUnchanged -Json) }
+
+        @((& $run).data.repositories.status) | Should -Be @('built', 'built')
+        @((& $run).data.repositories.status) | Should -Be @('skipped', 'skipped')
+
+        # The libraries change (no NuGet package involved) and are built alone; the app was left out of that run.
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/index.ts') -Value 'export const a = 2;'
+        $only = Get-Doc (Invoke-BuildRange -branch 'wt-ab6-apps' -from octo-frontend-libraries -excludeFrontend $false -skipUnchanged -Json)
+        $only.data.repositories[0].status | Should -Be 'built'
+
+        $after = & $run
+        $app = $after.data.repositories | Where-Object repo -eq 'my-app'
+        $app.status | Should -Be 'built'
+        $app.reason | Should -Be 'librariesBuilt'
+        ($after.data.repositories | Where-Object repo -eq 'octo-frontend-libraries').status | Should -Be 'skipped'
+        # and it is quiet again afterwards
+        @((& $run).data.repositories.status) | Should -Be @('skipped', 'skipped')
+        @($script:built) | Should -Be @('octo-frontend-libraries', 'my-app', 'octo-frontend-libraries', 'my-app')
     }
 }
 
@@ -208,6 +310,15 @@ Describe 'Invoke-OctoTestRun for an app' {
 
         $doc.data.projects[0].rerunCount | Should -Be 2
         ($script:Calls[1].Arguments -join ' ') | Should -Match ' --include src/app/config/mail\.spec\.ts --include src/app/orders/order\.service\.spec\.ts$'
+
+        # -WhatIf names the spec files a rerun would run, and runs nothing
+        $plan = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo my-app -rerunFailed -WhatIf -Json)
+        @($plan.data.projects[0].rerunFiles) | Should -Be @('src/app/config/mail.spec.ts', 'src/app/orders/order.service.spec.ts')
+        $text = @(Invoke-OctoTestRun -branch branches/main -repo my-app -rerunFailed -WhatIf 6>&1 | ForEach-Object { "$_" }) -join "`n"
+        $text | Should -Match 'npx ng test with --include for 2 spec file\(s\)'
+        $text | Should -Match '--include src/app/config/mail\.spec\.ts'
+        $text | Should -Not -Match 'dotnet test call'
+        $script:Calls | Should -HaveCount 2
     }
 
     It 'runs the app of an environment from its worktree' {
