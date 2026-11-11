@@ -65,12 +65,13 @@ Describe 'Update-OctoCrateDb' {
                 if ($a -match 'config get-contexts') { return @('kind-test', 'test-2', 'kind-fake') }
                 if ($a -match 'get nodes') { if ($a -match 'context kind-fake') { return 'k3s://x' } else { return 'kind://docker/kind/kind-test-control-plane' } }
                 if ($a -match 'get pvc') { if ($script:hasPvc) { return 'persistentvolumeclaim/data-cratedb-0' } else { return $null } }
-                if ($a -match 'rollout status') { return 'partitioned roll out complete' }
+                # apply and rollout status print nothing: the module pipes them to Out-Host, and canned kubectl
+                # text in the test output reads like a real apply on the developer's cluster.
+                if ($a -match 'rollout status') { return }
                 if ($a -match 'get statefulset cratedb') { if ($script:hasSts) { return 'statefulset.apps/cratedb' } else { return $null } }
                 if ($a -match ' apply -f (.+)$') {
                     $path = $Matches[1]
                     $text = Get-Content $path -Raw
-                    'statefulset.apps/cratedb configured'
                     $script:applied.Add(([regex]::Match($text, 'crate:(\d+\.\d+\.\d+)').Groups[1].Value))
                 }
             }
