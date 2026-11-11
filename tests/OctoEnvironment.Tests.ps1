@@ -1612,6 +1612,10 @@ Describe 'Invoke-BuildEnvironment builds only what changed (AB#8814)' {
 Describe 'Build stamps (OctoBuildStamp.psm1, AB#8814)' {
     BeforeEach {
         $script:ws = New-FakeWorkspace
+        # These tests build the fake main lane as a legacy lane (-laneIsolation Off), whose package cache is the
+        # global one: point it at an empty folder, the developer's ~/.nuget/packages is neither read nor purged.
+        $env:NUGET_PACKAGES = Join-Path $TestDrive "empty-cache-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Force -Path $env:NUGET_PACKAGES | Out-Null
         Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
         $script:built = [System.Collections.Generic.List[string]]::new()
         Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
@@ -1620,6 +1624,8 @@ Describe 'Build stamps (OctoBuildStamp.psm1, AB#8814)' {
             [pscustomobject]@{ Success = $true; LogFile = $null }
         }
     }
+
+    AfterEach { $env:NUGET_PACKAGES = $null }
 
     It 'Invoke-BuildRange -skipUnchanged works without a package graph: every other package of the feed counts' {
         $run = { Get-Doc (Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -laneIsolation Off -Json) }
@@ -1641,6 +1647,59 @@ Describe 'Build stamps (OctoBuildStamp.psm1, AB#8814)' {
         $doc.data.repositories[0].reason | Should -Be 'always'
         Test-Path (Join-Path $ws.Main '.octo/build-stamps/octo-cli.json') | Should -BeTrue
         (Get-Doc (Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipRepos @{ 'octo-sdk' = 'excluded' } -laneIsolation Off -Json -ErrorAction SilentlyContinue)).data.error | Should -Match "-skipRepos: 'octo-sdk' is not a repository of the selected range"
+    }
+
+    It 'other MSBuild properties are another build: propertiesChanged, then unchanged again' {
+        $run = { param($value) Get-Doc (Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -msbuildProperties @{ DefineConstants = $value } -laneIsolation Off -Json) }
+        (& $run 'A').data.repositories[0].reason | Should -Be 'neverBuilt'
+        (& $run 'A').data.repositories[0].status | Should -Be 'skipped'
+        $changed = & $run 'B'
+        $changed.data.repositories[0].status | Should -Be 'built'
+        $changed.data.repositories[0].reason | Should -Be 'propertiesChanged'
+        (& $run 'B').data.repositories[0].status | Should -Be 'skipped'
+        # the temporary credentials file of an environment build has another name in every run: it does not count
+        Get-OctoMsBuildPropertiesHash -properties @{ A = '1'; RestoreConfigFile = '/tmp/a/NuGet.Config' } | Should -Be (Get-OctoMsBuildPropertiesHash -properties @{ A = '1'; RestoreConfigFile = '/tmp/b/NuGet.Config' })
+        Get-OctoMsBuildPropertiesHash -properties @{ RestoreConfigFile = '/tmp/a/NuGet.Config' } | Should -Be ''
+    }
+
+    It 'a run that skips every repository does not refuse because of running services' {
+        Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -laneIsolation Off -Json | Out-Null
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @($repos | ForEach-Object { [pscustomobject]@{ Repo = $_.Name; Pid = 4711; Command = 'dotnet Meshmakers.Fake.dll' } }) }
+        $doc = Get-Doc (Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -laneIsolation Off -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.repositories[0].status | Should -Be 'skipped'
+        # a repository that is going to be built still refuses
+        Add-Content -Path (Join-Path $ws.Main 'octo-cli/octo-cli.slnx') -Value '<!-- edit -->'
+        (Get-Doc (Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -laneIsolation Off -Json -ErrorAction SilentlyContinue)).data.error | Should -Match 'Processes run out of repositories in the range: octo-cli'
+    }
+
+    It 'every DebugL build deletes the existing stamp first, also a run without stamp switches; a stamp that cannot be deleted stops the run' {
+        Invoke-BuildRange -branch 'branches/main' -from octo-cli -recordStamps -laneIsolation Off -Json | Out-Null
+        $stamp = Join-Path $ws.Main '.octo/build-stamps/octo-cli.json'
+        Test-Path $stamp | Should -BeTrue
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { [pscustomobject]@{ Success = $false; LogFile = $null } }
+        Invoke-BuildRange -branch 'branches/main' -from octo-cli -laneIsolation Off -Json -ErrorAction SilentlyContinue | Out-Null
+        Test-Path $stamp | Should -BeFalse        # the failed plain build must not leave the old success record
+
+        Set-Content -Path $stamp -Value '{}'
+        Mock -ModuleName OctoBuildStamp Remove-Item { }
+        { Remove-OctoBuildStamp -stampRoot (Split-Path -Parent $stamp) -repo 'octo-cli' } | Should -Throw '*cannot be deleted*'
+    }
+
+    It 'writes no stamp while the package cache holds another build of a consumed package' {
+        $cache = Join-Path $TestDrive 'stale-cache'
+        $folder = Join-Path $cache 'meshmakers.octo.sdk.common/999.0.0'
+        New-Item -ItemType Directory -Force -Path $folder | Out-Null
+        Set-Content -Path (Join-Path $folder 'meshmakers.octo.sdk.common.999.0.0.nupkg.sha512') -Value 'bm90LXRoZS1mZWVkLXBhY2thZ2U=' -NoNewline
+        $env:NUGET_PACKAGES = $cache
+        & {
+            $doc = Get-Doc (Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -laneIsolation Off -Json)
+            @($doc.data.staleGlobalCache.packageId) | Should -Contain 'meshmakers.octo.sdk.common'
+            Test-Path (Join-Path $ws.Main '.octo/build-stamps/octo-cli.json') | Should -BeFalse
+            # purged: the stamp is written
+            Invoke-BuildRange -branch 'branches/main' -from octo-cli -skipUnchanged -purgeStaleCache -laneIsolation Off -Json | Out-Null
+            Test-Path (Join-Path $ws.Main '.octo/build-stamps/octo-cli.json') | Should -BeTrue
+        }
     }
 
     It 'the source state sees edits, untracked files and commits, ignores bin/ and Invoke-Build.log, and reports a folder without git' {
@@ -1903,7 +1962,10 @@ Describe 'Parallel environment builds (AB#8814)' {
     }
 
     It 'Invoke-BuildRange -maxParallel without -repoInputs has no dependency information and builds one after the other' {
-        Invoke-BuildRange -branch 'branches/main' -from octo-asset-repo-services -to octo-identity-services -maxParallel 4 -laneIsolation Off -Json | Out-Null
+        $env:NUGET_PACKAGES = Join-Path $TestDrive 'empty-cache-parallel'     # not the developer's global package cache
+        New-Item -ItemType Directory -Force -Path $env:NUGET_PACKAGES | Out-Null
+        try { Invoke-BuildRange -branch 'branches/main' -from octo-asset-repo-services -to octo-identity-services -maxParallel 4 -laneIsolation Off -Json | Out-Null }
+        finally { $env:NUGET_PACKAGES = $null }
         $script:starts.Count | Should -Be 3
         $script:maxActive | Should -Be 1
     }

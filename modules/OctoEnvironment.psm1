@@ -1968,7 +1968,8 @@ function Remove-OctoEnvironment {
     A left-out repository between a library that is built and a consumer that is built (or one that changed itself)
     means stale packages: a warning names it (-Json: staleWarnings).
     -Json reports per repository status (built | skipped | failed), reason (unchanged, notSelected, excluded,
-    nothingToBuild, neverBuilt, sourcesChanged, packagesChanged, testsNotCompiled, noBuildOutput, noGitState, always)
+    nothingToBuild, neverBuilt, sourcesChanged, packagesChanged, propertiesChanged, testsNotCompiled, noBuildOutput,
+    noGitState, always)
     and detail, plus selection and builtCount / skippedCount; -DryRun reports the prediction as action (build | skip)
     and reason (also upstreamBuilt). The events file gets a repoSkipped event for a repository that is not built and
     status / reason on repoDone; the plan event carries the prediction.
@@ -2133,7 +2134,7 @@ function Invoke-BuildEnvironment {
         $changed = @{}
         foreach ($entry in $order) {
             $known = if ($repoInputs.ContainsKey($entry.Name)) { [string[]]@($repoInputs[$entry.Name]['packages']) } else { $null }
-            $inputs = Get-OctoRepoBuildInputs -path $entry.Path -feedPath $environmentFeed -packageIds $known
+            $inputs = Get-OctoRepoBuildInputs -path $entry.Path -feedPath $environmentFeed -packageIds $known -msbuildProperties $perRepo[$entry.Name]
             $changed[$entry.Name] = Compare-OctoBuildStamp -stamp (Read-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name) -inputs $inputs -configuration 'DebugL' -tests $stampTests
         }
         $staleWarnings = @(Get-OctoEnvironmentStaleWarnings -order $orderNames -selection $selection -upstream $upstream -changed $changed -buildUnchanged:$buildUnchanged)

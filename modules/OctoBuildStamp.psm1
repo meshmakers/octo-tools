@@ -13,10 +13,16 @@
                   new file and a reverted edit are all seen; ignored files (bin/, obj/) and Invoke-Build.log are not
       packages    SHA-256 of every nupkg the repository consumes from the lane feed (<lane>/nuget/<id>.999.0.0.nupkg)
       tests       'compiled' when the test projects were compiled (-verifyTests / -includeTests), else 'none'
+      properties  SHA-256 of the MSBuild properties the build was given (-msbuildProperties, per repository), so a
+                  build with other properties is not taken for the same build
 
     A repository is unchanged when all of that is the same as now, its tests level covers the requested one and
-    (dotnet repositories) a bin/DebugL folder still exists. The stamp is deleted before a repository is built and
-    written after it succeeded, so a failed or interrupted build never leaves a stamp that matches.
+    (dotnet repositories) a bin/DebugL folder still exists. The stamp is deleted before a repository is built - by
+    every DebugL range build, also one that records no stamps - and written after it succeeded, so a failed or
+    interrupted build never leaves a stamp that matches. No stamp is written while the package cache holds another
+    build of a package the repository consumes (Invoke-BuildRange without -purgeStaleCache).
+    The output check is a guard against a wiped tree (Remove-BinAndObjFolders, git clean), not an inventory of
+    the build output: single deleted files are not noticed.
 
     Not seen: dependencies that are no Meshmakers.* package of the feed (a CK model taken only from the local
     catalog, npm packages of a frontend) and changes outside the repository folder (Octo.User.props, the SDK).
@@ -123,7 +129,20 @@ function Read-OctoBuildStamp {
 function Remove-OctoBuildStamp {
     param([Parameter(Mandatory = $true)] [string]$stampRoot, [Parameter(Mandatory = $true)] [string]$repo)
     $path = Get-OctoBuildStampPath -stampRoot $stampRoot -repo $repo
-    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    # A stamp that stays would vouch for a build that is about to be replaced: stop instead.
+    if (Test-Path -LiteralPath $path) { throw "Build stamp $path cannot be deleted - the build of $repo is not started, a later run would take the old stamp for this build." }
+}
+
+function Get-OctoMsBuildPropertiesHash {
+    # SHA-256 of the effective MSBuild properties of a build ('' without any). RestoreConfigFile is left out: it is a
+    # temporary file with another name in every run (Invoke-BuildEnvironment, credentials of in-place worktrees).
+    param([System.Collections.IDictionary]$properties = $null)
+    if ($null -eq $properties -or $properties.Count -eq 0) { return '' }
+    $lines = @($properties.Keys | ForEach-Object { [string]$_ } | Where-Object { $_ -ine 'RestoreConfigFile' } | Sort-Object | ForEach-Object { "$_=$([string]$properties[$_])" })
+    if ($lines.Count -eq 0) { return '' }
+    return Get-OctoStampTextHash -text ($lines -join "`n")
 }
 
 function Write-OctoBuildStamp {
@@ -147,6 +166,7 @@ function Write-OctoBuildStamp {
             dirty         = [bool]$inputs.Source.Dirty
             sourceHash    = $inputs.Source.Hash
             packages      = $inputs.Packages
+            properties    = [string]$inputs.Properties
         }
         $path = Get-OctoBuildStampPath -stampRoot $stampRoot -repo $repo
         $temporary = "$path.$PID.tmp"
@@ -159,7 +179,8 @@ function Write-OctoBuildStamp {
 function Get-OctoRepoBuildInputs {
     <#
     .SYNOPSIS
-        The current inputs of a repository: { Source (Get-OctoRepoSourceState); Packages (id -> sha256) }.
+        The current inputs of a repository: { Source (Get-OctoRepoSourceState); Packages (id -> sha256);
+        Properties (Get-OctoMsBuildPropertiesHash) }.
     .PARAMETER packageIds
         The package ids the repository consumes from the feed. $null: unknown - every package of the feed except
         the repository's own (-ownPackageIds) counts.
@@ -168,11 +189,13 @@ function Get-OctoRepoBuildInputs {
         [Parameter(Mandatory = $true)] [string]$path,
         [Parameter(Mandatory = $true)] [string]$feedPath,
         [string[]]$packageIds = $null,
-        [string[]]$ownPackageIds = @()
+        [string[]]$ownPackageIds = @(),
+        [System.Collections.IDictionary]$msbuildProperties = $null
     )
     return [pscustomobject]@{
-        Source   = Get-OctoRepoSourceState -path $path
-        Packages = Get-OctoFeedPackageHashes -feedPath $feedPath -packageIds $packageIds -excludeIds $ownPackageIds
+        Source     = Get-OctoRepoSourceState -path $path
+        Packages   = Get-OctoFeedPackageHashes -feedPath $feedPath -packageIds $packageIds -excludeIds $ownPackageIds
+        Properties = Get-OctoMsBuildPropertiesHash -properties $msbuildProperties
     }
 }
 
@@ -200,8 +223,8 @@ function Compare-OctoBuildStamp {
     <#
     .SYNOPSIS
         Compares a repository's stamp with its current inputs. Returns { Unchanged; Reason; Detail }.
-        Reason: unchanged | neverBuilt | noGitState | sourcesChanged | packagesChanged | testsNotCompiled |
-        configurationChanged | noBuildOutput.
+        Reason: unchanged | neverBuilt | noGitState | sourcesChanged | packagesChanged | propertiesChanged |
+        testsNotCompiled | configurationChanged | noBuildOutput.
     #>
     param(
         [AllowNull()] $stamp,
@@ -229,10 +252,11 @@ function Compare-OctoBuildStamp {
         $names = @($changed | Select-Object -First 5) -join ', '
         return & $result $false 'packagesChanged' "$($changed.Count) consumed package(s) of the feed changed: $names$(if ($changed.Count -gt 5) { ', ...' })"
     }
+    if ([string]$stamp['properties'] -ne [string]$inputs.Properties) { return & $result $false 'propertiesChanged' 'the MSBuild properties of the build differ from the last build' }
     if ($tests -eq 'compiled' -and [string]$stamp['tests'] -ne 'compiled') { return & $result $false 'testsNotCompiled' 'the last build did not compile the test projects' }
     if ($outputPath -and -not (Test-OctoRepoHasBuildOutput -path $outputPath -configuration $configuration)) { return & $result $false 'noBuildOutput' "no bin/$configuration folder" }
     return & $result $true 'unchanged' "sources and consumed packages as at the last build ($($stamp['builtAt']))"
 }
 
 Export-ModuleMember -Function @('Get-OctoRepoSourceState', 'Get-OctoFeedPackageHashes', 'Get-OctoBuildStampPath', 'Read-OctoBuildStamp', 'Remove-OctoBuildStamp',
-    'Write-OctoBuildStamp', 'Get-OctoRepoBuildInputs', 'Test-OctoRepoHasBuildOutput', 'Compare-OctoBuildStamp')
+    'Write-OctoBuildStamp', 'Get-OctoRepoBuildInputs', 'Get-OctoMsBuildPropertiesHash', 'Test-OctoRepoHasBuildOutput', 'Compare-OctoBuildStamp')

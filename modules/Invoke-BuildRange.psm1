@@ -1270,7 +1270,7 @@ function Invoke-OctoBuildRangeCore {
         param($entry)
         $known = $null
         foreach ($key in @($repoInputs.Keys)) { if ([string]$key -ieq $entry.Name -and $repoInputs[$key].Contains('packages')) { $known = [string[]]@($repoInputs[$key]['packages']) } }
-        Get-OctoRepoBuildInputs -path $entry.Path -feedPath $nugetTarget -packageIds $known -ownPackageIds @($entry.PackageIds)
+        Get-OctoRepoBuildInputs -path $entry.Path -feedPath $nugetTarget -packageIds $known -ownPackageIds @($entry.PackageIds) -msbuildProperties $entry.MsBuildProperties
     }
     # { Action build|skip; Reason; Detail; Inputs } for one repository, as things are now.
     $decide = {
@@ -1324,7 +1324,9 @@ function Invoke-OctoBuildRangeCore {
         $entry | Add-Member -NotePropertyName Exclusive -NotePropertyValue ($entry.Mode -in @('script', 'frontend', 'zenon')) -Force
         $entry | Add-Member -NotePropertyName CkWriter -NotePropertyValue ($parallel -and $entry.Mode -eq 'dotnet' -and (Test-OctoRepoHasCkModel -path $entry.Path)) -Force
     }
-    $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and -not $skipMap.ContainsKey($_.Name) }))
+    # Only repositories that are going to be built: a run that skips everything replaces no output and must not
+    # refuse (or, with -stopServices, stop) running services. The prediction counts a consumer of a rebuilt library as built.
+    $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and $_.Decision.Action -eq 'build' }))
     # Purge of the lane's package caches: DebugL, never for a private feed.
     $purgeCaches = $purgeEnabled -and -not $privateFeed
     $staleCache = @()
@@ -1372,7 +1374,7 @@ function Invoke-OctoBuildRangeCore {
             $deadline = [DateTime]::UtcNow.AddSeconds(120)
             do {
                 Start-Sleep -Seconds 2
-                $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' }))
+                $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and $_.Decision.Action -eq 'build' }))
             } while ($runningProcesses.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
             if ($runningProcesses.Count -gt 0) {
                 & $fail "Processes still running after Stop-Octo: $(($runningProcesses | ForEach-Object { "$($_.Repo) (pid $($_.Pid))" }) -join ', ')"
@@ -1438,6 +1440,15 @@ function Invoke-OctoBuildRangeCore {
                 logFile        = $result.logFile
             })
         $events.RepoDone = $true
+    }
+    # A stamp records the feed packages a repository consumes. While the package cache holds another build of one of
+    # them (reported above, not purged), the build may have used that one: no stamp, the next run builds again.
+    $staleIds = @(if (-not $purgeStaleCache) { $staleCache | ForEach-Object { ([string]$_.PackageId).ToLowerInvariant() } })
+    $mayStamp = {
+        param($decision)
+        if ($null -eq $decision.Inputs -or $decision.Inputs.Source.Problem) { return $false }
+        foreach ($id in @($decision.Inputs.Packages.Keys)) { if ($staleIds -contains $id) { return $false } }
+        return $true
     }
     $repoIndex = 0
     $failedNames = @()
@@ -1507,7 +1518,7 @@ function Invoke-OctoBuildRangeCore {
                 $packageWatch.Stop()
                 $result.packageDuration = $packageWatch.Elapsed
             }
-            if ($result.success -and $stampsEnabled -and $null -ne $slot.Decision.Inputs -and -not $slot.Decision.Inputs.Source.Problem) {
+            if ($result.success -and $stampsEnabled -and (& $mayStamp $slot.Decision)) {
                 Write-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name -inputs $slot.Decision.Inputs -configuration $configuration -tests $stampTests
             }
             $results.Add($result)
@@ -1566,7 +1577,7 @@ function Invoke-OctoBuildRangeCore {
                             continue
                         }
                         if (-not $Json) { Write-Host "==> $($entry.Name)$(if ($skipUnchangedEnabled) { " ($($decision.Reason)$(if ($decision.Detail) { ": $($decision.Detail)" }))" }) [$($running.Count + 1) of $maxParallel running]" -ForegroundColor Cyan }
-                        if ($stampsEnabled) { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
+                        if ($purgeEnabled) { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
                         $status[$entry.Name] = 'running'
                         if ($configuration -ieq 'DebugL' -and $entry.Mode -eq 'dotnet' -and -not $skipCkSync) {
                             # Writes the lane's local catalog: here, never in a child (CK repositories are serial).
@@ -1650,7 +1661,8 @@ function Invoke-OctoBuildRangeCore {
             continue
         }
         # A stamp only ever describes a build that succeeded: gone while the repository is built.
-        if ($stampsEnabled -and $entry.Mode -ne 'none') { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
+        # Also in a run that records no stamps: its build replaces the output an existing stamp vouches for.
+        if ($purgeEnabled -and $entry.Mode -ne 'none') { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
         $repoWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $events.Repo = $entry.Name
         $events.Index = $repoIndex
@@ -1776,7 +1788,7 @@ function Invoke-OctoBuildRangeCore {
             }
         }
         # Built, tests compiled (when asked) and packages copied: record what it was built from.
-        if ($stampsEnabled -and $entry.Mode -ne 'none' -and $null -ne $decision.Inputs -and -not $decision.Inputs.Source.Problem) {
+        if ($stampsEnabled -and $entry.Mode -ne 'none' -and (& $mayStamp $decision)) {
             Write-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name -inputs $decision.Inputs -configuration $configuration -tests $stampTests
         }
         $results.Add($result)
