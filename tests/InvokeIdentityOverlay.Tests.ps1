@@ -1,9 +1,9 @@
 #Requires -Modules Pester
 <#
-    Pester tests for Apply-IdentityOverlay -Json: per-client added / skipped-duplicate counts parsed from octo-cli's
+    Pester tests for Invoke-IdentityOverlay -Json: per-client added / skipped-duplicate counts parsed from octo-cli's
     output. octo-cli is replaced by a fake function; nothing is called out. Needs powershell-yaml (skipped without).
 
-    Run:  Invoke-Pester ./tests/ApplyIdentityOverlay.Tests.ps1
+    Run:  Invoke-Pester ./tests/InvokeIdentityOverlay.Tests.ps1
 #>
 
 BeforeDiscovery {
@@ -13,7 +13,7 @@ BeforeDiscovery {
 BeforeAll {
     $modules = Join-Path $PSScriptRoot '../modules'
     Import-Module (Join-Path $modules 'OctoJsonOutput.psm1') -Force
-    Import-Module (Join-Path $modules 'Apply-IdentityOverlay.psm1') -Force
+    Import-Module (Join-Path $modules 'Invoke-IdentityOverlay.psm1') -Force
 
     $script:Overlay = Join-Path $TestDrive 'overlay.yaml'
     Set-Content -Path $script:Overlay -Value @'
@@ -52,9 +52,9 @@ AfterAll {
     Remove-Item -Path 'function:global:fake-octo-cli' -ErrorAction SilentlyContinue
 }
 
-Describe 'Apply-IdentityOverlay -Json counts' -Skip:$NoYaml {
+Describe 'Invoke-IdentityOverlay -Json counts' -Skip:$NoYaml {
     It 'reports per-client counts, null when unparseable or failed, totals in the summary, and only one JSON document' {
-        $out = @(Apply-IdentityOverlay -OverlayFile $Overlay -OctoCli 'fake-octo-cli' -Json)
+        $out = @(Invoke-IdentityOverlay -OverlayFile $Overlay -OctoCli 'fake-octo-cli' -Json)
         $out.Count | Should -Be 1
         $doc = $out[0] | ConvertFrom-Json
         $studio = $doc.data.clients | Where-Object client -eq 'octo-data-refinery-studio'
@@ -77,7 +77,7 @@ Describe 'Apply-IdentityOverlay -Json counts' -Skip:$NoYaml {
 
 Describe 'ConvertFrom-OctoOverlayOutput' {
     It 'does not read PostLogoutRedirectUris as RedirectUris and needs all three counts' {
-        InModuleScope Apply-IdentityOverlay {
+        InModuleScope Invoke-IdentityOverlay {
             $c = ConvertFrom-OctoOverlayOutput -output @("Overlay 'x' on 'y' applied: PostLogoutRedirectUris=7 added / 8 skipped, RedirectUris=2 added / 3 skipped, AllowedCorsOrigins=0 added / 0 skipped")
             $c.redirectUris.added | Should -Be 2
             $c.postLogoutRedirectUris.added | Should -Be 7

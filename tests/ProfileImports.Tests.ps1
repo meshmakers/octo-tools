@@ -1,7 +1,7 @@
 #Requires -Modules Pester
 <#
     Every module in modules/ must be imported by modules/profile.ps1, otherwise its cmdlets are missing in a fresh
-    profile shell (Apply-IdentityOverlay was, AB#8700). The check reads profile.ps1; it does not load the profile
+    profile shell (Invoke-IdentityOverlay was, AB#8700). The check reads profile.ps1; it does not load the profile
     (which changes PATH and loads the private profile).
 
     Run:  Invoke-Pester ./tests/ProfileImports.Tests.ps1
@@ -38,10 +38,10 @@ Describe 'profile.ps1 imports every module' {
         }
     }
 
-    It 'exposes Apply-IdentityOverlay' {
-        $script:Imported | Should -Contain 'Apply-IdentityOverlay.psm1'
+    It 'exposes Invoke-IdentityOverlay' {
+        $script:Imported | Should -Contain 'Invoke-IdentityOverlay.psm1'
         Import-Module (Join-Path $script:Modules 'OctoJsonOutput.psm1') -Force
-        $module = Import-Module (Join-Path $script:Modules 'Apply-IdentityOverlay.psm1') -Force -PassThru
-        $module.ExportedFunctions.Keys | Should -Contain 'Apply-IdentityOverlay'
+        $module = Import-Module (Join-Path $script:Modules 'Invoke-IdentityOverlay.psm1') -Force -PassThru
+        $module.ExportedFunctions.Keys | Should -Contain 'Invoke-IdentityOverlay'
     }
 }

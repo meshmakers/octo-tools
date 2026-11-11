@@ -26,7 +26,7 @@ function ConvertFrom-OctoOverlayOutput {
     return $counts
 }
 
-function Apply-IdentityOverlay {
+function Invoke-IdentityOverlay {
     <#
 .SYNOPSIS
 Fans octo-cli ApplyClientOverlay across the blueprint-managed clients listed in an overlay file.
@@ -68,18 +68,18 @@ without calling out. Useful when iterating on the overlay file shape.
 Path / name of the octo-cli executable. Default: 'octo-cli' (resolved from PATH).
 
 .EXAMPLE
-Apply-IdentityOverlay
+Invoke-IdentityOverlay
 
 Applies the default local-dev overlay to the active context's tenant.
 
 .EXAMPLE
-Apply-IdentityOverlay -DryRun
+Invoke-IdentityOverlay -DryRun
 
 Shows what would be invoked without calling octo-cli. Sanity check after editing the overlay
 file.
 
 .EXAMPLE
-Apply-IdentityOverlay -OverlayFile ~/dev/gerald-laptop.yaml -OverlayName gerald-laptop
+Invoke-IdentityOverlay -OverlayFile ~/dev/gerald-laptop.yaml -OverlayName gerald-laptop
 
 Applies a personal overlay from outside the repo, marked under its own overlay name so the
 DumpTenant --clean filter strips them without touching the shared local-dev entries.
@@ -239,7 +239,7 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         if ($failures -gt 0) {
             $global:LASTEXITCODE = 1
         }
-        Write-OctoJson -Command 'Apply-IdentityOverlay' -Data $data
+        Write-OctoJson -Command 'Invoke-IdentityOverlay' -Data $data
         return
     }
 
@@ -249,8 +249,8 @@ DumpTenant --clean filter strips them without touching the shared local-dev entr
         $global:LASTEXITCODE = 1
     }
     else {
-        Write-Host "Apply-IdentityOverlay complete." -ForegroundColor Green
+        Write-Host "Invoke-IdentityOverlay complete." -ForegroundColor Green
     }
 }
 
-Export-ModuleMember -Function @('Apply-IdentityOverlay')
+Export-ModuleMember -Function @('Invoke-IdentityOverlay')

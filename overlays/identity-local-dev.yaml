@@ -1,6 +1,6 @@
 # AB#4209 Step 4 — local-dev URI overlay for blueprint-managed Identity clients.
 #
-# Apply via:   Apply-IdentityOverlay -OverlayFile octo-tools/overlays/identity-local-dev.yaml
+# Apply via:   Invoke-IdentityOverlay -OverlayFile octo-tools/overlays/identity-local-dev.yaml
 # Auto-applied by Start-Octo after Identity health-check (Step 4 wiring — separate change).
 #
 # Behaviour: every URI in this file is appended to the matching RtClient's URI lists
