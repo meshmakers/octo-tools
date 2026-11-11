@@ -1390,17 +1390,26 @@ Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
         Should -Invoke -ModuleName Invoke-BuildAll Compile-Repo -Times 10 -Exactly
     }
 
-    It 'sets MSBUILDDISABLENODEREUSE=1 and UseSharedCompilation=false for the run and restores them' {
+    It 'sets MSBUILDDISABLENODEREUSE=1 for the run - on Windows also UseSharedCompilation=false - and restores them' {
         $previousNodeReuse = $env:MSBUILDDISABLENODEREUSE
         $previousShared = $env:UseSharedCompilation
         $env:MSBUILDDISABLENODEREUSE = $null
         $env:UseSharedCompilation = 'keep-me'
         try {
+            Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
             Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
 
             @($script:seenEnv.NodeReuse | Sort-Object -Unique) | Should -Be @('1')
             @($script:seenEnv.SharedCompilation | Sort-Object -Unique) | Should -Be @('false')
             $env:MSBUILDDISABLENODEREUSE | Should -BeNullOrEmpty
+            $env:UseSharedCompilation | Should -Be 'keep-me'
+
+            # macOS / Linux: the shared compiler server stays as the session has it (AB#8831)
+            $script:seenEnv = @()
+            Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $false }
+            Invoke-BuildAll -branch main -configuration Release -excludeAdditional $true -Json | Out-Null
+            @($script:seenEnv.NodeReuse | Sort-Object -Unique) | Should -Be @('1')
+            @($script:seenEnv.SharedCompilation | Sort-Object -Unique) | Should -Be @('keep-me')
             $env:UseSharedCompilation | Should -Be 'keep-me'
         }
         finally {
@@ -1449,6 +1458,7 @@ Describe 'Invoke-BuildAll scopes the dotnet kill to the lane' {
     }
 
     It '-DryRun shows the run environment and the kill scope' {
+        Mock -ModuleName Invoke-BuildAll Test-OctoBuildAllWindows { $true }
         $doc = (Invoke-BuildAll -branch main -configuration DebugL -excludeAdditional $true -DryRun -Json) -join "`n" | ConvertFrom-Json
         $doc.data.runEnvironment.MSBUILDDISABLENODEREUSE | Should -Be '1'
         $doc.data.runEnvironment.UseSharedCompilation | Should -Be 'false'
