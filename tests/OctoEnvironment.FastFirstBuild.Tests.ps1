@@ -134,6 +134,37 @@ Describe 'The remote CK catalogs are read at most once per build run (AB#8831)' 
         Get-Refresh 'octo-cli' | Should -BeNullOrEmpty
     }
 
+    It 'two runs that find the caches due at the same time: one reads, the other waits and reads nothing' {
+        # Another run holds the lock and finishes its read (fresh cache files) a moment later.
+        $directory = $env:OCTO_CK_CACHE_DIRECTORY
+        $modules = Join-Path $PSScriptRoot '../modules'
+        $ready = Join-Path $TestDrive "lock-held-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+        $other = Start-ThreadJob -ArgumentList $modules, $directory, $ready -ScriptBlock {
+            param($modules, $directory, $ready)
+            Import-Module (Join-Path $modules 'OctoCkCatalogRefresh.psm1') -Force
+            $lock = Enter-OctoCatalogRefreshLock -directory $directory
+            Set-Content -Path $ready -Value 'held'
+            Start-Sleep -Seconds 2
+            foreach ($file in Get-ChildItem $directory -Filter '*.json') { $file.LastWriteTimeUtc = [DateTime]::UtcNow }
+            $lock.Dispose()
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (-not (Test-Path $ready) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+        Test-Path $ready | Should -BeTrue
+        # This run finds the caches due, waits for the lock, and then finds them fresh.
+        $read = Initialize-OctoRunCatalogs -laneRootPath $envPath
+        Receive-Job $other -Wait -AutoRemoveJob | Out-Null
+        $script:ckcCalls | Should -Be 0
+        $read.usable | Should -BeTrue
+        $read.mode | Should -Be 'fresh'
+        $read.detail | Should -Match 'another build run read the remote catalogs'
+        $read.seconds | Should -BeGreaterThan 1          # it waited for the other run
+        # the lock is free again
+        $again = Enter-OctoCatalogRefreshLock -directory $directory -timeoutSeconds 2
+        $again | Should -Not -BeNullOrEmpty
+        $again.Dispose()
+    }
+
     It 'a parallel run reads them once in the parent and hands the property to the child builds' {
         $script:jobs = [System.Collections.Generic.List[object]]::new()
         Mock -ModuleName Invoke-BuildRange Start-OctoRepoBuildJob {
