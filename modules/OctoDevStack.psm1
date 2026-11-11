@@ -241,6 +241,15 @@ function Start-OctoDevStackDaemon {
     $ours = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
     $stopped = $false
     if ($ours -and $Restart) {
+        # Nothing to start from: leave the running daemon alone (a stop here would take the shared daemon down for good).
+        if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src'))) {
+            $data.alreadyRunning = $true
+            $data.pid = $ours.pid
+            $health = Get-OctoDevStackHealth -Port $Port
+            if ($health) { $data.version = $health.version; $data.commit = $health.commit }
+            Write-OctoDevStackResult $command $Json $false $data "Not restarted: no octo-devstack checkout in $repoPath - the running daemon (PID $($ours.pid)) was left alone. Run Invoke-CloneMainRepos -devTools (clones it next to octo-tools) or pass -Path."
+            return
+        }
         # The stop asks the daemon first and refuses while builds run or wait (unless -Force).
         $stop = Stop-OctoDevStackDaemon -Port $Port -Force:$Force -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $data.restartSafe = $stop.data.restartSafe

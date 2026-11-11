@@ -517,6 +517,122 @@ function Get-OctoTestProjects {
     return $projects
 }
 
+function Get-OctoFrontendTestProjects {
+    <#
+        The frontend test projects of a repository (AB#8819): every folder (outside node_modules/dist/..., at most four
+        levels deep) that holds an angular.json and a package.json with a "test" script; the search goes on below a
+        workspace without one. Each entry has the shape of Get-OctoTestProjects plus Kind = 'frontend': Name (the folder
+        name; the folder path relative to the repository, with dots, when two workspaces share a folder name), Path (its
+        package.json), Directory.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$repositoryPath)
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
+    $skip = @('node_modules', 'dist', 'bin', 'obj', '.git', '.angular', 'coverage', 'artifacts', 'test-results', '.claude')
+    $projects = @()
+    $queue = [System.Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue([pscustomobject]@{ Path = $root; Depth = 0 })
+    while ($queue.Count -gt 0) {
+        $item = $queue.Dequeue()
+        $package = Join-Path $item.Path 'package.json'
+        if ((Test-Path -LiteralPath $package -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $item.Path 'angular.json') -PathType Leaf)) {
+            $scripts = $null
+            try { $scripts = (Get-Content -LiteralPath $package -Raw | ConvertFrom-Json).scripts } catch { $scripts = $null }
+            if ($scripts -and $scripts.PSObject.Properties['test']) {
+                $projects += [pscustomobject]@{
+                    Kind = 'frontend'; Name = (Split-Path -Leaf $item.Path); Path = $package
+                    RelativePath = ([IO.Path]::GetRelativePath($root, $package) -replace '\\', '/'); Directory = $item.Path
+                    AssemblyName = (Split-Path -Leaf $item.Path); Docker = $false; DockerReason = $null; ProjectReferences = @()
+                }
+                continue   # an Angular workspace with tests holds no further one
+            }
+        }
+        if ($item.Depth -ge 4) { continue }
+        foreach ($child in @(Get-ChildItem -LiteralPath $item.Path -Directory -ErrorAction SilentlyContinue | Where-Object { $skip -notcontains $_.Name -and -not $_.LinkType } | Sort-Object Name)) {
+            $queue.Enqueue([pscustomobject]@{ Path = $child.FullName; Depth = $item.Depth + 1 })
+        }
+    }
+    # Two workspaces in folders of the same name (apps/web, tools/web) would share the results folder, last-result.json
+    # and the -project name: those get their folder path relative to the repository as the name (apps.web, tools.web).
+    foreach ($group in @($projects | Group-Object Name | Where-Object Count -gt 1)) {
+        foreach ($entry in $group.Group) {
+            $relative = ([IO.Path]::GetRelativePath($root, $entry.Directory) -replace '[\\/]+', '.').Trim('.')
+            if ($relative) { $entry.Name = $relative; $entry.AssemblyName = $relative }
+        }
+    }
+    return $projects
+}
+
+function Test-OctoFrontendTestProject {
+    param($project)
+    return ($null -ne $project.PSObject.Properties['Kind'] -and $project.Kind -eq 'frontend')
+}
+
+function Read-OctoJUnitFile {
+    <#
+        Reads one JUnit XML report (vitest / `ng test --reporters=junit`). Same shape as Read-OctoTrxFile. A failed test's
+        Name is "<spec file> :: <test name>" - the spec file is what -rerunFailed runs again.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    [xml]$xml = Get-Content -LiteralPath $path -Raw
+    $total = 0; $passed = 0; $failed = 0; $skipped = 0; $seconds = 0.0
+    $failedTests = [System.Collections.Generic.List[object]]::new()
+    foreach ($case in @($xml.SelectNodes('//testcase'))) {
+        $total++
+        $time = 0.0
+        [void][double]::TryParse([string]$case.GetAttribute('time'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$time)
+        $seconds += $time
+        $problem = $case.SelectSingleNode('failure')
+        if ($null -eq $problem) { $problem = $case.SelectSingleNode('error') }
+        if ($null -eq $problem) {
+            if ($null -ne $case.SelectSingleNode('skipped')) { $skipped++ } else { $passed++ }
+            continue
+        }
+        $failed++
+        $file = [string]$case.GetAttribute('classname')
+        $testName = [string]$case.GetAttribute('name')
+        $message = ([string]$problem.GetAttribute('message')).Trim()
+        if ($message.Length -gt $script:MaxMessageLength) { $message = $message.Substring(0, $script:MaxMessageLength) + ' ...' }
+        # The first line of the body that names a place (vitest marks it with an arrow), else the first line after the message.
+        $lines = @(([string]$problem.InnerText) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $frame = @($lines | Where-Object { $_ -match '^(\u276f|at )\s*\S' -or $_ -match '\.(ts|js|mjs):\d+' }) | Select-Object -First 1
+        $frameText = $null
+        if ($frame) { $frameText = (([string]$frame) -replace '^\u276f\s*', '') }
+        $failedTests.Add([pscustomobject]@{
+                Name            = if ($file -and $file -ne $testName) { "$file :: $testName" } else { $testName }
+                DisplayName     = $testName
+                Outcome         = 'Failed'
+                Message         = if ($message) { $message } else { $null }
+                StackFrame      = $frameText
+                DurationSeconds = $time
+            })
+    }
+    return [pscustomobject]@{
+        Path = $path; Total = $total; Passed = $passed; Failed = $failed; Skipped = $skipped
+        DurationSeconds = $seconds; FailedTests = @($failedTests); RunErrors = @()
+    }
+}
+
+function Invoke-OctoFrontendTest {
+    # The one place that starts a frontend test run (tests mock it): `npx ng test ...` in the app's folder, after
+    # `npm ci` when it has no node_modules. All output goes to the log; returns the exit code.
+    param(
+        [Parameter(Mandatory = $true)] [string]$directory,
+        [Parameter(Mandatory = $true)] [string[]]$arguments,
+        [Parameter(Mandatory = $true)] [string]$logFile
+    )
+    Push-Location -LiteralPath $directory
+    try {
+        if (-not (Test-Path -LiteralPath (Join-Path $directory 'node_modules') -PathType Container)) {
+            'Invoke-OctoTestRun: npm ci (no node_modules)' | Add-Content -LiteralPath $logFile
+            & npm ci *>> $logFile
+            if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
+        }
+        & npx @arguments *>> $logFile
+        return $LASTEXITCODE
+    }
+    finally { Pop-Location }
+}
+
 function Resolve-OctoTestProject {
     # -project: the csproj name, its path relative to the repository, or a unique part of the name.
     param(
@@ -854,7 +970,11 @@ function Resolve-OctoTestTarget {
     # an empty list or a name that cannot match.
     $outside = ''
     if (Test-Path -LiteralPath (Join-Path $lanePath $repo) -PathType Container) {
-        $outside = " The folder $(Join-Path $lanePath $repo) exists, but only folders named octo-* or mm-* are repositories of a lane."
+        # A consumer app (energy-community, voest-app): not part of a lane's build order, but its tests run here.
+        if (Test-Path -LiteralPath (Join-Path (Join-Path $lanePath $repo) '.git')) {
+            return [pscustomobject]@{ Environment = $null; LanePath = $lanePath; BasePath = $null; Repo = $repo; RepoPath = (Join-Path $lanePath $repo); InPlace = $false }
+        }
+        $outside = " The folder $(Join-Path $lanePath $repo) exists, but only folders named octo-* or mm-* (or a git repository named exactly) are repositories of a lane."
     }
     if ($order.Count -eq 0) {
         throw "Lane $lanePath holds no repository (no folder named octo-* or mm-*) - '$repo' cannot be resolved.$outside Pass the lane that holds the repositories with -branch (e.g. branches/main), or -env <environment>."
@@ -1037,8 +1157,8 @@ function Invoke-OctoTestRun {
         $target = Resolve-OctoTestTarget -env $env -branch $branch -repo $repo
         if (-not (Test-Path -LiteralPath $target.RepoPath -PathType Container)) { throw "Repository folder $($target.RepoPath) does not exist." }
         $repo = $target.Repo
-        $allProjects = @(Get-OctoTestProjects -repositoryPath $target.RepoPath)
-        if ($allProjects.Count -eq 0) { throw "$repo has no test project (no csproj with <IsTestProject>true</IsTestProject> or a Microsoft.NET.Test.Sdk reference below $($target.RepoPath))." }
+        $allProjects = @(Get-OctoTestProjects -repositoryPath $target.RepoPath) + @(Get-OctoFrontendTestProjects -repositoryPath $target.RepoPath)
+        if ($allProjects.Count -eq 0) { throw "$repo has no test project (no csproj with <IsTestProject>true</IsTestProject> or a Microsoft.NET.Test.Sdk reference, and no Angular workspace with a ""test"" script in its package.json, below $($target.RepoPath))." }
         $selected = $allProjects
         if (@($project | Where-Object { $_ }).Count -gt 0) {
             $names = @($project | Where-Object { $_ } | ForEach-Object { (Resolve-OctoTestProject -name $_ -projects $allProjects).Name })
@@ -1058,6 +1178,7 @@ function Invoke-OctoTestRun {
         $filters = @($filter)
         $skip = $null
         $rerunCount = $null
+        $rerunFiles = @()
         if ($rerunFailed) {
             $last = Read-OctoTestLastResult -projectResultsPath $projectResults
             $failedNames = @()
@@ -1065,21 +1186,32 @@ function Invoke-OctoTestRun {
             if ($null -eq $last) { $skip = 'no previous result - run the project without -rerunFailed first' }
             elseif ($failedNames.Count -eq 0 -and $last['state'] -eq 'error') { $skip = 'the last run produced no test result (state error) - run the project without -rerunFailed' }
             elseif ($failedNames.Count -eq 0) { $skip = 'no failed test in the last result' }
+            elseif (Test-OctoFrontendTestProject $entry) {
+                # A frontend rerun runs the spec files that held a failed test ("<spec file> :: <test name>").
+                $rerunFiles = @($failedNames | ForEach-Object { ([string]$_ -split ' :: ', 2)[0] } | Where-Object { $_ } | Sort-Object -Unique)
+                $rerunCount = @($failedNames | Sort-Object -Unique).Count
+            }
             else {
                 $filters = @(Get-OctoTestFilterChunks -names $failedNames -filter $filter -maxLength $maxFilterLength)
                 $rerunCount = @($failedNames | Sort-Object -Unique).Count
             }
         }
-        $buildState = switch ($build) {
-            'Always' { [pscustomobject]@{ Current = $false; Reason = '-build Always' } }
-            'Never' { [pscustomobject]@{ Current = $true; Reason = '-build Never' } }
-            default { Get-OctoTestBuildState -project $entry -repositoryPath $target.RepoPath -configuration $configuration -laneFeed $laneSettings.laneFeed -newestSource $newestSource }
+        $buildState = if (Test-OctoFrontendTestProject $entry) {
+            [pscustomobject]@{ Current = $false; Reason = 'frontend tests: ng test builds the test bundle itself' }
+        }
+        else {
+            switch ($build) {
+                'Always' { [pscustomobject]@{ Current = $false; Reason = '-build Always' } }
+                'Never' { [pscustomobject]@{ Current = $true; Reason = '-build Never' } }
+                default { Get-OctoTestBuildState -project $entry -repositoryPath $target.RepoPath -configuration $configuration -laneFeed $laneSettings.laneFeed -newestSource $newestSource }
+            }
         }
         $docker = switch ($dockerLock) { 'Always' { $true } 'Never' { $false } default { $entry.Docker } }
         $plan += [pscustomobject]@{
             Project     = $entry
             ResultsPath = $projectResults
             Filters     = $filters
+            RerunFiles  = $rerunFiles
             Skip        = $skip
             RerunCount  = $rerunCount
             NoBuild     = [bool]$buildState.Current
@@ -1129,6 +1261,7 @@ function Invoke-OctoTestRun {
                 buildReason  = $_.BuildReason
                 filters      = @($_.Filters | Where-Object { $_ })
                 rerunCount   = $_.RerunCount
+                rerunFiles   = @($_.RerunFiles | Where-Object { $_ })
                 skip         = $_.Skip
             }
         })
@@ -1165,7 +1298,11 @@ function Invoke-OctoTestRun {
             Write-Host "  $($item.Project.Name)$(if ($item.Docker) { '  [docker: ' + $item.DockerReason + ']' })" -ForegroundColor Green
             if ($item.Skip) { Write-Host "    skipped: $($item.Skip)" -ForegroundColor Yellow; continue }
             Write-Host "    $(if ($item.NoBuild) { '--no-build' } else { 'builds first' }): $($item.BuildReason)"
-            if ($null -ne $item.RerunCount) { Write-Host "    reruns $($item.RerunCount) failed test(s) in $(@($item.Filters).Count) dotnet test call(s)" }
+            if ($null -ne $item.RerunCount -and (Test-OctoFrontendTestProject $item.Project)) {
+                Write-Host "    reruns $($item.RerunCount) failed test(s): npx ng test with --include for $(@($item.RerunFiles).Count) spec file(s)"
+                foreach ($file in @($item.RerunFiles)) { Write-Host "      --include $file" }
+            }
+            elseif ($null -ne $item.RerunCount) { Write-Host "    reruns $($item.RerunCount) failed test(s) in $(@($item.Filters).Count) dotnet test call(s)" }
             elseif ($filter) { Write-Host "    filter: $filter" }
         }
         Write-Host ''
@@ -1265,7 +1402,8 @@ function Invoke-OctoTestRun {
 
             $runPath = Join-Path $item.ResultsPath $runStamp
             [void][IO.Directory]::CreateDirectory($runPath)
-            $logFile = Join-Path $runPath 'dotnet-test.log'
+            $frontend = Test-OctoFrontendTestProject $item.Project
+            $logFile = Join-Path $runPath $(if ($frontend) { 'ng-test.log' } else { 'dotnet-test.log' })
             $result.resultsPath = $runPath
             $result.logFile = $logFile
             & $emit 'testProjectStart' ([ordered]@{ repo = $repo; project = $name; index = $index; count = $plan.Count; docker = $item.Docker; noBuild = $item.NoBuild; buildReason = $item.BuildReason; calls = @($item.Filters).Count })
@@ -1276,7 +1414,15 @@ function Invoke-OctoTestRun {
             $projectWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $exitCode = 0
             $call = 0
-            foreach ($expression in @($item.Filters)) {
+            if ($frontend) {
+                # One `ng test` call: headless (no watch), the JUnit report first (--output-file belongs to the first reporter).
+                $arguments = @('ng', 'test', '--watch=false', '--reporters=junit', "--output-file=$(Join-Path $runPath 'results.junit.xml')", '--reporters=default')
+                if ($filter) { $arguments += @('--filter', $filter) }
+                foreach ($file in @($item.RerunFiles)) { $arguments += @('--include', $file) }
+                "Invoke-OctoTestRun: npx $($arguments -join ' ') (in $($item.Project.Directory))" | Add-Content -LiteralPath $logFile
+                $exitCode = Invoke-OctoFrontendTest -directory $item.Project.Directory -arguments $arguments -logFile $logFile
+            }
+            foreach ($expression in @($(if (-not $frontend) { $item.Filters }))) {
                 $call++
                 $trxName = if (@($item.Filters).Count -gt 1) { "results-$call.trx" } else { 'results.trx' }
                 $arguments = @('test', $item.Project.Path, '-c', $configuration)
@@ -1291,11 +1437,11 @@ function Invoke-OctoTestRun {
             }
             $projectWatch.Stop()
 
-            $trxFiles = @(Get-ChildItem -LiteralPath $runPath -Recurse -File -Filter '*.trx' -ErrorAction SilentlyContinue | Sort-Object FullName)
+            $trxFiles = @(Get-ChildItem -LiteralPath $runPath -Recurse -File -Filter $(if ($frontend) { '*.junit.xml' } else { '*.trx' }) -ErrorAction SilentlyContinue | Sort-Object FullName)
             $failedTests = [System.Collections.Generic.List[object]]::new()
             $errors = [System.Collections.Generic.List[string]]::new()
             foreach ($file in $trxFiles) {
-                try { $trx = Read-OctoTrxFile -path $file.FullName }
+                try { $trx = if ($frontend) { Read-OctoJUnitFile -path $file.FullName } else { Read-OctoTrxFile -path $file.FullName } }
                 catch { $errors.Add("Cannot read $($file.FullName): $($_.Exception.Message)"); continue }
                 $result.total += $trx.Total; $result.passed += $trx.Passed; $result.failed += $trx.Failed; $result.skipped += $trx.Skipped
                 foreach ($test in $trx.FailedTests) { $failedTests.Add($test) }

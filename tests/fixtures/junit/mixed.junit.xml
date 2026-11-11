@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="4" failures="2" errors="0" time="0.5">
+    <testsuite name="src/app/orders/order.service.spec.ts" timestamp="2026-11-11T12:47:18.806Z" hostname="test" tests="3" failures="1" errors="0" skipped="1" time="0.3">
+        <testcase classname="src/app/orders/order.service.spec.ts" name="OrderService &gt; adds two positions" time="0.1">
+        </testcase>
+        <testcase classname="src/app/orders/order.service.spec.ts" name="OrderService &gt; rejects an empty order" time="0.2">
+            <failure message="expected 4 to be 5 // Object.is equality" type="AssertionError">
+AssertionError: expected 4 to be 5 // Object.is equality
+ ❯ src/app/orders/order.service.spec.ts:42:18
+            </failure>
+        </testcase>
+        <testcase classname="src/app/orders/order.service.spec.ts" name="OrderService &gt; is not written yet" time="0">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="src/app/config/mail.spec.ts" timestamp="2026-11-11T12:47:18.807Z" hostname="test" tests="1" failures="1" errors="0" skipped="0" time="0">
+        <testcase classname="src/app/config/mail.spec.ts" name="src/app/config/mail.spec.ts" time="0">
+            <failure message="ENOENT: no such file or directory, open &apos;../../data/template.yaml&apos;" type="Error">
+Error: ENOENT: no such file or directory, open &apos;../../data/template.yaml&apos;
+ ❯ src/app/config/mail.spec.ts:131:20
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

@@ -258,6 +258,21 @@ holds it. To release it, delete the file if its `id` is yours. A lock is stale w
 process with that `pid` started at another time than `processStartTime` (2 seconds tolerance); only then may it be
 replaced. The owner must live as long as the tests run - record the pid of the process that waits for them.
 
+## Frontend tests of an app
+
+`Invoke-OctoTestRun` also runs the frontend tests of a repository: a folder with `angular.json` and a `package.json`
+that has a `test` script is a test project (named after the folder; two workspaces in folders of the same name get
+their folder path relative to the repository, e.g. `apps.web`).
+
+```powershell
+Invoke-OctoTestRun -branch branches/main -repo voest-app                    # ng test, headless, JUnit report
+Invoke-OctoTestRun -env ab8819-apps -repo energy-community -filter 'Billing' # a regular expression over suite and test names
+Invoke-OctoTestRun -branch branches/main -repo voest-app -rerunFailed       # only the spec files that held a failed test
+```
+
+It runs `npx ng test --watch=false --reporters=junit ...` in the app folder (after `npm ci` when there is no
+`node_modules`) and reports the failed tests as `<spec file> :: <test name>` with the message and the place.
+
 # Feature environments
 
 A feature environment is a small lane of its own at `<rootPath>/wt-<env>` for one work item - the lane folder of the

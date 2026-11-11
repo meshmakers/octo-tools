@@ -1119,6 +1119,21 @@ function Invoke-OctoBuildRangeCore {
         $inputs = & $inputsOf $entry
         if (-not $skipUnchangedEnabled) { return [pscustomobject]@{ Action = 'build'; Reason = 'always'; Detail = 'unchanged repositories are not skipped in this run'; Inputs = $inputs } }
         $compare = Compare-OctoBuildStamp -stamp (Read-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name) -inputs $inputs -configuration $configuration -tests $stampTests -outputPath $(if ($entry.Mode -eq 'dotnet') { $entry.Path } else { '' })
+        # AB#8819: a consumer app builds against the sibling octo-frontend-libraries (its build.ps1 installs their dist),
+        # an input neither its own sources nor the feed show. Built before the libraries' last build = stale.
+        if ($compare.Unchanged -and $entry.Group -eq 'app') {
+            $own = Read-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name
+            $libraries = Read-OctoBuildStamp -stampRoot $stampRoot -repo 'octo-frontend-libraries'
+            if ($null -ne $own -and $null -ne $libraries) {
+                $ownBuilt = [DateTimeOffset]::MinValue; $librariesBuilt = [DateTimeOffset]::MinValue
+                $styles = [Globalization.DateTimeStyles]::AssumeUniversal
+                $readable = [DateTimeOffset]::TryParse(([string]$(if ($own['builtAt'] -is [DateTime]) { $own['builtAt'].ToUniversalTime().ToString('o') } else { $own['builtAt'] })), [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$ownBuilt) -and
+                    [DateTimeOffset]::TryParse(([string]$(if ($libraries['builtAt'] -is [DateTime]) { $libraries['builtAt'].ToUniversalTime().ToString('o') } else { $libraries['builtAt'] })), [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$librariesBuilt)
+                if (-not $readable -or $librariesBuilt -gt $ownBuilt) {
+                    return [pscustomobject]@{ Action = 'build'; Reason = 'librariesBuilt'; Detail = 'octo-frontend-libraries was built after the last build of this app'; Inputs = $inputs }
+                }
+            }
+        }
         return [pscustomobject]@{ Action = $(if ($compare.Unchanged) { 'skip' } else { 'build' }); Reason = $compare.Reason; Detail = $compare.Detail; Inputs = $inputs }
     }
     # Prediction for the plan (-WhatIf, the plan event): a repository that is unchanged now is still built when a

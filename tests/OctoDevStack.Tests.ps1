@@ -130,6 +130,20 @@ Describe 'Start-OctoDevStackDaemon' {
             Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
         }
 
+        It 'leaves the running daemon alone when -Path holds no checkout' {
+            $path = Join-Path $TestDrive 'restart-no-checkout'
+
+            $json = Start-OctoDevStackDaemon -Path $path -Restart -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+            $json.data.success | Should -BeFalse
+            $json.data.error | Should -BeLike '*no octo-devstack checkout*left alone*'
+            $json.data.alreadyRunning | Should -BeTrue
+            $json.data.restarted | Should -BeFalse
+            $json.data.pid | Should -Be 902
+            $script:KillCalls.Count | Should -Be 0
+            Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+        }
+
         It 'refuses while builds run or wait: nothing stopped, nothing started, the builds are named' {
             Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus -Busy }
             $path = New-FakeCheckout 'restart-busy' -Built
