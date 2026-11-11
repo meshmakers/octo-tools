@@ -1957,7 +1957,11 @@ function Remove-OctoEnvironment {
     and detail, plus selection and builtCount / skippedCount; -DryRun reports the prediction as action (build | skip)
     and reason (also upstreamBuilt). The events file gets a repoSkipped event for a repository that is not built and
     status / reason on repoDone; the plan event carries the prediction.
-    Repositories are built one after the other; building independent repositories in parallel is not implemented.
+    Repositories that do not depend on each other build at the same time, at most -maxParallel (default 2; 1 = one
+    after the other, the run as it was before): a repository starts when every environment repository it depends
+    on in the package graph is finished, each in its own child process with its own environment. Repositories with
+    a CK model, and build.ps1 / frontend / zenon repositories, do not overlap (see Invoke-BuildRange -maxParallel).
+    After a failure nothing new starts and the running repositories finish. -Json: parallel, maxParallel, failedRepos.
     Developer tools in the environment (octo-tools, octo-devstack) are not built; -Json lists them in
     environment.toolRepos, and an environment that holds only tools succeeds with nothing to build.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
@@ -1979,6 +1983,7 @@ function Invoke-BuildEnvironment {
         [string[]]$repos = @(),
         [string[]]$skip = @(),
         [switch]$buildUnchanged,
+        [ValidateRange(1, 16)] [int]$maxParallel = 2,
         [switch]$syncMain,
         [switch]$verifyTests,
         [switch]$includeTests,
@@ -2123,6 +2128,7 @@ function Invoke-BuildEnvironment {
         excludeFrontend = $false
         EventsCommand   = 'Invoke-BuildEnvironment'
         recordStamps    = $true
+        maxParallel     = $maxParallel
         skipUnchanged   = -not $buildUnchanged
         repoInputs      = $repoInputs
     }
