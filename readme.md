@@ -276,8 +276,13 @@ Get-OctoAffectedRepos -env ab8625-enum-null
 Add-OctoEnvironmentRepo -env ab8625-enum-null -repo octo-asset-repo-services -role consumer -addAffected
 
 # 3. Work in wt-ab8625-enum-null/octo-construction-kit-engine (Rider, dotnet build: isolated by Octo.User.props)
-#    and build the environment incrementally; compile the tests before every hand-off
+#    and build the environment: only what changed since its last build here, and what consumes it;
+#    compile the tests before every hand-off
 Invoke-BuildEnvironment -env ab8625-enum-null -verifyTests
+Invoke-BuildEnvironment -env ab8625-enum-null -DryRun                          # what would be built, and why
+Invoke-BuildEnvironment -env ab8625-enum-null -repos construction-kit-engine,sdk   # only these
+Invoke-BuildEnvironment -env ab8625-enum-null -skip octo-docs                  # all but these
+Invoke-BuildEnvironment -env ab8625-enum-null -buildUnchanged                  # everything, changed or not
 
 # 4. main moved on? Take its new packages and catalog entries (yours keep winning)
 Invoke-BuildEnvironment -env ab8625-enum-null -syncMain        # or Sync-OctoEnvironment -env ab8625-enum-null
@@ -310,6 +315,14 @@ Remove-OctoEnvironment -env ab8625-enum-null
   it created - its worktrees, the environment folder and the branches it created, never a branch that existed
   before - so the same call can simply be repeated after the cause is fixed (`-Json`: `rolledBack`).
   `Add-OctoEnvironmentRepo` is repeatable instead: what it added stays in the manifest, the same call adds the rest.
+- **Only what changed is built.** Every successful repository leaves a build stamp
+  (`wt-<env>/.octo/build-stamps/<repo>.json`): its git state (HEAD, the changes of the tracked files, the untracked
+  files) and the hashes of the environment-feed packages it consumes. A repository whose stamp still matches is
+  skipped; one whose sources changed is built, and so is every consumer of a package it rewrote. `-repos` / `-skip`
+  narrow the build by hand - a warning names a left-out repository that sits between a rebuilt library and a rebuilt
+  consumer (stale packages). `-buildUnchanged` builds everything; use it after a change a stamp cannot see (a CK
+  model consumed only through the local catalog, npm packages, `Octo.User.props`, an SDK update). `-Json` and the
+  events file say per repository `built` or `skipped` and why. Repositories are built one after the other.
 - **Snapshot, not live.** Main's packages and catalogs are copied when the environment is created and refreshed only
   on request (`Sync-OctoEnvironment`, `-syncMain`). Packages built in the environment always win; catalog indexes
   changed on both sides are merged. Main's feed is never added as a second NuGet source.

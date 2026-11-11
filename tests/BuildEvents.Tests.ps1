@@ -23,6 +23,7 @@ BeforeAll {
     Import-Module (Join-Path $modules 'Stop-Octo.psm1') -Force
     Import-Module (Join-Path $modules 'Invoke-Publish.psm1') -Force
     Import-Module (Join-Path $modules 'Sync-OctoCkIntermediateVersions.psm1') -Force
+    Import-Module (Join-Path $modules 'OctoBuildStamp.psm1') -Force
     Import-Module (Join-Path $modules 'Invoke-BuildRange.psm1') -Force
 
     function New-EventsCheckout {

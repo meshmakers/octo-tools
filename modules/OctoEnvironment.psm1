@@ -1082,7 +1082,114 @@ function Get-OctoAffectedRepoGraph {
         if ($features -contains $repo.Name -or -not $depth.ContainsKey($repo.Name)) { continue }
         $rows += [pscustomobject][ordered]@{ repo = $repo.Name; depth = $depth[$repo.Name]; via = @($via[$repo.Name]) }
     }
-    return [pscustomobject]@{ Affected = $rows; Consumers = $consumers }
+    return [pscustomobject]@{ Affected = $rows; Consumers = $consumers; Info = $info }
+}
+
+function Get-OctoUpstreamRepoMap {
+    # repository -> every repository it depends on through Meshmakers.* packages, transitively (from the Consumers
+    # edges of Get-OctoAffectedRepoGraph, which cover the whole lane - also repositories outside an environment).
+    param([Parameter(Mandatory = $true)] $graph)
+    $producersOf = @{}
+    foreach ($producer in $graph.Consumers.Keys) {
+        foreach ($edge in $graph.Consumers[$producer]) {
+            if (-not $producersOf.ContainsKey($edge.Consumer)) { $producersOf[$edge.Consumer] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
+            [void]$producersOf[$edge.Consumer].Add($producer)
+        }
+    }
+    $map = @{}
+    foreach ($name in @($graph.Info.Keys)) {
+        $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $queue = [System.Collections.Generic.Queue[string]]::new()
+        $queue.Enqueue($name)
+        while ($queue.Count -gt 0) {
+            $current = $queue.Dequeue()
+            if (-not $producersOf.ContainsKey($current)) { continue }
+            foreach ($producer in $producersOf[$current]) { if ($producer -ine $name -and $seen.Add($producer)) { $queue.Enqueue($producer) } }
+        }
+        $map[$name] = @($seen | Sort-Object)
+    }
+    return $map
+}
+
+function Get-OctoEnvironmentBuildSelection {
+    <#
+        Invoke-BuildEnvironment -repos / -skip (AB#8814). $order: the environment's repositories in build order.
+        Returns { Build (names, build order); Skipped (name -> { reason = notSelected|excluded; detail }) }.
+        Throws for a name that is no repository of the environment's build order (a developer tool included) and
+        when nothing is left to build.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$env,
+        [Parameter(Mandatory = $true)] [string[]]$order,
+        [string[]]$repos = @(),
+        [string[]]$skip = @(),
+        [string[]]$toolRepos = @()
+    )
+    $resolve = {
+        param([string]$name, [string]$parameter)
+        foreach ($candidate in @($name, "octo-$name")) {
+            $hit = @($order | Where-Object { $_ -ieq $candidate })
+            if ($hit.Count -gt 0) { return $hit[0] }
+        }
+        foreach ($candidate in @($name, "octo-$name")) {
+            if ($toolRepos -contains $candidate) { throw "-${parameter}: $candidate is a developer tool - Invoke-BuildEnvironment never builds it." }
+        }
+        throw "-${parameter}: '$name' is no repository of environment $env. Its repositories: $($order -join ', ')."
+    }
+    $split = { param($values) @($values | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    $selected = @(& $split $repos | ForEach-Object { & $resolve $_ 'repos' })
+    $excluded = @(& $split $skip | ForEach-Object { & $resolve $_ 'skip' })
+    $build = @()
+    $skipped = [ordered]@{}
+    foreach ($name in $order) {
+        if ($excluded -contains $name) { $skipped[$name] = @{ reason = 'excluded'; detail = 'named in -skip' } }
+        elseif ($selected.Count -gt 0 -and $selected -notcontains $name) { $skipped[$name] = @{ reason = 'notSelected'; detail = 'not named in -repos' } }
+        else { $build += $name }
+    }
+    if ($build.Count -eq 0) { throw "-repos / -skip leave no repository of environment $env to build." }
+    return [pscustomobject]@{ Build = $build; Skipped = $skipped }
+}
+
+function Get-OctoEnvironmentStaleWarnings {
+    <#
+        Stale packages through repositories that are left out of a build (-repos / -skip): a left-out repository M
+        with a built consumer C is a problem when a repository M depends on is built in this run (M's packages are
+        not rebuilt against it, C binds to both: MissingMethodException at runtime), or when M itself changed
+        since its last build here (C is built against M's old packages).
+        $changed: name -> { Unchanged; Reason; Detail } (Compare-OctoBuildStamp) for every repository of the order.
+        Returns @({ repo; skipReason; changed; changeReason; upstreamBuilt; consumers; message }).
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$order,
+        [Parameter(Mandatory = $true)] $selection,
+        [Parameter(Mandatory = $true)] [hashtable]$upstream,
+        [Parameter(Mandatory = $true)] [hashtable]$changed,
+        [switch]$buildUnchanged
+    )
+    # Which of the selected repositories will be built: changed, or downstream of one that is built.
+    $predicted = @()
+    foreach ($name in $order) {
+        if ($selection.Build -notcontains $name) { continue }
+        $dependsOn = @($upstream[$name])
+        if ($buildUnchanged -or -not $changed[$name].Unchanged -or @($predicted | Where-Object { $dependsOn -contains $_ }).Count -gt 0) { $predicted += $name }
+    }
+    $warnings = @()
+    foreach ($name in @($selection.Skipped.Keys)) {
+        $consumers = @($predicted | Where-Object { @($upstream[$_]) -contains $name })
+        if ($consumers.Count -eq 0) { continue }
+        $upstreamBuilt = @($predicted | Where-Object { @($upstream[$name]) -contains $_ })
+        $isChanged = -not $changed[$name].Unchanged -and $changed[$name].Reason -ne 'neverBuilt'
+        if ($upstreamBuilt.Count -eq 0 -and -not $isChanged) { continue }
+        $parts = @()
+        if ($upstreamBuilt.Count -gt 0) { $parts += "lies between $($upstreamBuilt -join ', ') (built) and $($consumers -join ', ') (built): its packages are not rebuilt against the new $($upstreamBuilt -join ', '), so $($consumers -join ', ') binds to a stale $name (MissingMethodException at runtime)" }
+        if ($isChanged) { $parts += "changed since its last build here ($($changed[$name].Reason)): $($consumers -join ', ') is built against its old packages" }
+        $warnings += [ordered]@{
+            repo = $name; skipReason = $selection.Skipped[$name]['reason']; changed = $isChanged; changeReason = $(if ($isChanged) { $changed[$name].Reason } else { $null })
+            upstreamBuilt = $upstreamBuilt; consumers = $consumers
+            message = "$name is not built in this run ($($selection.Skipped[$name]['reason'])) but $($parts -join '; and it '). Build it too (add it to -repos / drop it from -skip)."
+        }
+    }
+    return $warnings
 }
 
 function Get-OctoReposOnPath {
@@ -1731,8 +1838,8 @@ function Get-OctoAffectedRepos {
     Refuses - and removes nothing - when a worktree has uncommitted or untracked changes, or commits on top of its base
     commit that no remote has. There is no -force: commit and push, or discard, first. Feature branches are kept.
     In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are neither checked nor removed. Only what the environment
-    owns is deleted (worktrees, nuget/, .nuget-packages/, logFiles/, Octo.User.props, the catalogs, .octo/sync and the
-    manifest); anything else in the folder is kept, the folder goes only when empty. Stop the environment's
+    owns is deleted (worktrees, nuget/, .nuget-packages/, logFiles/, Octo.User.props, the catalogs, .octo/sync,
+    .octo/build-stamps and the manifest); anything else in the folder is kept, the folder goes only when empty. Stop the environment's
     services first (octo-devstack env_remove does that and releases the lease).
 .EXAMPLE
     Remove-OctoEnvironment -env ab8625-enum-null -WhatIf
@@ -1795,7 +1902,7 @@ function Remove-OctoEnvironment {
     if ($errors.Count -eq 0) {
         # Only what the environment owns; anything else somebody put there stays, the folder goes only when empty.
         # (Claims are not here: they live in the base lane, branches/main/.octo/claims/<repo>.md.)
-        foreach ($item in @('nuget', '.nuget-packages', 'logFiles', 'Octo.User.props', '.octo/sync', '.octo/local-catalog', '.octo/local-blueprint-catalog', '.octo/environment.json')) {
+        foreach ($item in @('nuget', '.nuget-packages', 'logFiles', 'Octo.User.props', '.octo/sync', '.octo/build-stamps', '.octo/local-catalog', '.octo/local-blueprint-catalog', '.octo/environment.json')) {
             $itemPath = Join-Path $environmentPath $item
             if (Test-Path -LiteralPath $itemPath) { Remove-Item -LiteralPath $itemPath -Recurse -Force }
         }
@@ -1833,6 +1940,24 @@ function Remove-OctoEnvironment {
     NuGet.Config in a temporary folder (mode 600 / current-user ACL, deleted after the build, also on failure) passed
     as RestoreConfigFile carries them, with the user-level NuGet.Config's credentials for the same sources
     (RestoreConfigFile replaces that file).
+    Only what changed is built (AB#8814). After every successful repository a build stamp is written
+    (<env>/.octo/build-stamps/<repo>.json, OctoBuildStamp.psm1): its git state - HEAD, the diff of the tracked
+    files and the untracked files - and the SHA-256 of the environment-feed packages it consumes (the packages of
+    every repository it depends on in the package graph). A repository whose stamp still matches when its turn comes
+    is skipped (status "skipped", reason "unchanged"); a library rebuilt earlier in the run changes the feed, so its
+    consumers are built. Also built: never built here, the last build did not compile the tests and this one asks
+    for it, no bin/DebugL output. -buildUnchanged builds everything (needed for a change the stamp cannot see: a CK
+    model taken only from the local catalog, npm packages of a frontend, Octo.User.props).
+    -repos <names> builds only these repositories (still in build order), -skip <names> leaves repositories out;
+    both take exact names or the name without "octo-", and refuse a name that is no repository of the environment.
+    A left-out repository between a library that is built and a consumer that is built (or one that changed itself)
+    means stale packages: a warning names it (-Json: staleWarnings).
+    -Json reports per repository status (built | skipped | failed), reason (unchanged, notSelected, excluded,
+    nothingToBuild, neverBuilt, sourcesChanged, packagesChanged, testsNotCompiled, noBuildOutput, noGitState, always)
+    and detail, plus selection and builtCount / skippedCount; -DryRun reports the prediction as action (build | skip)
+    and reason (also upstreamBuilt). The events file gets a repoSkipped event for a repository that is not built and
+    status / reason on repoDone; the plan event carries the prediction.
+    Repositories are built one after the other; building independent repositories in parallel is not implemented.
     Developer tools in the environment (octo-tools, octo-devstack) are not built; -Json lists them in
     environment.toolRepos, and an environment that holds only tools succeeds with nothing to build.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
@@ -1843,10 +1968,17 @@ function Remove-OctoEnvironment {
     build events with command "Invoke-BuildEnvironment".
 .EXAMPLE
     Invoke-BuildEnvironment -env ab8625-enum-null -syncMain -verifyTests
+.EXAMPLE
+    Invoke-BuildEnvironment -env ab8625-enum-null -repos octo-construction-kit-engine,octo-sdk -DryRun -Json
+.EXAMPLE
+    Invoke-BuildEnvironment -env ab8625-enum-null -skip octo-docs -buildUnchanged
 #>
 function Invoke-BuildEnvironment {
     param(
         [Parameter(Mandatory = $true)] [string]$env,
+        [string[]]$repos = @(),
+        [string[]]$skip = @(),
+        [switch]$buildUnchanged,
         [switch]$syncMain,
         [switch]$verifyTests,
         [switch]$includeTests,
@@ -1920,6 +2052,11 @@ function Invoke-BuildEnvironment {
     }
     if ($toolRepos.Count -gt 0 -and -not $Json) { Write-Host "Not built (developer tools): $($toolRepos -join ', ')" -ForegroundColor DarkGray }
 
+    # AB#8814: -repos / -skip narrow the build; unknown names are refused before anything runs.
+    $orderNames = [string[]]@($order | ForEach-Object Name)
+    try { $selection = Get-OctoEnvironmentBuildSelection -env $env -order $orderNames -repos $repos -skip $skip -toolRepos $toolRepos }
+    catch { & $fail $_.Exception.Message; return }
+
     # Kill scope: the lane matching of Invoke-KillDotnet over wt-<env> AND every in-place worktree (Windows stops the
     # matched dotnet processes, which could lock build output; macOS/Linux only list them).
     $killRoots = @($environmentPath) + @($external.Values)
@@ -1944,12 +2081,55 @@ function Invoke-BuildEnvironment {
         if (-not $Json) { Write-Host "Synced $env from $basePath" -ForegroundColor Green; Write-OctoEnvironmentSyncSummary -sync $sync }
     }
 
+    # Dependencies from the package graph of the lane (environment worktrees in place of their base folders): the feed
+    # packages each repository consumes go into its build stamp, the repositories it depends on into the prediction
+    # and the stale-package warnings. Without a graph Invoke-BuildRange hashes the whole feed per repository.
+    $repoInputs = @{}
+    $upstream = @{}
+    foreach ($name in $orderNames) { $upstream[$name] = @() }
+    try {
+        $graph = Get-OctoAffectedRepoGraph -repos (Get-OctoEnvironmentRepoSet -manifest $manifest -basePath $basePath) -features @()
+        $upstreamAll = Get-OctoUpstreamRepoMap -graph $graph
+        foreach ($name in $orderNames) {
+            if (-not $upstreamAll.ContainsKey($name)) { continue }
+            $upstream[$name] = @($upstreamAll[$name] | Where-Object { $orderNames -contains $_ })
+            $repoInputs[$name] = @{
+                packages  = @($upstreamAll[$name] | ForEach-Object { $graph.Info[$_].Produces } | Sort-Object -Unique)
+                dependsOn = $upstream[$name]
+            }
+        }
+    }
+    catch { Write-Warning "Package graph of $basePath is not available ($($_.Exception.Message)) - every package of the environment feed counts as consumed by every repository." }
+
+    # Stale packages through left-out repositories. Evaluated after the sync: its packages are in the feed by now.
+    $staleWarnings = @()
+    if ($selection.Skipped.Count -gt 0) {
+        $stampRoot = Join-Path $environmentPath '.octo/build-stamps'
+        $stampTests = if ($verifyTests -or $includeTests) { 'compiled' } else { 'none' }
+        $changed = @{}
+        foreach ($entry in $order) {
+            $known = if ($repoInputs.ContainsKey($entry.Name)) { [string[]]@($repoInputs[$entry.Name]['packages']) } else { $null }
+            $inputs = Get-OctoRepoBuildInputs -path $entry.Path -feedPath $environmentFeed -packageIds $known
+            $changed[$entry.Name] = Compare-OctoBuildStamp -stamp (Read-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name) -inputs $inputs -configuration 'DebugL' -tests $stampTests
+        }
+        $staleWarnings = @(Get-OctoEnvironmentStaleWarnings -order $orderNames -selection $selection -upstream $upstream -changed $changed -buildUnchanged:$buildUnchanged)
+        if (-not $Json) { foreach ($warning in $staleWarnings) { Write-Warning $warning['message'] } }
+    }
+
     $range = @{
         branch          = "wt-$env"
         from            = $order[0].Name
         to              = $order[-1].Name
         excludeFrontend = $false
         EventsCommand   = 'Invoke-BuildEnvironment'
+        recordStamps    = $true
+        skipUnchanged   = -not $buildUnchanged
+        repoInputs      = $repoInputs
+    }
+    if ($selection.Skipped.Count -gt 0) {
+        $skipRepos = @{}
+        foreach ($name in $selection.Skipped.Keys) { $skipRepos[$name] = $selection.Skipped[$name] }
+        $range['skipRepos'] = $skipRepos
     }
     if ($external.Count -gt 0) {
         $range['externalRepoPaths'] = $external
@@ -1989,6 +2169,8 @@ function Invoke-BuildEnvironment {
     }
     $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external; toolRepos = $toolRepos }
     $data['synced'] = $null -ne $sync
+    $data['selection'] = [ordered]@{ repos = @($selection.Build); skipped = $selection.Skipped; buildUnchanged = [bool]$buildUnchanged }
+    $data['staleWarnings'] = @($staleWarnings)
     $data['killDotnet'] = $kill
     if ($null -ne $sync) { $data['sync'] = ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed }
     $global:LASTEXITCODE = $exitCode

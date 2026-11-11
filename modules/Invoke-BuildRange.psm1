@@ -524,7 +524,13 @@ function Write-OctoBuildRangePlan {
     foreach ($entry in $plan) {
         $index++
         Write-Host ""
+        $decision = $entry.PSObject.Properties['Decision']
+        if ($decision -and $decision.Value.Action -eq 'skip' -and $entry.Mode -ne 'none') {
+            Write-Host ("{0,2}. {1} [{2}] -> not built: {3}{4}" -f $index, $entry.Name, $entry.Group, $decision.Value.Reason, $(if ($decision.Value.Detail) { " ($($decision.Value.Detail))" })) -ForegroundColor DarkGray
+            continue
+        }
         Write-Host ("{0,2}. {1} [{2}] -> {3}" -f $index, $entry.Name, $entry.Group, $entry.Target) -ForegroundColor Green
+        if ($decision -and $decision.Value.Reason -ne 'always') { Write-Host "    build because: $($decision.Value.Reason)$(if ($decision.Value.Detail) { " ($($decision.Value.Detail))" })" }
         if ($null -ne $repoPaths -and $repoPaths.Contains($entry.Name)) { Write-Host "    path: $($entry.Path) (-repoPaths)" }
         if ($entry.Mode -eq 'dotnet') {
             Write-Host "    solution: $(Split-Path -Leaf $entry.Solution) ($($entry.Projects.Count) project(s))"
@@ -710,10 +716,34 @@ function Write-OctoBuildRangePlan {
     RestorePackagesPath = .. } (global properties win) when the downstream repositories of the range
     must restore from the private feed into the private cache.
 
+.PARAMETER skipUnchanged
+    AB#8814: do not build a repository whose sources and consumed feed packages are the same as at its last
+    successful build in this lane (build stamps, <lane>/.octo/build-stamps/<repo>.json, see OctoBuildStamp.psm1).
+    The check runs when the repository's turn comes, so packages rebuilt earlier in the same run count. DebugL
+    only. Implies -recordStamps. A skipped repository is reported with status "skipped", reason "unchanged".
+
+.PARAMETER recordStamps
+    Write the build stamp of every repository that was built successfully (DebugL), without skipping anything.
+
+.PARAMETER repoInputs
+    Per repository (exact name) what the caller knows about its dependencies:
+    @{ '<repo>' = @{ packages = @('<package id>', ..); dependsOn = @('<repo>', ..) } }. packages: the feed
+    packages the repository consumes (hashed into its stamp); without it every package of the feed except the
+    repository's own counts. dependsOn: repositories of the range it depends on - only used for the -WhatIf
+    prediction ("upstreamBuilt"); without it every repository built earlier in the range counts.
+    Invoke-BuildEnvironment passes both from the package graph.
+
+.PARAMETER skipRepos
+    Repositories of the range that are not built in this run, keyed by exact name, with the reason:
+    @{ '<repo>' = @{ reason = 'notSelected'; detail = '..' } } (or a plain string as the reason). They stay in the
+    plan and are reported as skipped (status "skipped", event repoSkipped); nothing of them is checked, built,
+    copied or purged and their stamp is left alone. Used by Invoke-BuildEnvironment -repos / -skip.
+
 .PARAMETER EventsFile
     Append build progress events to this file while the run is going (one JSON object per line,
     see Write-OctoBuildEvent): plan, then per repository repoStart, phase (build, tests, packages,
-    purge) and repoDone, and finally done - also on an early refusal or a throw (success=false).
+    purge) and repoDone - or a single repoSkipped for a repository that is not built - and finally done,
+    also on an early refusal or a throw (success=false).
     Nothing is written under -WhatIf. The -Json output is not affected.
 
 .PARAMETER EventsCommand
@@ -767,6 +797,10 @@ function Invoke-BuildRange {
         [hashtable]$repoPaths = @{},
         [hashtable]$externalRepoPaths = @{},
         [string]$feedPath = '',
+        [switch]$skipUnchanged,
+        [switch]$recordStamps,
+        [hashtable]$repoInputs = @{},
+        [hashtable]$skipRepos = @{},
         [string]$EventsFile = '',
         [string]$EventsCommand = 'Invoke-BuildRange',
         [switch]$Json
@@ -884,6 +918,10 @@ function Invoke-OctoBuildRangeCore {
         [hashtable]$repoPaths = @{},
         [hashtable]$externalRepoPaths = @{},
         [string]$feedPath = '',
+        [switch]$skipUnchanged,
+        [switch]$recordStamps,
+        [hashtable]$repoInputs = @{},
+        [hashtable]$skipRepos = @{},
         [hashtable]$events,
         [switch]$Json
     )
@@ -1048,8 +1086,56 @@ function Invoke-OctoBuildRangeCore {
     }
     $publishWarning = Get-OctoCkPublishDisabledWarning -repoNames @($plan | Where-Object { $_.Mode -eq 'dotnet' -and (Test-OctoCkPublishDisabled -properties $_.MsBuildProperties) } | ForEach-Object { $_.Name })
     if ($publishWarning) { Write-Warning $publishWarning }
-    $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' }))
     $purgeEnabled = $configuration -ieq 'DebugL'
+
+    # AB#8814: build stamps. -skipRepos: repositories the caller took out of this run. -skipUnchanged: repositories
+    # whose inputs are those of their last successful build.
+    $skipMap = @{}
+    foreach ($key in @($skipRepos.Keys)) {
+        $value = $skipRepos[$key]
+        $known = @($plan | Where-Object { $_.Name -ieq [string]$key })
+        if ($known.Count -eq 0) { & $fail "-skipRepos: '$key' is not a repository of the selected range."; return }
+        $skipMap[$known[0].Name] = if ($value -is [System.Collections.IDictionary]) { [pscustomobject]@{ Reason = [string]$value['reason']; Detail = [string]$value['detail'] } } else { [pscustomobject]@{ Reason = [string]$value; Detail = '' } }
+    }
+    foreach ($key in @($repoInputs.Keys)) {
+        if ($repoInputs[$key] -isnot [System.Collections.IDictionary]) { & $fail "-repoInputs: the value for '$key' must be a hashtable @{ packages = ..; dependsOn = .. }."; return }
+    }
+    $stampsEnabled = $purgeEnabled -and ($skipUnchanged -or $recordStamps)
+    $skipUnchangedEnabled = $purgeEnabled -and $skipUnchanged
+    $stampRoot = Join-Path $branchRootPath '.octo/build-stamps'
+    $stampTests = if ($includeTests -or $verify) { 'compiled' } else { 'none' }
+    $inputsOf = {
+        param($entry)
+        $known = $null
+        foreach ($key in @($repoInputs.Keys)) { if ([string]$key -ieq $entry.Name -and $repoInputs[$key].Contains('packages')) { $known = [string[]]@($repoInputs[$key]['packages']) } }
+        Get-OctoRepoBuildInputs -path $entry.Path -feedPath $nugetTarget -packageIds $known -ownPackageIds @($entry.PackageIds)
+    }
+    # { Action build|skip; Reason; Detail; Inputs } for one repository, as things are now.
+    $decide = {
+        param($entry)
+        if ($skipMap.ContainsKey($entry.Name)) { return [pscustomobject]@{ Action = 'skip'; Reason = $skipMap[$entry.Name].Reason; Detail = $skipMap[$entry.Name].Detail; Inputs = $null } }
+        if ($entry.Mode -eq 'none') { return [pscustomobject]@{ Action = 'skip'; Reason = 'nothingToBuild'; Detail = 'no solution file'; Inputs = $null } }
+        if (-not $stampsEnabled) { return [pscustomobject]@{ Action = 'build'; Reason = 'always'; Detail = 'unchanged repositories are not skipped in this run'; Inputs = $null } }
+        $inputs = & $inputsOf $entry
+        if (-not $skipUnchangedEnabled) { return [pscustomobject]@{ Action = 'build'; Reason = 'always'; Detail = 'unchanged repositories are not skipped in this run'; Inputs = $inputs } }
+        $compare = Compare-OctoBuildStamp -stamp (Read-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name) -inputs $inputs -configuration $configuration -tests $stampTests -outputPath $(if ($entry.Mode -eq 'dotnet') { $entry.Path } else { '' })
+        return [pscustomobject]@{ Action = $(if ($compare.Unchanged) { 'skip' } else { 'build' }); Reason = $compare.Reason; Detail = $compare.Detail; Inputs = $inputs }
+    }
+    # Prediction for the plan (-WhatIf, the plan event): a repository that is unchanged now is still built when a
+    # repository it depends on is built before it (its packages change).
+    $predictedBuild = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $plan) {
+        $decision = & $decide $entry
+        if ($decision.Action -eq 'skip' -and $decision.Reason -eq 'unchanged') {
+            $dependsOn = $null
+            foreach ($key in @($repoInputs.Keys)) { if ([string]$key -ieq $entry.Name -and $repoInputs[$key].Contains('dependsOn')) { $dependsOn = @($repoInputs[$key]['dependsOn']) } }
+            $upstream = if ($null -ne $dependsOn) { @($predictedBuild | Where-Object { $dependsOn -contains $_ }) } else { @($predictedBuild) }
+            if ($upstream.Count -gt 0) { $decision = [pscustomobject]@{ Action = 'build'; Reason = 'upstreamBuilt'; Detail = "depends on $($upstream -join ', '), built before it in this run"; Inputs = $decision.Inputs } }
+        }
+        if ($decision.Action -eq 'build') { $predictedBuild.Add($entry.Name) }
+        $entry | Add-Member -NotePropertyName Decision -NotePropertyValue $decision -Force
+    }
+    $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and -not $skipMap.ContainsKey($_.Name) }))
     # Purge of the lane's package caches: DebugL, never for a private feed.
     $purgeCaches = $purgeEnabled -and -not $privateFeed
     $staleCache = @()
@@ -1065,12 +1151,13 @@ function Invoke-OctoBuildRangeCore {
                     lane             = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                     packageCaches    = @($globalPackagesPath)
                     verifyTests      = $verify
+                    skipUnchanged    = [bool]$skipUnchangedEnabled
                     configuration    = $configuration
                     nugetPath        = $nugetTarget
                     feedPath         = if ($privateFeed) { $nugetTarget } else { $null }
                     repoPaths        = $repoPathsReport
                     repositories     = @($plan | ForEach-Object {
-                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes) }
+                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes); action = $_.Decision.Action; reason = $_.Decision.Reason; detail = $_.Decision.Detail }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
                     msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
@@ -1116,7 +1203,8 @@ function Invoke-OctoBuildRangeCore {
     }
 
     $repoCount = $plan.Count
-    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.Name; mode = $_.Mode } }); count = $repoCount })
+    # action/reason are the prediction made before the run; repoDone / repoSkipped say what happened.
+    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.Name; mode = $_.Mode; action = $_.Decision.Action; reason = $_.Decision.Reason } }); count = $repoCount })
     if ($privateFeed -and !(Test-Path -LiteralPath $nugetTarget)) {
         New-Item -ItemType Directory -Force -Path $nugetTarget | Out-Null
     }
@@ -1148,6 +1236,8 @@ function Invoke-OctoBuildRangeCore {
                 index          = $index
                 count          = $repoCount
                 success        = [bool]$result.success
+                status         = $result.status
+                reason         = $result.reason
                 seconds        = $elapsed.TotalSeconds
                 buildSeconds   = $result.buildDuration.TotalSeconds
                 testSeconds    = $result.testDuration.TotalSeconds
@@ -1162,6 +1252,21 @@ function Invoke-OctoBuildRangeCore {
     try {
     foreach ($entry in $plan) {
         $repoIndex++
+        # Decided now, not from the plan: packages rebuilt earlier in this run are in the feed by now.
+        # (A repository without a solution keeps its repoStart/repoDone pair; it is reported as skipped, nothingToBuild.)
+        $decision = & $decide $entry
+        if ($decision.Action -eq 'skip' -and ($entry.Mode -ne 'none' -or $skipMap.ContainsKey($entry.Name))) {
+            $results.Add([ordered]@{
+                    repo = $entry.Name; success = $true; status = 'skipped'; reason = $decision.Reason; detail = $decision.Detail
+                    buildDuration = [TimeSpan]::Zero; packageDuration = [TimeSpan]::Zero; testDuration = [TimeSpan]::Zero; testsCompiled = $null
+                    copiedCount = 0; purged = @(); staleSkipped = @(); logFile = $null; msbuildProperties = @($entry.PropertyArgs)
+                })
+            & $emit 'repoSkipped' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount; reason = $decision.Reason; detail = $decision.Detail })
+            if (-not $Json) { Write-Host "==> $($entry.Name): skipped ($($decision.Reason)$(if ($decision.Detail) { " - $($decision.Detail)" }))" -ForegroundColor DarkGray }
+            continue
+        }
+        # A stamp only ever describes a build that succeeded: gone while the repository is built.
+        if ($stampsEnabled -and $entry.Mode -ne 'none') { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
         $repoWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $events.Repo = $entry.Name
         $events.Index = $repoIndex
@@ -1171,7 +1276,7 @@ function Invoke-OctoBuildRangeCore {
         $events.RepoWatch = $repoWatch
         $events.LogFile = $null
         & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
-        if (-not $Json) { Write-Host "==> $($entry.Name)" -ForegroundColor Cyan }
+        if (-not $Json) { Write-Host "==> $($entry.Name)$(if ($skipUnchangedEnabled -and $entry.Mode -ne 'none') { " ($($decision.Reason)$(if ($decision.Detail) { ": $($decision.Detail)" }))" })" -ForegroundColor Cyan }
         $events.Phase = 'build'
         & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
         $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1204,6 +1309,9 @@ function Invoke-OctoBuildRangeCore {
         $result = [ordered]@{
             repo            = $entry.Name
             success         = [bool]$build.Success
+            status          = if ($entry.Mode -eq 'none') { 'skipped' } elseif ($build.Success) { 'built' } else { 'failed' }
+            reason          = $decision.Reason
+            detail          = $decision.Detail
             buildDuration   = $buildWatch.Elapsed
             packageDuration = [TimeSpan]::Zero
             testDuration    = $testWatch.Elapsed
@@ -1224,6 +1332,7 @@ function Invoke-OctoBuildRangeCore {
         }
         if ($null -ne $tests -and -not $tests.Success) {
             $result.success = $false
+            $result.status = 'failed'
             $result.logFile = $tests.LogFile
             $results.Add($result)
             $failed = $entry
@@ -1256,6 +1365,7 @@ function Invoke-OctoBuildRangeCore {
                 $packageWatch.Stop()
                 $result.packageDuration = $packageWatch.Elapsed
                 $result.success = $false
+                $result.status = 'failed'
                 $results.Add($result)
                 $failed = $entry
                 $failedStep = 'packages'
@@ -1281,6 +1391,10 @@ function Invoke-OctoBuildRangeCore {
                 Write-Host "    copied $($result.copiedCount) package(s)$target, purged $($result.purged.Count) global-cache folder(s), left $($result.staleSkipped.Count) unchanged/stale package(s) untouched" -ForegroundColor DarkGray
             }
         }
+        # Built, tests compiled (when asked) and packages copied: record what it was built from.
+        if ($stampsEnabled -and $entry.Mode -ne 'none' -and $null -ne $decision.Inputs -and -not $decision.Inputs.Source.Problem) {
+            Write-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name -inputs $decision.Inputs -configuration $configuration -tests $stampTests
+        }
         $results.Add($result)
         & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
     }
@@ -1297,7 +1411,8 @@ function Invoke-OctoBuildRangeCore {
 
     # R2-5: a src-only run never compiled the test projects - say so instead of implying "all green".
     $testsHint = $null
-    if (-not $includeTests -and -not $verify -and @($plan | Where-Object { $_.Mode -eq 'dotnet' -and $_.Target -eq 'slnf' }).Count -gt 0) {
+    $builtNames = @($results | Where-Object { $_.status -ne 'skipped' } | ForEach-Object { $_.repo })
+    if (-not $includeTests -and -not $verify -and @($plan | Where-Object { $_.Mode -eq 'dotnet' -and $_.Target -eq 'slnf' -and $builtNames -contains $_.Name }).Count -gt 0) {
         $testsHint = "Only src/ projects were built - test projects were not compiled. Before handing off, rerun with -verifyTests (compile tests, do not run them) or -includeTests."
     }
 
@@ -1313,11 +1428,17 @@ function Invoke-OctoBuildRangeCore {
                 feedPath       = if ($privateFeed) { $nugetTarget } else { $null }
                 repoPaths      = $repoPathsReport
                 testsCompiled  = [bool]($includeTests -or $verify)
+                skipUnchanged  = [bool]$skipUnchangedEnabled
+                builtCount     = @($results | Where-Object { $_.status -eq 'built' }).Count
+                skippedCount   = @($results | Where-Object { $_.status -eq 'skipped' }).Count
                 hint           = $testsHint
                 repositories   = @($results | ForEach-Object {
                         [ordered]@{
                             repo                   = $_.repo
                             success                = $_.success
+                            status                 = $_.status
+                            reason                 = $_.reason
+                            detail                 = $_.detail
                             buildSeconds           = $_.buildDuration.TotalSeconds
                             testCompileSeconds     = $_.testDuration.TotalSeconds
                             testsCompiled          = $_.testsCompiled
@@ -1341,6 +1462,10 @@ function Invoke-OctoBuildRangeCore {
         Write-Host "Summary (Invoke-BuildRange, $configuration):"
         Write-Host "---------------------------------"
         foreach ($result in $results) {
+            if ($result.status -eq 'skipped') {
+                Write-Host ("{0,-45} skipped ({1})" -f $result.repo, $result.reason) -ForegroundColor DarkGray
+                continue
+            }
             $line = "{0,-45} build {1,8}   copy+purge {2,8}" -f $result.repo, (Format-OctoDuration $result.buildDuration), (Format-OctoDuration $result.packageDuration)
             if ($verify) { $line += "   tests {0,8}" -f (Format-OctoDuration $result.testDuration) }
             Write-Host $line -ForegroundColor $(if ($result.success) { 'Green' } else { 'Red' })
