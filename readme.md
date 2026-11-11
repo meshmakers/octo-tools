@@ -275,6 +275,11 @@ claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:5090
 ```
 
 `Stop-OctoDevStackDaemon` stops the daemon only; the stack services keep running and the next start adopts them.
+Other sessions use the daemon, so a stop asks it first (`GET /api/daemon`): while a build runs or waits,
+`Stop-OctoDevStackDaemon` and `Start-OctoDevStackDaemon -Restart` stop nothing and name the builds and their owners;
+`-Force` overrides (the builds go on and the next daemon re-attaches to them). Sessions holding a stack lease are listed
+as a warning. A new octo-devstack commit is deployed with `Start-OctoDevStackDaemon -Restart -Rebuild` (stop, build
+Release, start; `-Rebuild` alone is refused while the daemon runs from those binaries).
 On macOS/Linux both cmdlets need `lsof` to find the process on the port.
 
 From then on OctoMesh is managed through the daemon: MCP `http://127.0.0.1:5090/mcp`, status page
