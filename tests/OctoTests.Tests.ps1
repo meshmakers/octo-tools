@@ -460,6 +460,10 @@ Describe 'Filter calls per runner (AB#8832)' {
                 '--treenode-filter /*/Ns.Orders/PriceTests/(Also_fails)')
             # split at the length limit
             @((Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'B'; Runner = 'mtp'; Framework = 'tunit' }) -failedNames $names -maxLength 30).Calls).Count | Should -Be 3
+            # a VSTest rerun is combined with -filter: a tree filter matches nothing there, so nothing is run
+            $mismatched = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'A'; Runner = 'vstest'; Framework = 'other' }) -failedNames $names -filter '/*/*/OrderTests/*'
+            @($mismatched.Calls).Count | Should -Be 0
+            $mismatched.Mismatch | Should -Match 'FullyQualifiedName~ClassName'
 
             $xunit = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'C'; Runner = 'mtp'; Framework = 'xunit3' }) -failedNames $names
             @($xunit.Calls).Count | Should -Be 1
@@ -524,6 +528,16 @@ Describe 'Test projects of a repository' {
             $projects = @(Get-OctoTestProjects -repositoryPath $repo)
             @($projects.Name) | Should -Be @('Operator.IntegrationTests', 'Operator.Tests', 'Operator.X3Tests')
             @($projects.Runner | Sort-Object -Unique) | Should -Be @('mtp')
+            @($projects.RunnerDirectory | Sort-Object -Unique) | Should -Be @($repo)
+            # TUnit.Engine alone brings no TRX report: no runnable test project
+            New-Item -ItemType Directory -Force -Path (Join-Path $repo 'tests/Operator.EngineOnly') | Out-Null
+            Set-Content -Path (Join-Path $repo 'tests/Operator.EngineOnly/Operator.EngineOnly.csproj') -Value '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="TUnit.Engine" Version="1.0.0" /></ItemGroup></Project>'
+            @(Get-OctoTestProjects -repositoryPath $repo).Name | Should -Not -Contain 'Operator.EngineOnly'
+            # a global.json below the repository root decides for the projects below it, and dotnet starts there
+            Set-Content -Path (Join-Path $repo 'tests/Operator.X3Tests/global.json') -Value '{ "sdk": { "version": "10.0.100" } }'
+            $nested = Get-OctoTestProjects -repositoryPath $repo | Where-Object Name -eq 'Operator.X3Tests'
+            $nested.Runner | Should -Be 'vstest'
+            $nested.RunnerDirectory | Should -Be (Join-Path $repo 'tests/Operator.X3Tests')
             ($projects | Where-Object Name -eq 'Operator.Tests').Framework | Should -Be 'tunit'
             ($projects | Where-Object Name -eq 'Operator.IntegrationTests').Framework | Should -Be 'xunit3'
             ($projects | Where-Object Name -eq 'Operator.IntegrationTests').Docker | Should -BeTrue
@@ -823,6 +837,17 @@ Describe 'Invoke-OctoTestRun' {
             $script:Calls[0].Filter | Should -Be '(Category=Fast)&(FullyQualifiedName=Sample.Tests.OrderTests.Rejects_empty_order)'
             $script:Calls[0].NoBuild | Should -BeFalse
             $script:Calls[1].NoBuild | Should -BeTrue
+        }
+
+        It 'does not rerun with a filter the project cannot take, and keeps the last result' {
+            Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.IntegrationTests -lockPath $script:LockPath -Json | Out-Null
+            Reset-TestDotnet
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.IntegrationTests -rerunFailed -filter '/*/*/OrderTests/*' -lockPath $script:LockPath -Json)
+            $script:Calls.Count | Should -Be 0
+            $doc.data.success | Should -BeFalse
+            $doc.data.projects[0].state | Should -Be 'noMatch'
+            $doc.data.projects[0].note | Should -Match 'FullyQualifiedName~ClassName'
+            @((Get-Content (Join-Path $ws.Main 'logFiles/test-results/octo-sample-services/Sample.IntegrationTests/last-result.json') -Raw | ConvertFrom-Json).failedTests).Count | Should -Be 2
         }
 
         It 'refuses -rerunFailed without a previous result' {

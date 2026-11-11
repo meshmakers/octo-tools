@@ -259,7 +259,8 @@ Get-OctoTestLock
   xunit.v3 on Microsoft.Testing.Platform. A project that cannot take the form you gave is not started and says
   which form it takes.
 - **A filter over a whole repository.** Projects in which the filter matches nothing are reported as `noMatch`,
-  not as failures; the run fails only when nothing matched anywhere. Without a filter, a project that runs no test
+  not as failures; failed tests and errors fail the run as always, and so does a filter that matched nothing
+  anywhere. Without a filter, a project that runs no test
   at all fails the run. `-includePassed` adds the names of the passed tests (the first 200, `-maxPassed`).
 - `-EventsFile <file>` writes progress events (plan, lock wait, per project start and result, done) in the format of
   the build events, for octo-devstack.

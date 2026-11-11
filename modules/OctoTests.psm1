@@ -570,12 +570,13 @@ function Read-OctoTestProjectFile {
 function Test-OctoTestPackageSet {
     <#
         Do these package references make a project a test project? Microsoft.NET.Test.Sdk (VSTest), or a framework
-        that brings its own runner on Microsoft.Testing.Platform: TUnit, MSTest, or xunit.v3 in an executable
+        that brings its own runner on Microsoft.Testing.Platform: TUnit (the package that carries the engine and the TRX
+        report; TUnit.Engine alone does not count), MSTest, or xunit.v3 in an executable
         (-outputType Exe). octo-communication-operator's tests reference only TUnit - no Test.Sdk, no IsTestProject.
     #>
     param([string[]]$packages = @(), [string]$outputType = '')
     if ($packages -contains 'Microsoft.NET.Test.Sdk') { return $true }
-    if (@($packages | Where-Object { $_ -ieq 'TUnit' -or $_ -ieq 'TUnit.Engine' -or $_ -ieq 'MSTest' }).Count -gt 0) { return $true }
+    if (@($packages | Where-Object { $_ -ieq 'TUnit' -or $_ -ieq 'MSTest' }).Count -gt 0) { return $true }
     return ($outputType -ieq 'Exe' -and @($packages | Where-Object { $_ -match '^xunit\.v3($|\.)' }).Count -gt 0)
 }
 
@@ -586,21 +587,24 @@ function Get-OctoTestRunner {
         `dotnet test` then runs the test applications themselves and takes other arguments. Otherwise 'vstest'.
     #>
     param([Parameter(Mandatory = $true)] [string]$projectDirectory, [Parameter(Mandatory = $true)] [string]$repositoryRoot)
+    # Returns { Runner; Directory }: Directory is the folder of the global.json that decided (the repository root
+    # without one) - `dotnet test` must start there, because the CLI reads global.json from its current folder up.
     $directory = $projectDirectory
     while ($directory -and $directory.Length -ge $repositoryRoot.Length) {
         $file = Join-Path $directory 'global.json'
         if (Test-Path -LiteralPath $file -PathType Leaf) {
+            $runner = 'vstest'
             try {
                 $json = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable
-                if ($json -is [System.Collections.IDictionary] -and $json['test'] -is [System.Collections.IDictionary] -and [string]$json['test']['runner'] -ieq 'Microsoft.Testing.Platform') { return 'mtp' }
+                if ($json -is [System.Collections.IDictionary] -and $json['test'] -is [System.Collections.IDictionary] -and [string]$json['test']['runner'] -ieq 'Microsoft.Testing.Platform') { $runner = 'mtp' }
             }
             catch { Write-Warning "Cannot parse $file - the test runner counts as VSTest: $($_.Exception.Message)" }
-            return 'vstest'
+            return [pscustomobject]@{ Runner = $runner; Directory = $directory }
         }
         if ($directory -ieq $repositoryRoot) { break }
         $directory = Split-Path -Parent $directory
     }
-    return 'vstest'
+    return [pscustomobject]@{ Runner = 'vstest'; Directory = $repositoryRoot }
 }
 
 function Get-OctoTestProjects {
@@ -666,6 +670,7 @@ function Get-OctoTestProjects {
         }
 
         $name = [IO.Path]::GetFileNameWithoutExtension($file)
+        $runner = Get-OctoTestRunner -projectDirectory (Split-Path -Parent $file) -repositoryRoot $root
         $projects += [pscustomobject]@{
             Name              = $name
             Path              = $file
@@ -675,8 +680,10 @@ function Get-OctoTestProjects {
             Docker            = [bool]$dockerReason
             DockerReason      = $dockerReason
             # How `dotnet test` runs it (vstest | mtp) and which framework's filter and report options apply.
-            Runner            = Get-OctoTestRunner -projectDirectory (Split-Path -Parent $file) -repositoryRoot $root
-            Framework         = if (@($allPackages | Where-Object { $_ -ieq 'TUnit' -or $_ -ieq 'TUnit.Engine' }).Count -gt 0) { 'tunit' } elseif (@($allPackages | Where-Object { $_ -match '^xunit\.v3($|\.)' }).Count -gt 0) { 'xunit3' } else { 'other' }
+            Runner            = $runner.Runner
+            # Where `dotnet test` starts: the folder whose global.json selected the runner.
+            RunnerDirectory   = $runner.Directory
+            Framework         = if (@($allPackages | Where-Object { $_ -ieq 'TUnit' }).Count -gt 0) { 'tunit' } elseif (@($allPackages | Where-Object { $_ -match '^xunit\.v3($|\.)' }).Count -gt 0) { 'xunit3' } else { 'other' }
             ProjectReferences = @($references | ForEach-Object { [pscustomobject]@{ Path = $_; Directory = (Split-Path -Parent $_); AssemblyName = $(if ((& $read $_).AssemblyName) { (& $read $_).AssemblyName } else { [IO.Path]::GetFileNameWithoutExtension($_) }) } })
         }
     }
@@ -1086,8 +1093,9 @@ function Get-OctoTestFilterCalls {
     $names = @($failedNames | Where-Object { $_ } | Sort-Object -Unique)
     $calls = [System.Collections.Generic.List[object]]::new()
     if ($kind -eq 'expression') {
-        $combine = if ($mismatch) { '' } else { $filter }
-        foreach ($chunk in @(Get-OctoTestFilterChunks -names $names -filter $combine -maxLength $maxLength)) { $calls.Add((& $call $chunk @('--filter', $chunk))) }
+        # The rerun is combined with -filter here: a filter this runner cannot take matches nothing, also in a rerun.
+        if ($mismatch) { return [pscustomobject]@{ Calls = @(); Mismatch = $mismatch } }
+        foreach ($chunk in @(Get-OctoTestFilterChunks -names $names -filter $filter -maxLength $maxLength)) { $calls.Add((& $call $chunk @('--filter', $chunk))) }
     }
     elseif ($kind -eq 'treenode') {
         # <namespace>.<class>.<method>: one filter per class, its methods as alternatives.
@@ -1512,7 +1520,9 @@ function Invoke-OctoTestRun {
                 $rerunCount = @($failedNames | Sort-Object -Unique).Count
             }
             else {
-                $calls = @((Get-OctoTestFilterCalls -project $entry -filter $filter -failedNames $failedNames -maxLength $maxFilterLength).Calls)
+                $callPlan = Get-OctoTestFilterCalls -project $entry -filter $filter -failedNames $failedNames -maxLength $maxFilterLength
+                $calls = @($callPlan.Calls)
+                $noMatch = $callPlan.Mismatch
                 $rerunCount = @($failedNames | Sort-Object -Unique).Count
             }
         }
@@ -1847,8 +1857,9 @@ function Invoke-OctoTestRun {
                     $arguments += @($testCall.Arguments)
                     $arguments += $propertyArgs
                 }
-                "Invoke-OctoTestRun: dotnet $(Hide-OctoUrlCredentials ($arguments -join ' ')) (in $($target.RepoPath))" | Add-Content -LiteralPath $logFile
-                $callExit = Invoke-OctoDotnetTest -arguments $arguments -logFile $logFile -workingDirectory $target.RepoPath
+                $startIn = if ($item.Project.PSObject.Properties['RunnerDirectory'] -and $item.Project.RunnerDirectory) { $item.Project.RunnerDirectory } else { $target.RepoPath }
+                "Invoke-OctoTestRun: dotnet $(Hide-OctoUrlCredentials ($arguments -join ' ')) (in $startIn)" | Add-Content -LiteralPath $logFile
+                $callExit = Invoke-OctoDotnetTest -arguments $arguments -logFile $logFile -workingDirectory $startIn
                 # Microsoft.Testing.Platform: 8 = no test ran (a filter that matches nothing in this call) - judged below.
                 if ($mtp -and $callExit -eq 8) { $callExit = 0; $zeroTestCalls++ }
                 if ($callExit -ne 0 -and $exitCode -eq 0) { $exitCode = $callExit }
