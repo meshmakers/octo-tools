@@ -545,6 +545,12 @@ Describe 'Test projects of a repository' {
             $nested = Get-OctoTestProjects -repositoryPath $repo | Where-Object Name -eq 'Operator.X3Tests'
             $nested.Runner | Should -Be 'vstest'
             $nested.RunnerDirectory | Should -Be (Join-Path $repo 'tests/Operator.X3Tests')
+            # a global.json above the repository (the lane folder) decides for a repository without one; dotnet starts in the repository
+            Set-Content -Path (Join-Path (Split-Path -Parent $vstestRepo) 'global.json') -Value '{ "test": { "runner": "Microsoft.Testing.Platform" } }'
+            $below = @(Get-OctoTestProjects -repositoryPath $vstestRepo)
+            @($below.Runner | Sort-Object -Unique) | Should -Be @('mtp')
+            @($below.RunnerDirectory | Sort-Object -Unique) | Should -Be @($vstestRepo)
+            Remove-Item (Join-Path (Split-Path -Parent $vstestRepo) 'global.json')
             ($projects | Where-Object Name -eq 'Operator.Tests').Framework | Should -Be 'tunit'
             ($projects | Where-Object Name -eq 'Operator.IntegrationTests').Framework | Should -Be 'xunit3'
             ($projects | Where-Object Name -eq 'Operator.IntegrationTests').Docker | Should -BeTrue

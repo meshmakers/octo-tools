@@ -601,8 +601,10 @@ function Get-OctoTestRunner {
     param([Parameter(Mandatory = $true)] [string]$projectDirectory, [Parameter(Mandatory = $true)] [string]$repositoryRoot)
     # Returns { Runner; Directory }: Directory is the folder of the global.json that decided (the repository root
     # without one) - `dotnet test` must start there, because the CLI reads global.json from its current folder up.
+    # The search goes on above the repository (a global.json in the lane folder applies to every repository below it);
+    # dotnet then starts in the repository root, from where the CLI finds that file.
     $directory = $projectDirectory
-    while ($directory -and $directory.Length -ge $repositoryRoot.Length) {
+    while ($directory) {
         $file = Join-Path $directory 'global.json'
         if (Test-Path -LiteralPath $file -PathType Leaf) {
             $runner = 'vstest'
@@ -611,10 +613,12 @@ function Get-OctoTestRunner {
                 if ($json -is [System.Collections.IDictionary] -and $json['test'] -is [System.Collections.IDictionary] -and [string]$json['test']['runner'] -ieq 'Microsoft.Testing.Platform') { $runner = 'mtp' }
             }
             catch { Write-Warning "Cannot parse $file - the test runner counts as VSTest: $($_.Exception.Message)" }
-            return [pscustomobject]@{ Runner = $runner; Directory = $directory }
+            $inside = $directory.Length -ge $repositoryRoot.Length -and $directory.StartsWith($repositoryRoot, [StringComparison]::OrdinalIgnoreCase)
+            return [pscustomobject]@{ Runner = $runner; Directory = $(if ($inside) { $directory } else { $repositoryRoot }) }
         }
-        if ($directory -ieq $repositoryRoot) { break }
-        $directory = Split-Path -Parent $directory
+        $parent = Split-Path -Parent $directory
+        if (-not $parent -or $parent -eq $directory) { break }
+        $directory = $parent
     }
     return [pscustomobject]@{ Runner = 'vstest'; Directory = $repositoryRoot }
 }
