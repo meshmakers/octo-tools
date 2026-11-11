@@ -193,6 +193,50 @@ The logic is the script block of `octo-pipeline-templates/templates/steps/ck-syn
 rule the r* tag builds use to fill the public catalog), vendored verbatim as `modules/scripts/Sync-CkIntermediateVersions.ps1`;
 `tests/CkIntermediateSync.Tests.ps1` checks the copy when a templates checkout is found (`OCTO_PIPELINE_TEMPLATES_PATH`).
 
+# Running tests
+
+`Invoke-OctoTestRun` runs the tests of one repository of a lane or feature environment - all test projects, single
+ones, or a `dotnet test --filter` expression - and tells you which tests failed and why. `Invoke-BuildRange` and
+`Invoke-BuildEnvironment` only build (`-includeTests`) or compile (`-verifyTests`) the test projects; they never run
+them.
+
+```powershell
+# All test projects of a repository in a feature environment (or a lane: -branch branches/main)
+Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine
+
+# One project, one class
+Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine -project Engine.Tests -filter 'FullyQualifiedName~EnumTests'
+
+# Only what failed last time (repeat until it is green)
+Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine -rerunFailed
+
+# What would run, would it build, does it need the Docker lock?
+Invoke-OctoTestRun -branch branches/main -repo octo-asset-repo-services -WhatIf
+
+# Who is running Docker-heavy tests right now?
+Get-OctoTestLock
+```
+
+- **No full rebuild.** A project whose build is current runs with `--no-build`. Otherwise `dotnet test` builds it
+  incrementally first and the output says why (a source file changed, a referenced project or a lane package was
+  rebuilt, no build output). `-build Always` / `-build Never` override the check.
+- **Readable result.** The failed tests come first: full name, first line of the error message, first stack frame.
+  `-Json` returns per test project the totals, the duration, up to 50 failed tests (`-maxFailures`, `truncated`) and
+  the paths of the TRX files and the log. Everything is kept in
+  `<lane>/logFiles/test-results/<repo>/<project>/<run>/` (the newest 10 runs).
+- **Same isolation as the build.** The run uses the lane's package cache and feed; an in-place worktree of an
+  environment gets the environment's feed, cache and CK catalog. Feed credentials never appear on the command line or
+  in the output.
+- **Docker-heavy suites run one at a time on the machine.** A test project with a `Testcontainers` package reference
+  (its own or one of a project it references) runs under a machine-wide lock, so the containers of two sessions do
+  not starve each other and tests do not fail falsely. A second run waits (`-lockTimeoutSeconds`, default 30
+  minutes) and says who holds the lock; projects that need no Docker run first, without waiting. `Get-OctoTestLock`
+  shows the owner (pid, since when, which run). A lock whose owner process is gone is replaced by the next run;
+  `Remove-OctoTestLock` removes it at once - and refuses while the owner still runs. `-dockerLock Always` takes the
+  lock for a project the marker misses, `-dockerLock Never` skips it.
+- `-EventsFile <file>` writes progress events (plan, lock wait, per project start and result, done) in the format of
+  the build events, for octo-devstack.
+
 # Feature environments
 
 A feature environment is a small lane of its own at `<rootPath>/wt-<env>` for one work item - the lane folder of the

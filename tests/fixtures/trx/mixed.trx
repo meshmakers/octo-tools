@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Canned fixture for tests/OctoTests.Tests.ps1 (AB#8813): 2 passed, 2 failed (one of them a theory row), 1 skipped. -->
+<TestRun id="11111111-1111-1111-1111-111111111111" name="fixture" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Times creation="2026-11-11T08:00:00.0000000+00:00" queuing="2026-11-11T08:00:00.0000000+00:00" start="2026-11-11T08:00:00.0000000+00:00" finish="2026-11-11T08:00:12.5000000+00:00" />
+  <Results>
+    <UnitTestResult executionId="e1" testId="t1" testName="Sample.Tests.OrderTests.Creates_order" duration="00:00:00.0100000" outcome="Passed" />
+    <UnitTestResult executionId="e2" testId="t2" testName="Sample.Tests.OrderTests.Rejects_empty_order" duration="00:00:01.5000000" outcome="Failed">
+      <Output>
+        <ErrorInfo>
+          <Message>Expected order.State to be Rejected, but found Accepted.
+Second line of the message.</Message>
+          <StackTrace>   at Sample.Tests.OrderTests.Rejects_empty_order() in /src/tests/Sample.Tests/OrderTests.cs:line 42
+   at System.RuntimeMethodHandle.InvokeMethod(Object target)</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="e3" testId="t3" testName="Sample.Tests.PriceTests.Rounds(value: 1.005, expected: 1.01)" duration="00:00:00.0200000" outcome="Failed">
+      <Output>
+        <ErrorInfo>
+          <Message>Assert.Equal() Failure: Values differ</Message>
+          <StackTrace>   at Sample.Tests.PriceTests.Rounds(Decimal value, Decimal expected) in /src/tests/Sample.Tests/PriceTests.cs:line 17</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="e4" testId="t4" testName="Sample.Tests.PriceTests.Rounds(value: 2, expected: 2)" duration="00:00:00.0010000" outcome="Passed" />
+    <UnitTestResult executionId="e5" testId="t5" testName="Sample.Tests.OrderTests.Ships_order" duration="00:00:00" outcome="NotExecuted" />
+  </Results>
+  <TestDefinitions>
+    <UnitTest name="Sample.Tests.OrderTests.Creates_order" id="t1"><TestMethod className="Sample.Tests.OrderTests" name="Creates_order" /></UnitTest>
+    <UnitTest name="Sample.Tests.OrderTests.Rejects_empty_order" id="t2"><TestMethod className="Sample.Tests.OrderTests" name="Rejects_empty_order" /></UnitTest>
+    <UnitTest name="Sample.Tests.PriceTests.Rounds(value: 1.005, expected: 1.01)" id="t3"><TestMethod className="Sample.Tests.PriceTests" name="Sample.Tests.PriceTests.Rounds(value: 1.005, expected: 1.01)" /></UnitTest>
+    <UnitTest name="Sample.Tests.PriceTests.Rounds(value: 2, expected: 2)" id="t4"><TestMethod className="Sample.Tests.PriceTests" name="Sample.Tests.PriceTests.Rounds(value: 2, expected: 2)" /></UnitTest>
+    <UnitTest name="Sample.Tests.OrderTests.Ships_order" id="t5"><TestMethod className="Sample.Tests.OrderTests" name="Ships_order" /></UnitTest>
+  </TestDefinitions>
+  <ResultSummary outcome="Failed">
+    <Counters total="5" executed="4" passed="2" failed="2" error="0" timeout="0" aborted="0" inconclusive="0" passedButRunAborted="0" notRunnable="0" notExecuted="0" disconnected="0" warning="0" completed="0" inProgress="0" pending="0" />
+    <RunInfos>
+      <RunInfo computerName="fixture" outcome="Error" timestamp="2026-11-11T08:00:02.0000000+00:00">
+        <Text>[xUnit.net 00:00:01.14]     Sample.Tests.OrderTests.Rejects_empty_order [FAIL]</Text>
+      </RunInfo>
+    </RunInfos>
+  </ResultSummary>
+</TestRun>
