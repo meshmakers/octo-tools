@@ -351,6 +351,50 @@ Describe 'Filters for a rerun' {
     }
 }
 
+Describe 'Filter calls per runner (AB#8832)' {
+    It 'passes -filter in the filter language of the runner and reports a filter the runner cannot take' {
+        InModuleScope OctoTests {
+            $vstest = [pscustomobject]@{ Name = 'A.Tests'; Runner = 'vstest'; Framework = 'other' }
+            $tunit = [pscustomobject]@{ Name = 'B.Tests'; Runner = 'mtp'; Framework = 'tunit' }
+            $xunit = [pscustomobject]@{ Name = 'C.Tests'; Runner = 'mtp'; Framework = 'xunit3' }
+            $mstest = [pscustomobject]@{ Name = 'D.Tests'; Runner = 'mtp'; Framework = 'other' }
+
+            (Get-OctoTestFilterCalls -project $vstest).Calls[0].Arguments | Should -BeNullOrEmpty
+            (Get-OctoTestFilterCalls -project $vstest -filter 'FullyQualifiedName~Order').Calls[0].Arguments | Should -Be @('--filter', 'FullyQualifiedName~Order')
+            (Get-OctoTestFilterCalls -project $mstest -filter 'FullyQualifiedName~Order').Calls[0].Arguments | Should -Be @('--filter', 'FullyQualifiedName~Order')
+            (Get-OctoTestFilterCalls -project $tunit -filter '/*/*/OrderTests/*').Calls[0].Arguments | Should -Be @('--treenode-filter', '/*/*/OrderTests/*')
+            (Get-OctoTestFilterCalls -project $xunit -filter '/*/*/OrderTests/*').Calls[0].Arguments | Should -Be @('--filter-query', '/*/*/OrderTests/*')
+
+            $wrong = Get-OctoTestFilterCalls -project $tunit -filter 'FullyQualifiedName~Order'
+            @($wrong.Calls).Count | Should -Be 0
+            $wrong.Mismatch | Should -Match 'tree-node filter such as /\*/\*/ClassName/\*'
+            (Get-OctoTestFilterCalls -project $xunit -filter 'FullyQualifiedName~Order').Mismatch | Should -Match 'query filter'
+            (Get-OctoTestFilterCalls -project $vstest -filter '/*/*/OrderTests/*').Mismatch | Should -Match 'FullyQualifiedName~ClassName'
+        }
+    }
+
+    It 'reruns failed tests: clauses for VSTest, one tree-node filter per class for TUnit, --filter-method for xunit.v3' {
+        InModuleScope OctoTests {
+            $names = @('Ns.Orders.OrderTests.Fails', 'Ns.Orders.OrderTests.Rounds', 'Ns.Orders.PriceTests.Also_fails', 'Ns.Orders.OrderTests.Fails')
+            $vstest = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'A'; Runner = 'vstest'; Framework = 'other' }) -failedNames $names -filter 'Category=Fast'
+            @($vstest.Calls).Count | Should -Be 1
+            $vstest.Calls[0].Arguments[1] | Should -Be '(Category=Fast)&(FullyQualifiedName=Ns.Orders.OrderTests.Fails|FullyQualifiedName=Ns.Orders.OrderTests.Rounds|FullyQualifiedName=Ns.Orders.PriceTests.Also_fails)'
+
+            $tunit = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'B'; Runner = 'mtp'; Framework = 'tunit' }) -failedNames $names -filter 'FullyQualifiedName~Ignored'
+            @($tunit.Calls | ForEach-Object { $_.Arguments -join ' ' }) | Should -Be @(
+                '--treenode-filter /*/Ns.Orders/OrderTests/(Fails|Rounds)',
+                '--treenode-filter /*/Ns.Orders/PriceTests/(Also_fails)')
+            # split at the length limit
+            @((Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'B'; Runner = 'mtp'; Framework = 'tunit' }) -failedNames $names -maxLength 30).Calls).Count | Should -Be 3
+
+            $xunit = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'C'; Runner = 'mtp'; Framework = 'xunit3' }) -failedNames $names
+            @($xunit.Calls).Count | Should -Be 1
+            $xunit.Calls[0].Arguments | Should -Be @('--filter-method', 'Ns.Orders.OrderTests.Fails', '--filter-method', 'Ns.Orders.OrderTests.Rounds', '--filter-method', 'Ns.Orders.PriceTests.Also_fails')
+            @((Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'C'; Runner = 'mtp'; Framework = 'xunit3' }) -failedNames $names -maxLength 60).Calls).Count | Should -Be 3
+        }
+    }
+}
+
 Describe 'Test projects of a repository' {
     BeforeEach { $script:ws = New-TestWorkspace }
 
@@ -386,6 +430,33 @@ Describe 'Test projects of a repository' {
             $system = $projects | Where-Object Name -eq 'Sample.SystemTests'
             $system.Docker | Should -BeTrue
             $system.DockerReason | Should -Be 'PackageReference Testcontainers in Sample.TestHelpers.csproj'
+        }
+    }
+
+    It 'finds test projects of frameworks that bring their own runner, and tells how dotnet test runs them (AB#8832)' {
+        # octo-communication-operator: the test project references only TUnit - no Test.Sdk, no IsTestProject -
+        # and the repository's global.json selects Microsoft.Testing.Platform.
+        $repo = Join-Path $ws.Main 'octo-operator'
+        New-TestCsproj (Join-Path $repo 'src/Operator') 'Operator'
+        New-TestCsproj (Join-Path $repo 'tests/Operator.Tests') 'Operator.Tests' -packages 'Microsoft.Testing.Extensions.TrxReport', 'NSubstitute', 'TUnit' -projectReferences '..\..\src\Operator\Operator.csproj'
+        New-TestCsproj (Join-Path $repo 'tests/Operator.IntegrationTests') 'Operator.IntegrationTests' -packages 'Microsoft.NET.Test.Sdk', 'xunit.v3', 'Testcontainers.MongoDb' -isTestProject
+        # xunit.v3 in an executable is a test project, in a library (shared helpers) it is not
+        New-TestCsproj (Join-Path $repo 'tests/Operator.X3Tests') 'Operator.X3Tests' -packages 'xunit.v3'
+        (Get-Content (Join-Path $repo 'tests/Operator.X3Tests/Operator.X3Tests.csproj') -Raw).Replace('<PropertyGroup>', '<PropertyGroup><OutputType>Exe</OutputType>') | Set-Content (Join-Path $repo 'tests/Operator.X3Tests/Operator.X3Tests.csproj')
+        New-TestCsproj (Join-Path $repo 'tests/Operator.TestHelpers') 'Operator.TestHelpers' -packages 'xunit.v3.extensibility.core'
+        Set-Content -Path (Join-Path $repo 'global.json') -Value '{ "sdk": { "rollForward": "latestMinor" }, "test": { "runner": "Microsoft.Testing.Platform" } }'
+        InModuleScope OctoTests -Parameters @{ repo = $repo; vstestRepo = $ws.Repo } {
+            param($repo, $vstestRepo)
+            $projects = @(Get-OctoTestProjects -repositoryPath $repo)
+            @($projects.Name) | Should -Be @('Operator.IntegrationTests', 'Operator.Tests', 'Operator.X3Tests')
+            @($projects.Runner | Sort-Object -Unique) | Should -Be @('mtp')
+            ($projects | Where-Object Name -eq 'Operator.Tests').Framework | Should -Be 'tunit'
+            ($projects | Where-Object Name -eq 'Operator.IntegrationTests').Framework | Should -Be 'xunit3'
+            ($projects | Where-Object Name -eq 'Operator.IntegrationTests').Docker | Should -BeTrue
+            # a repository without that global.json setting runs on VSTest
+            @(Get-OctoTestProjects -repositoryPath $vstestRepo | ForEach-Object Runner | Sort-Object -Unique) | Should -Be @('vstest')
+            Set-Content -Path (Join-Path $vstestRepo 'global.json') -Value '{ "sdk": { "version": "10.0.100" } }'
+            @(Get-OctoTestProjects -repositoryPath $vstestRepo | ForEach-Object Runner | Sort-Object -Unique) | Should -Be @('vstest')
         }
     }
 
@@ -480,9 +551,12 @@ Describe 'Invoke-OctoTestRun' {
         # Never the developer's NuGet.Config.
         Mock -ModuleName OctoEnvironment Get-OctoUserNuGetConfigFile { Join-Path $TestDrive 'no-user-nuget.config' }
         Mock -ModuleName OctoTests Invoke-OctoDotnetTest {
-            $projectName = [IO.Path]::GetFileNameWithoutExtension($arguments[1])
+            $projectName = [IO.Path]::GetFileNameWithoutExtension($(if ($arguments[1] -eq '--project') { $arguments[2] } else { $arguments[1] }))
             $resultsDirectory = $arguments[[Array]::IndexOf($arguments, '--results-directory') + 1]
-            $logger = $arguments[[Array]::IndexOf($arguments, '--logger') + 1]
+            $loggerIndex = [Array]::IndexOf($arguments, '--logger')
+            $logger = if ($loggerIndex -ge 0) { $arguments[$loggerIndex + 1] } else { $null }
+            # the TRX file name: VSTest logger, or the report option of a Microsoft.Testing.Platform application
+            $trxName = if ($logger) { $logger -replace '^trx;LogFileName=', '' } else { $arguments[[Math]::Max([Array]::IndexOf($arguments, '--report-trx-filename'), [Array]::IndexOf($arguments, '--report-xunit-trx-filename')) + 1] }
             $filterIndex = [Array]::IndexOf($arguments, '--filter')
             $configIndex = [Array]::IndexOf($arguments, '-p:RestoreConfigFile')
             $restoreConfig = @($arguments | Where-Object { $_ -like '-p:RestoreConfigFile=*' }) | Select-Object -First 1
@@ -493,6 +567,7 @@ Describe 'Invoke-OctoTestRun' {
                     Filter            = if ($filterIndex -ge 0) { $arguments[$filterIndex + 1] } else { $null }
                     Logger            = $logger
                     LogFile           = $logFile
+                    WorkingDirectory  = $workingDirectory
                     NugetPackages     = $env:NUGET_PACKAGES
                     RestoreSources    = $env:RestoreSources
                     LockOwner         = if (Test-Path $script:LockPath) { (Get-Content $script:LockPath -Raw | ConvertFrom-Json) } else { $null }
@@ -501,7 +576,7 @@ Describe 'Invoke-OctoTestRun' {
                 })
             $behaviour = $script:Behaviour[$projectName]
             if ($behaviour.Trx) {
-                Copy-Item -Path (Join-Path $script:Fixtures $behaviour.Trx) -Destination (Join-Path $resultsDirectory ($logger -replace '^trx;LogFileName=', ''))
+                Copy-Item -Path (Join-Path $script:Fixtures $behaviour.Trx) -Destination (Join-Path $resultsDirectory $trxName)
             }
             if ($behaviour.Log) { Add-Content -LiteralPath $logFile -Value $behaviour.Log }
             return [int]$behaviour.ExitCode
@@ -675,7 +750,8 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.success | Should -BeFalse
             $doc.data.failedStep | Should -Be 'tests'
             $doc.data.error | Should -Match "the filter 'FullyQualifiedName~Nope' matches no test"
-            $doc.data.projects[0].state | Should -Be 'noTests'
+            $doc.data.projects[0].state | Should -Be 'noMatch'
+            $doc.data.projects[0].success | Should -BeTrue
             $doc.data.projects[0].note | Should -Be 'no test matched the filter'
         }
 
@@ -832,6 +908,144 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.error | Should -Match 'not part of environment feat-a'
             $doc.data.error | Should -Match '-branch branches/main'
             (Get-Doc (Invoke-OctoTestRun -env nope-env -repo octo-sample-services -lockPath $script:LockPath -Json -ErrorAction SilentlyContinue)).data.error | Should -Match 'Environment nope-env does not exist'
+        }
+    }
+
+    Context 'Microsoft.Testing.Platform, filters across projects and passed tests (AB#8832)' {
+        BeforeEach {
+            # A repository like octo-bot-services: global.json selects Microsoft.Testing.Platform, a TUnit unit test
+            # project and a TUnit project with Testcontainers.
+            $script:mtpRepo = Join-Path $ws.Main 'octo-mtp-services'
+            New-TestCsproj (Join-Path $mtpRepo 'src/Jobs') 'Jobs'
+            New-TestCsproj (Join-Path $mtpRepo 'tests/Jobs.Tests') 'Jobs.Tests' -packages 'TUnit'
+            New-TestCsproj (Join-Path $mtpRepo 'tests/Jobs.IntegrationTests') 'Jobs.IntegrationTests' -packages 'TUnit', 'Testcontainers.MongoDb' -isTestProject
+            Set-Content -Path (Join-Path $mtpRepo 'global.json') -Value '{ "test": { "runner": "Microsoft.Testing.Platform" } }'
+            Set-TestSourceTimes $mtpRepo $built.AddHours(-1)
+            Set-TestBuildOutput $mtpRepo 'Jobs.Tests' 'Jobs.Tests' $built
+            Set-TestBuildOutput $mtpRepo 'Jobs.IntegrationTests' 'Jobs.IntegrationTests' $built
+            $script:Behaviour['Jobs.Tests'] = @{ Trx = 'tunit-mixed.trx'; ExitCode = 2 }
+            $script:Behaviour['Jobs.IntegrationTests'] = @{ Trx = 'passed.trx'; ExitCode = 0 }
+        }
+
+        It 'runs a Microsoft.Testing.Platform project with dotnet test --project from the repository folder and reads its TRX' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -project Jobs.Tests -lockPath $script:LockPath -Json)
+            $call = $script:Calls[0]
+            $call.Arguments[0..2] | Should -Be @('test', '--project', (Join-Path $mtpRepo 'tests/Jobs.Tests/Jobs.Tests.csproj'))
+            ($call.Arguments -join ' ') | Should -Match ' -c DebugL --no-build --results-directory \S+ -- --report-trx --report-trx-filename results\.trx$'
+            $call.Arguments | Should -Not -Contain '-nodeReuse:false'
+            $call.Arguments | Should -Not -Contain '--logger'
+            # global.json decides the runner: dotnet must start in the repository
+            $call.WorkingDirectory | Should -Be $mtpRepo
+
+            $project = $doc.data.projects[0]
+            $project.runner | Should -Be 'mtp'
+            $project.state | Should -Be 'failed'
+            $project.total | Should -Be 6
+            $project.failed | Should -Be 3
+            @($project.failedTests.name) | Should -Be @('Mtp.Tests.Orders.OrderTests.Fails', 'Mtp.Tests.Orders.OrderTests.Rounds', 'Mtp.Tests.Orders.PriceTests.Also_fails')
+            $project.failedTests[1].displayName | Should -Be 'Rounds(1, 3)'
+            $project.failedTests[0].message | Should -Be 'AssertionException: Expected to be 2'
+            $project.failedTests[0].stackFrame | Should -Match 'Tests\.cs:line 5'
+            # the platform's echo of its exit code is no run error
+            @($project.errors).Count | Should -Be 0
+            # VSTest projects of another repository still get the VSTest call, also from their repository folder
+            Reset-TestDotnet
+            Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.UnitTests -lockPath $script:LockPath -Json | Out-Null
+            $script:Calls[0].Arguments[1] | Should -BeLike '*Sample.UnitTests.csproj'
+            $script:Calls[0].Arguments | Should -Contain '--logger'
+            $script:Calls[0].WorkingDirectory | Should -Be $ws.Repo
+        }
+
+        It 'reruns the failed tests of a TUnit project with one tree-node filter per class' {
+            Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -project Jobs.Tests -lockPath $script:LockPath -Json | Out-Null
+            Reset-TestDotnet
+            $script:Behaviour['Jobs.Tests'] = @{ Trx = 'passed.trx'; ExitCode = 0 }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -project Jobs.Tests -rerunFailed -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeTrue
+            $script:Calls.Count | Should -Be 2
+            ($script:Calls[0].Arguments -join ' ') | Should -Match ' -- --report-trx --report-trx-filename results-1\.trx --treenode-filter /\*/Mtp\.Tests\.Orders/OrderTests/\(Fails\|Rounds\)$'
+            ($script:Calls[1].Arguments -join ' ') | Should -Match ' --report-trx-filename results-2\.trx --treenode-filter /\*/Mtp\.Tests\.Orders/PriceTests/\(Also_fails\)$'
+            $doc.data.projects[0].rerunCount | Should -Be 3
+            @($doc.data.projects[0].filters) | Should -Be @('/*/Mtp.Tests.Orders/OrderTests/(Fails|Rounds)', '/*/Mtp.Tests.Orders/PriceTests/(Also_fails)')
+        }
+
+        It 'never reports a project green that ran no test without a filter (exit code 8 of the platform, or an empty report)' {
+            $script:Behaviour['Jobs.Tests'] = @{ Trx = 'empty.trx'; ExitCode = 8; Log = 'fixture: Zero tests ran' }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -project Jobs.Tests -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeFalse
+            $doc.data.failedStep | Should -Be 'tests'
+            $doc.data.failedProject | Should -Be 'Jobs.Tests'
+            $doc.data.projects[0].state | Should -Be 'noTests'
+            $doc.data.projects[0].success | Should -BeFalse
+            $doc.data.projects[0].note | Should -Be 'the project ran no test although no filter was given'
+            $global:LASTEXITCODE | Should -Be 1
+
+            # the same for a VSTest project whose run wrote no result at all
+            Reset-TestDotnet
+            $script:Behaviour['Sample.UnitTests'] = @{ Trx = $null; ExitCode = 0 }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.UnitTests -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeFalse
+            $doc.data.projects[0].state | Should -Be 'noTests'
+        }
+
+        It 'with a filter, a project without a match is noMatch, not a failure - the run is green when another project matched' {
+            $script:Behaviour['Jobs.Tests'] = @{ Trx = 'empty.trx'; ExitCode = 8 }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -filter '/*/*/OrderTests/*' -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeTrue
+            $doc.data.failedStep | Should -BeNullOrEmpty
+            $unit = $doc.data.projects | Where-Object project -eq 'Jobs.Tests'
+            $unit.state | Should -Be 'noMatch'
+            $unit.success | Should -BeTrue
+            $unit.note | Should -Be 'no test matched the filter'
+            ($doc.data.projects | Where-Object project -eq 'Jobs.IntegrationTests').state | Should -Be 'passed'
+            ($script:Calls[0].Arguments -join ' ') | Should -Match ' --treenode-filter /\*/\*/OrderTests/\*$'
+
+            # nothing matched anywhere: the run fails and names the projects
+            Reset-TestDotnet
+            $script:Behaviour['Jobs.Tests'] = @{ Trx = 'empty.trx'; ExitCode = 8 }
+            $script:Behaviour['Jobs.IntegrationTests'] = @{ Trx = 'empty.trx'; ExitCode = 8 }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -filter '/*/*/Nope/*' -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeFalse
+            $doc.data.error | Should -Match "the filter '/\*/\*/Nope/\*' matches no test in Jobs\.Tests, Jobs\.IntegrationTests"
+            @($doc.data.projects.state | Sort-Object -Unique) | Should -Be @('noMatch')
+        }
+
+        It 'does not start a project whose runner cannot take the form of the filter, and says which form it takes' {
+            $events = Join-Path $TestDrive 'events/mismatch.jsonl'
+            if (Test-Path $events) { Remove-Item $events }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -filter 'FullyQualifiedName~Order' -lockPath $script:LockPath -EventsFile $events -Json)
+            $script:Calls.Count | Should -Be 0
+            $doc.data.success | Should -BeFalse
+            $doc.data.failedStep | Should -Be 'tests'
+            $doc.data.error | Should -Match 'tree-node filter such as /\*/\*/ClassName/\*'
+            @($doc.data.projects.state | Sort-Object -Unique) | Should -Be @('noMatch')
+            $doc.data.projects[0].note | Should -Match 'TUnit on Microsoft\.Testing\.Platform'
+            # no lock for a Docker project that is not run
+            $doc.data.lock.required | Should -BeFalse
+            @(Get-Content $events | ForEach-Object { ($_ | ConvertFrom-Json).event }) | Should -Be @('plan', 'done')
+
+            $plan = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -filter 'FullyQualifiedName~Order' -lockPath $script:LockPath -WhatIf -Json)
+            $plan.data.projects[0].runner | Should -Be 'mtp'
+            $plan.data.projects[0].noMatch | Should -Match 'tree-node filter'
+        }
+
+        It 'lists the passed tests on request, bounded by -maxPassed' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.IntegrationTests -includePassed -lockPath $script:LockPath -Json)
+            $project = $doc.data.projects[0]
+            @($project.passedTests) | Should -Be @('Sample.Tests.OrderTests.Creates_order', 'Sample.Tests.PriceTests.Rounds')
+            $project.passedTruncated | Should -BeFalse
+
+            Reset-TestDotnet
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.IntegrationTests -includePassed -maxPassed 1 -lockPath $script:LockPath -Json)
+            @($doc.data.projects[0].passedTests) | Should -Be @('Sample.Tests.OrderTests.Creates_order')
+            $doc.data.projects[0].passedTruncated | Should -BeTrue
+            $doc.data.projects[0].passed | Should -Be 2
+
+            # not asked for: no names
+            Reset-TestDotnet
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.IntegrationTests -lockPath $script:LockPath -Json)
+            @($doc.data.projects[0].passedTests).Count | Should -Be 0
+            $doc.data.projects[0].passedTruncated | Should -BeFalse
         }
     }
 

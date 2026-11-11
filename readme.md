@@ -234,6 +234,16 @@ Get-OctoTestLock
   shows the owner (pid, since when, which run). A lock whose owner process is gone is replaced by the next run;
   `Remove-OctoTestLock` removes it at once - and refuses while the owner still runs. `-dockerLock Always` takes the
   lock for a project the marker misses, `-dockerLock Never` skips it.
+- **Every kind of test project.** VSTest projects (xunit with `Microsoft.NET.Test.Sdk`) and projects on
+  Microsoft.Testing.Platform (TUnit, xunit.v3 in a repository whose `global.json` selects that runner, e.g.
+  octo-bot-services or octo-communication-operator) both run; the result says which runner a project used. `-filter`
+  is passed on in the project's own filter language: an expression such as `FullyQualifiedName~OrderTests` for
+  VSTest, a tree filter such as `/*/*/OrderTests/*` (namespace / class / method after the assembly) for TUnit and
+  xunit.v3 on Microsoft.Testing.Platform. A project that cannot take the form you gave is not started and says
+  which form it takes.
+- **A filter over a whole repository.** Projects in which the filter matches nothing are reported as `noMatch`,
+  not as failures; the run fails only when nothing matched anywhere. Without a filter, a project that runs no test
+  at all fails the run. `-includePassed` adds the names of the passed tests (the first 200, `-maxPassed`).
 - `-EventsFile <file>` writes progress events (plan, lock wait, per project start and result, done) in the format of
   the build events, for octo-devstack.
 
