@@ -1143,6 +1143,23 @@ Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
         $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-d' -repo octo-cli -role consumer -Json -WarningAction SilentlyContinue)
         (Invoke-TestGit (Join-Path $ws.Root 'wt-env-d/octo-cli') rev-parse HEAD) | Should -Be $upstream
 
+        # origin renamed its default branch: the stale local origin/HEAD (main) must not decide
+        $common = Join-Path $ws.Main 'mm-common'
+        $bare = Join-Path $TestDrive 'origins/mm-common.git'
+        Invoke-TestGit $common push -q origin 'main:trunk' | Out-Null
+        Invoke-TestGit $bare symbolic-ref HEAD refs/heads/trunk | Out-Null
+        $clone = Join-Path $TestDrive 'clones/mm-common-trunk'
+        Invoke-TestGit $TestDrive clone -q $bare $clone | Out-Null
+        Set-Content -Path (Join-Path $clone 'trunk.txt') -Value 'trunk'
+        Invoke-TestGit $clone add -A | Out-Null
+        Invoke-TestGit $clone commit -q -m 'on trunk' | Out-Null
+        Invoke-TestGit $clone push -q origin trunk | Out-Null
+        Invoke-TestGit $common remote set-head origin main | Out-Null
+        Invoke-TestGit $common checkout -q --detach | Out-Null
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-d' -repo mm-common -role consumer -Json -WarningAction SilentlyContinue)
+        $doc.data.added[0].baseRef | Should -Be 'origin/trunk'
+        (Invoke-TestGit (Join-Path $ws.Root 'wt-env-d/mm-common') rev-parse HEAD) | Should -Be (Invoke-TestGit $clone rev-parse HEAD)
+
         $identity = Join-Path $ws.Main 'octo-identity-services'
         Invoke-TestGit $identity remote set-url origin (Join-Path $TestDrive 'origins/gone.git') | Out-Null
         $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-d' -repo octo-identity-services -role consumer -Json -WarningAction SilentlyContinue)
@@ -1163,6 +1180,12 @@ Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
         @($doc.data.feedSnapshot.staleProducers[0].consumedBy) | Should -Be @('octo-sdk')
         ($doc.data.feedSnapshot.hints -join ' ') | Should -Match 'Invoke-BuildEnvironment -env env-f rebuilds them'
         ($doc.data.feedSnapshot.hints -join ' ') | Should -Match 'Add-OctoEnvironmentRepo -env env-f -repo octo-construction-kit-engine -role consumer'
+
+        # a later Add-OctoEnvironmentRepo of a repository in step with origin still reports the earlier one
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-f' -repo octo-identity-services -role consumer -Json)
+        @($doc.data.baseDrift).Count | Should -Be 0
+        @($doc.data.feedSnapshot.rebuildInEnvironment) | Should -Be @('octo-sdk')
+        @($doc.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
 
         # in step with origin, or -localBase: nothing to say
         $doc = Get-Doc (New-OctoEnvironment -env 'env-g' -repos octo-cli -branchName 'feature/g' -Json)
@@ -1278,6 +1301,16 @@ Describe 'New-OctoEnvironment is atomic (AB#8815)' {
         $doc.data.success | Should -BeTrue
         @($doc.data.manifest.repos.name) | Should -Be @('mm-common', 'octo-construction-kit-engine', 'octo-sdk')
         foreach ($name in @('mm-common', 'octo-construction-kit-engine', 'octo-sdk')) { (Invoke-TestGit (Join-Path $envPath $name) rev-parse --abbrev-ref HEAD) | Should -Be 'feature/x' }
+    }
+
+    It 'rolls back when the feed snapshot report fails (it is part of the transaction)' {
+        Mock -ModuleName OctoEnvironment Get-OctoEnvironmentFeedSnapshotReport { throw 'project file unreadable' }
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-x' -repos octo-sdk -branchName 'feature/z' -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'project file unreadable'
+        $doc.data.rolledBack.folder | Should -BeTrue
+        Test-Path $envPath | Should -BeFalse
+        (& git -C $sdk rev-parse --verify --quiet 'refs/heads/feature/z') | Should -BeNullOrEmpty
     }
 
     It 'rolls back when seeding the feed fails, and when a consumer of -addAffected fails' {

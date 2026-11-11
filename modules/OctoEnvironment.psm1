@@ -192,8 +192,8 @@ function Resolve-OctoEnvironmentBase {
     <#
         The commit a new environment worktree starts from, for one main checkout.
         Default: the upstream of the checkout's current branch (branches/main: origin/main), fetched first; a checkout
-        without an upstream (detached HEAD, local-only branch) uses origin's default branch (origin/HEAD, else
-        origin/main, origin/master). -localBase, or no usable remote ref: the checkout's HEAD.
+        without an upstream (detached HEAD, local-only branch) uses origin's default branch (asked from origin; when
+        origin is unreachable the local origin/HEAD, else origin/main, origin/master). -localBase, or no usable remote ref: the checkout's HEAD.
         Returns { Commit; Ref ('origin/main' | 'HEAD'); LocalCommit; Ahead; Behind (local HEAD against Commit);
         Fetched; Warnings }.
     #>
@@ -210,12 +210,20 @@ function Resolve-OctoEnvironmentBase {
     if ($upstream.ExitCode -eq 0) { $remoteRef = [string]($upstream.Output | Select-Object -Last 1) }
     if (-not $remoteRef -or $remoteRef -notmatch '^[^/]+/.+') {
         $remoteRef = $null
-        $originHead = Invoke-OctoEnvironmentGit -path $source -arguments @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')
-        $candidates = @()
-        if ($originHead.ExitCode -eq 0) { $candidates += [string]($originHead.Output | Select-Object -Last 1) }
-        $candidates += 'origin/main', 'origin/master'
-        foreach ($candidate in $candidates) {
-            if ((Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$candidate")).ExitCode -eq 0) { $remoteRef = $candidate; break }
+        # Ask origin for its default branch: the local origin/HEAD is set at clone time and goes stale when the
+        # default branch is renamed. The tracking ref may not exist yet - the fetch below creates it.
+        $symref = Invoke-OctoEnvironmentGit -path $source -arguments @('ls-remote', '--symref', 'origin', 'HEAD')
+        $current = @($symref.Output | ForEach-Object { if ($_ -match '^ref:\s+refs/heads/(\S+)\s+HEAD$') { $Matches[1] } }) | Select-Object -First 1
+        if ($symref.ExitCode -eq 0 -and $current) { $remoteRef = "origin/$current" }
+        else {
+            # origin unreachable: what the checkout last knew (the failed fetch below warns).
+            $originHead = Invoke-OctoEnvironmentGit -path $source -arguments @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')
+            $candidates = @()
+            if ($originHead.ExitCode -eq 0) { $candidates += [string]($originHead.Output | Select-Object -Last 1) }
+            $candidates += 'origin/main', 'origin/master'
+            foreach ($candidate in $candidates) {
+                if ((Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$candidate")).ExitCode -eq 0) { $remoteRef = $candidate; break }
+            }
         }
     }
     if (-not $remoteRef) {
@@ -340,21 +348,28 @@ function Get-OctoEnvironmentFeedSnapshotReport {
     <#
         The environment's feed is a snapshot of the base lane's packages, built there from the LOCAL checkouts. With
         worktrees based on origin (the default) two things can be out of step:
-          - rebuildInEnvironment: environment repositories whose worktree is newer than the base lane checkout
-            ($drift rows with behind > 0). Their seeded packages are older than their sources; Invoke-BuildEnvironment
+          - rebuildInEnvironment: environment repositories whose worktree is newer than the base lane checkout. Their seeded packages are older than their sources; Invoke-BuildEnvironment
             rebuilds them into the environment feed.
           - staleProducers: libraries OUTSIDE the environment that an environment repository consumes (transitively)
             and whose base lane checkout is behind its upstream (fetched here; a failed fetch uses the ref as last fetched). Their
             seeded packages can lack what the newer consumers need (CS0246); nothing in the environment rebuilds them.
+        Both are derived from the manifest (every repository of the environment, not only the ones a call added):
+        a worktree is newer when its baseCommit has commits the base lane checkout's HEAD lacks.
         Returns { rebuildInEnvironment; staleProducers = @({ repo; behind; upstream; consumedBy }); hints }.
     #>
     param(
         [Parameter(Mandatory = $true)] [string]$env,
         [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$manifest,
-        [Parameter(Mandatory = $true)] [string]$basePath,
-        [object[]]$drift = @()
+        [Parameter(Mandatory = $true)] [string]$basePath
     )
-    $rebuild = @($drift | Where-Object { $_['behind'] -gt 0 -and -not (Test-OctoEnvironmentToolRepo -repo $_['repo']) } | ForEach-Object { $_['repo'] })
+    $rebuild = @()
+    foreach ($repo in $manifest['repos']) {
+        if (-not $repo['baseCommit'] -or (Test-OctoEnvironmentToolRepo -repo $repo['name'])) { continue }
+        $source = Get-OctoEnvironmentRepoSource -repo ([string]$repo['name']) -basePath $basePath
+        if (-not $source) { continue }
+        $newer = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--count', "HEAD..$($repo['baseCommit'])")
+        if ($newer.ExitCode -eq 0 -and [int]($newer.Output | Select-Object -Last 1) -gt 0) { $rebuild += [string]$repo['name'] }
+    }
     $stale = @()
     if ($rebuild.Count -gt 0) {
         $inEnvironment = @($manifest['repos'] | ForEach-Object { $_['name'] })
@@ -1229,6 +1244,7 @@ function New-OctoEnvironment {
     $drift = @()
     $addedConsumers = @()
     $sync = $null
+    $feedSnapshot = $null
     $completed = $false
     $rolledBack = $null
     try {
@@ -1261,6 +1277,8 @@ function New-OctoEnvironment {
                 if ($added.Base.Commit -ne $added.Base.LocalCommit) { $drift += ConvertTo-OctoBaseDriftRow -added $added }
             }
         }
+        # Part of the transaction: it reads project files and runs git; a failure here rolls back like any other.
+        $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath
         $completed = $true
     }
     catch { $errors += $_.Exception.Message }
@@ -1282,7 +1300,6 @@ function New-OctoEnvironment {
     }
 
     $toolRepos = @($manifest['repos'] | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { $_['name'] })
-    $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath -drift $drift
     $global:LASTEXITCODE = 0
     if ($Json) {
         Write-OctoJson -Command 'New-OctoEnvironment' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
@@ -1514,7 +1531,12 @@ function Add-OctoEnvironmentRepo {
         }
         catch { $errors += $_.Exception.Message }
     }
-    $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath -drift $drift
+    # The worktrees are added and recorded by now; a report that cannot be made is a warning, not a failed add.
+    try { $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath }
+    catch {
+        $warnings += "The feed snapshot report is not available: $($_.Exception.Message)"
+        $feedSnapshot = [ordered]@{ rebuildInEnvironment = @(); staleProducers = @(); hints = @() }
+    }
     $toolRepos = @($added | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { $_['name'] })
     $success = $errors.Count -eq 0
     $global:LASTEXITCODE = if ($success) { 0 } else { 1 }
