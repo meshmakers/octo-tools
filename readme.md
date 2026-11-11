@@ -298,6 +298,7 @@ Invoke-BuildEnvironment -env ab8625-enum-null -DryRun                          #
 Invoke-BuildEnvironment -env ab8625-enum-null -repos construction-kit-engine,sdk   # only these
 Invoke-BuildEnvironment -env ab8625-enum-null -skip octo-docs                  # all but these
 Invoke-BuildEnvironment -env ab8625-enum-null -buildUnchanged                  # everything, changed or not
+Invoke-BuildEnvironment -env ab8625-enum-null -maxParallel 1                   # one repository after the other
 
 # 4. main moved on? Take its new packages and catalog entries (yours keep winning)
 Invoke-BuildEnvironment -env ab8625-enum-null -syncMain        # or Sync-OctoEnvironment -env ab8625-enum-null
@@ -313,7 +314,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
   when its HEAD differs, a warning names the repository and how far it is behind/ahead (`-Json`: `baseDrift`).
   `-localBase` (`New-OctoEnvironment`, `Add-OctoEnvironmentRepo`) starts from the local checkout's commit instead.
   An existing feature branch is checked out as it is. The manifest records per repository `baseCommit` (the commit
-  the worktree started from) and `baseRef` (`origin/main`, `HEAD`, or the existing branch).
+  the worktree started from) and `baseRef` (the remote ref it started from, e.g. `origin/main`; `HEAD`; or the existing branch).
 - **Seeded packages come from the local base lane.** The feed is a copy of `branches/main/nuget`, built there from
   the local checkouts. The output (`-Json`: `feedSnapshot`) says which environment repositories are newer than
   those packages - `Invoke-BuildEnvironment` rebuilds them - and which libraries outside the environment are behind
@@ -337,7 +338,14 @@ Remove-OctoEnvironment -env ab8625-enum-null
   narrow the build by hand - a warning names a left-out repository that sits between a rebuilt library and a rebuilt
   consumer (stale packages). `-buildUnchanged` builds everything; use it after a change a stamp cannot see (a CK
   model consumed only through the local catalog, npm packages, `Octo.User.props`, an SDK update). `-Json` and the
-  events file say per repository `built` or `skipped` and why. Repositories are built one after the other.
+  events file say per repository `built` or `skipped` and why.
+- **Independent repositories build at the same time** (`-maxParallel`, default 2; `-maxParallel 1` builds one after
+  the other). A repository starts when every environment repository it depends on is finished, each in its own
+  child process with its own environment; packages are copied into the feed by rename, so a restore never sees half
+  a package. Repositories with a CK model, and `build.ps1` / frontend / zenon repositories, do not overlap. After a
+  failure nothing new starts and the running repositories finish. Measured with real builds of a throw-away
+  workspace (one library, six independent consumers, one repository on top): 24.7 s sequential, 20-22 s with 2,
+  17-18 s with 4; the gain grows with the number of independent repositories.
 - **Snapshot, not live.** Main's packages and catalogs are copied when the environment is created and refreshed only
   on request (`Sync-OctoEnvironment`, `-syncMain`). Packages built in the environment always win; catalog indexes
   changed on both sides are merged. Main's feed is never added as a second NuGet source.

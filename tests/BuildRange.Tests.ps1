@@ -444,7 +444,7 @@ Describe 'Copy-NuGetPackages / Copy-AllNuGetPackages' {
     BeforeEach { $script:fake = New-FakeCheckout }
 
     It 'Copy-NuGetPackages reports a package it could not copy and does not count it' {
-        Mock -ModuleName Copy-NuGetPackages Copy-Item { throw 'disk full' }
+        Mock -ModuleName Copy-NuGetPackages Copy-OctoPackageFileAtomic { throw 'disk full' }
         $json = Copy-NuGetPackages -directory (Join-Path $fake.Checkout 'octo-sdk') -branch main -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $json.data.success | Should -BeFalse
         $json.data.copiedCount | Should -Be 0

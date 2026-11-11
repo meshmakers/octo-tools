@@ -250,7 +250,57 @@ Describe 'A consumer app and the frontend libraries it builds against' {
         @((& $run).data.repositories.status) | Should -Be @('skipped', 'skipped')
         @($script:built) | Should -Be @('octo-frontend-libraries', 'my-app', 'octo-frontend-libraries', 'my-app')
     }
+    It 'a parallel run (-maxParallel) treats apps like the sequential run: alone, in this process, after the libraries, librariesBuilt included' {
+        $lane = New-TestLane
+        $environment = New-TestEnvironment $lane.Root 'ab7-apps' @('octo-frontend-libraries', 'my-app', 'other-app')
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/build.ps1') -Value '# builds the libraries'
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/index.ts') -Value 'export const a = 1;'
+        foreach ($repo in 'octo-frontend-libraries', 'my-app', 'other-app') { Initialize-TestGitRepo (Join-Path $environment $repo) }
+        $script:built = [System.Collections.Generic.List[string]]::new()
+        $script:overlap = 0
+        $script:inBuild = 0
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses { @() }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo {
+            $script:inBuild++; $script:overlap = [Math]::Max($script:overlap, $script:inBuild)
+            $script:built.Add($entry.Name)
+            $script:inBuild--
+            [pscustomobject]@{ Success = $true; LogFile = $null }
+        }
+        # No child process may be started for a build.ps1 repository.
+        Mock -ModuleName Invoke-BuildRange Start-OctoRepoBuildJob { throw "a child process was started for $($entry.Name)" }
+        # The dependency information Invoke-BuildEnvironment passes: no package dependencies between these repositories.
+        $inputs = @{ 'octo-frontend-libraries' = @{ packages = @(); dependsOn = @() }; 'my-app' = @{ packages = @(); dependsOn = @() }; 'other-app' = @{ packages = @(); dependsOn = @() } }
+        $run = { param([int]$maxParallel) Get-Doc (Invoke-BuildRange -branch 'wt-ab7-apps' -from octo-frontend-libraries -to other-app -excludeFrontend $false -skipUnchanged -repoInputs $inputs -maxParallel $maxParallel -Json) }
+        $summary = { param($doc) @($doc.data.repositories | ForEach-Object { "$($_.repo):$($_.status):$($_.reason)" }) }
+
+        $first = & $run 3
+        $first.data.parallel | Should -BeTrue
+        @($first.data.repositories.status) | Should -Be @('built', 'built', 'built')
+        @($script:built) | Should -Be @('octo-frontend-libraries', 'my-app', 'other-app')     # the libraries first, the apps in manifest order
+        $script:overlap | Should -Be 1
+        @((& $run 3).data.repositories.status) | Should -Be @('skipped', 'skipped', 'skipped')
+
+        # The libraries change: in the same run both unchanged apps are built again, because the libraries were built before them.
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/index.ts') -Value 'export const a = 2;'
+        $script:built.Clear()
+        $parallel = & $summary (& $run 3)
+        $parallel | Should -Be @('octo-frontend-libraries:built:sourcesChanged', 'my-app:built:librariesBuilt', 'other-app:built:librariesBuilt')
+        @($script:built) | Should -Be @('octo-frontend-libraries', 'my-app', 'other-app')
+
+        # Exactly what the sequential run does with the same change.
+        Set-Content -Path (Join-Path $environment 'octo-frontend-libraries/index.ts') -Value 'export const a = 3;'
+        $script:built.Clear()
+        $sequential = & $summary (& $run 1)
+        $sequential | Should -Be $parallel
+        @($script:built) | Should -Be @('octo-frontend-libraries', 'my-app', 'other-app')
+
+        # The plan marks them as building alone.
+        $plan = Get-Doc (Invoke-BuildRange -branch 'wt-ab7-apps' -from octo-frontend-libraries -to other-app -excludeFrontend $false -skipUnchanged -repoInputs $inputs -maxParallel 3 -WhatIf -Json)
+        @($plan.data.repositories.exclusive | Select-Object -Unique) | Should -Be @($true)
+        Should -Invoke -ModuleName Invoke-BuildRange Start-OctoRepoBuildJob -Times 0
+    }
 }
+
 
 Describe 'Invoke-OctoTestRun for an app' {
     BeforeEach {

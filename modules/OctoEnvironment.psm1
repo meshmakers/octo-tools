@@ -153,10 +153,22 @@ function Invoke-OctoEnvironmentGit {
     # Runs git in a folder; returns { ExitCode; Output (string[]) }. Never throws on a non-zero exit.
     param(
         [Parameter(Mandatory = $true)] [string]$path,
-        [Parameter(Mandatory = $true)] [string[]]$arguments
+        [Parameter(Mandatory = $true)] [string[]]$arguments,
+        # Network calls (ls-remote, fetch): git must fail instead of asking for credentials on the terminal - an
+        # agent or octo-devstack run would hang on the prompt. Configured credential helpers keep working.
+        [switch]$noPrompt
     )
-    $output = @(& git -C $path @arguments 2>&1 | ForEach-Object { "$_" })
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    if (-not $noPrompt) {
+        $output = @(& git -C $path @arguments 2>&1 | ForEach-Object { "$_" })
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    }
+    $previous = $env:GIT_TERMINAL_PROMPT
+    $env:GIT_TERMINAL_PROMPT = '0'
+    try {
+        $output = @(& git -C $path @arguments 2>&1 | ForEach-Object { "$_" })
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    }
+    finally { $env:GIT_TERMINAL_PROMPT = $previous }
 }
 
 function Get-OctoEnvironmentRepoSource {
@@ -212,7 +224,7 @@ function Resolve-OctoEnvironmentBase {
         $remoteRef = $null
         # Ask origin for its default branch: the local origin/HEAD is set at clone time and goes stale when the
         # default branch is renamed. The tracking ref may not exist yet - the fetch below creates it.
-        $symref = Invoke-OctoEnvironmentGit -path $source -arguments @('ls-remote', '--symref', 'origin', 'HEAD')
+        $symref = Invoke-OctoEnvironmentGit -path $source -arguments @('ls-remote', '--symref', 'origin', 'HEAD') -noPrompt
         $current = @($symref.Output | ForEach-Object { if ($_ -match '^ref:\s+refs/heads/(\S+)\s+HEAD$') { $Matches[1] } }) | Select-Object -First 1
         if ($symref.ExitCode -eq 0 -and $current) { $remoteRef = "origin/$current" }
         else {
@@ -231,7 +243,9 @@ function Resolve-OctoEnvironmentBase {
         return [pscustomobject]$result
     }
     $remote, $branch = $remoteRef -split '/', 2
-    $fetch = Invoke-OctoEnvironmentGit -path $source -arguments @('fetch', '--quiet', $remote, $branch)
+    # Explicit destination: a single-branch clone has no fetch refspec for another branch, and a plain
+    # `git fetch <remote> <branch>` would then leave no remote-tracking ref behind.
+    $fetch = Invoke-OctoEnvironmentGit -path $source -arguments @('fetch', '--quiet', $remote, "+refs/heads/${branch}:refs/remotes/$remote/$branch") -noPrompt
     $result.Fetched = $fetch.ExitCode -eq 0
     if (-not $result.Fetched) { $result.Warnings += "${repo}: git fetch $remote $branch failed - $remoteRef is used as last fetched." }
     $commit = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$remoteRef^{commit}")
@@ -317,7 +331,7 @@ function Add-OctoEnvironmentWorktree {
             $mergeBase = Invoke-OctoEnvironmentGit -path $source -arguments @('merge-base', $existing, $baseCommit)
             if ($mergeBase.ExitCode -eq 0 -and $mergeBase.Output) { $baseCommit = [string]($mergeBase.Output | Select-Object -Last 1) }
             # The branch decides where the worktree stands, not the base: no drift to report.
-            $base = [pscustomobject]@{ Commit = $baseCommit; Ref = $branchName; LocalCommit = $base.LocalCommit; Ahead = 0; Behind = 0; Fetched = $base.Fetched; Warnings = @() }
+            $base = [pscustomobject]@{ Commit = $baseCommit; Ref = $branchName; LocalCommit = $baseCommit; Ahead = 0; Behind = 0; Fetched = $base.Fetched; Warnings = @() }
         }
         else {
             # --no-track: the feature branch must not get origin/main as its upstream (a plain push would target it).
@@ -405,7 +419,7 @@ function Get-OctoEnvironmentFeedSnapshotReport {
             if (-not $consumedBy.ContainsKey($entry.Name)) { continue }
             $upstream = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
             $ref = if ($upstream.ExitCode -eq 0) { [string]($upstream.Output | Select-Object -Last 1) } else { 'origin/main' }
-            if ($ref -match '^([^/]+)/(.+)$') { [void](Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('fetch', '--quiet', $Matches[1], $Matches[2])) }
+            if ($ref -match '^([^/]+)/(.+)$') { [void](Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('fetch', '--quiet', $Matches[1], $Matches[2]) -noPrompt) }
             $count = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-list', '--count', "HEAD..refs/remotes/$ref")
             if ($count.ExitCode -ne 0) { continue }
             $behind = [int]($count.Output | Select-Object -Last 1)
@@ -1259,7 +1273,8 @@ function Get-OctoEnvironmentAffected {
     without an upstream uses origin's default branch. When the local checkout's HEAD differs, a warning names the
     repository and how far it is behind/ahead (-Json: baseDrift). -localBase keeps the old behaviour (the local
     checkout's HEAD). The manifest records baseCommit (the commit the worktree started from; for an existing branch
-    its merge base with the base) and baseRef (origin/main, HEAD, or the existing branch).
+    its merge base with the base) and baseRef (the remote ref it started from, e.g. origin/main; HEAD; or the
+    existing branch).
     The feed is seeded from the base lane's packages, which were built from the LOCAL checkouts: the output says which
     environment repositories are newer than those packages (Invoke-BuildEnvironment rebuilds them) and which
     libraries outside the environment are behind their upstream in the base lane, with what to do (-Json: feedSnapshot).
@@ -1953,11 +1968,16 @@ function Remove-OctoEnvironment {
     A left-out repository between a library that is built and a consumer that is built (or one that changed itself)
     means stale packages: a warning names it (-Json: staleWarnings).
     -Json reports per repository status (built | skipped | failed), reason (unchanged, notSelected, excluded,
-    nothingToBuild, neverBuilt, sourcesChanged, packagesChanged, testsNotCompiled, noBuildOutput, noGitState, always)
+    nothingToBuild, neverBuilt, sourcesChanged, packagesChanged, propertiesChanged, testsNotCompiled, noBuildOutput,
+    noGitState, always)
     and detail, plus selection and builtCount / skippedCount; -DryRun reports the prediction as action (build | skip)
     and reason (also upstreamBuilt). The events file gets a repoSkipped event for a repository that is not built and
     status / reason on repoDone; the plan event carries the prediction.
-    Repositories are built one after the other; building independent repositories in parallel is not implemented.
+    Repositories that do not depend on each other build at the same time, at most -maxParallel (default 2; 1 = one
+    after the other, the run as it was before): a repository starts when every environment repository it depends
+    on in the package graph is finished, each in its own child process with its own environment. Repositories with
+    a CK model, and build.ps1 / frontend / zenon repositories, do not overlap (see Invoke-BuildRange -maxParallel).
+    After a failure nothing new starts and the running repositories finish. -Json: parallel, maxParallel, failedRepos.
     Developer tools in the environment (octo-tools, octo-devstack) are not built; -Json lists them in
     environment.toolRepos, and an environment that holds only tools succeeds with nothing to build.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
@@ -1979,6 +1999,7 @@ function Invoke-BuildEnvironment {
         [string[]]$repos = @(),
         [string[]]$skip = @(),
         [switch]$buildUnchanged,
+        [ValidateRange(1, 16)] [int]$maxParallel = 2,
         [switch]$syncMain,
         [switch]$verifyTests,
         [switch]$includeTests,
@@ -2033,6 +2054,10 @@ function Invoke-BuildEnvironment {
     try { $order = @(Get-OctoBuildOrder -branchRootPath $environmentPath -excludeFrontend $false -excludeAdditional $false -additionalRepos $external) }
     catch { & $fail $_.Exception.Message; return }
     if ($order.Count -eq 0) {
+        # Nothing to build is a result only when the manifest names nothing but tools; a repository whose worktree is
+        # gone (deleted, moved) must not turn into "only developer tools".
+        $missing = @($manifest['repos'] | Where-Object { -not (Test-OctoEnvironmentToolRepo -repo $_['name']) } | ForEach-Object { [string]$_['name'] })
+        if ($missing.Count -gt 0) { & $fail "Environment $env holds no repository to build: the worktree(s) of $($missing -join ', ') are missing in $environmentPath."; return }
         if ($toolRepos.Count -eq 0) { & $fail "Environment $env holds no repository."; return }
         # Only developer tools: nothing to build is a result, not a failure.
         $global:LASTEXITCODE = 0
@@ -2109,7 +2134,7 @@ function Invoke-BuildEnvironment {
         $changed = @{}
         foreach ($entry in $order) {
             $known = if ($repoInputs.ContainsKey($entry.Name)) { [string[]]@($repoInputs[$entry.Name]['packages']) } else { $null }
-            $inputs = Get-OctoRepoBuildInputs -path $entry.Path -feedPath $environmentFeed -packageIds $known
+            $inputs = Get-OctoRepoBuildInputs -path $entry.Path -feedPath $environmentFeed -packageIds $known -msbuildProperties $perRepo[$entry.Name]
             $changed[$entry.Name] = Compare-OctoBuildStamp -stamp (Read-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name) -inputs $inputs -configuration 'DebugL' -tests $stampTests
         }
         $staleWarnings = @(Get-OctoEnvironmentStaleWarnings -order $orderNames -selection $selection -upstream $upstream -changed $changed -buildUnchanged:$buildUnchanged)
@@ -2123,6 +2148,7 @@ function Invoke-BuildEnvironment {
         excludeFrontend = $false
         EventsCommand   = 'Invoke-BuildEnvironment'
         recordStamps    = $true
+        maxParallel     = $maxParallel
         skipUnchanged   = -not $buildUnchanged
         repoInputs      = $repoInputs
     }

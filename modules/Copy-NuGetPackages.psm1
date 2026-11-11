@@ -98,7 +98,7 @@ function Copy-NuGetPackages
                 }
                 if (-not $Json) { Write-Host "Copy $file" -ForegroundColor Green }
                 try {
-                    Copy-Item -Path $file -Destination $branchNugetPath -Force -ErrorAction Stop
+                    Copy-OctoPackageFileAtomic -source $file.FullName -targetDirectory $branchNugetPath
                 }
                 catch {
                     # A package that did not land must not count as copied, and the result must say so.
@@ -122,6 +122,36 @@ function Copy-NuGetPackages
         # Typed (FullyQualifiedErrorId OctoPackageCopyFailed): Invoke-BuildAll stops the run on exactly this failure.
         $exception = [System.IO.IOException]::new("Copy-NuGetPackages: $($copyErrors.Count) package(s) not copied to ${branchNugetPath}: $($copyErrors -join '; ')")
         throw [System.Management.Automation.ErrorRecord]::new($exception, 'OctoPackageCopyFailed', [System.Management.Automation.ErrorCategory]::WriteError, $branchNugetPath)
+    }
+}
+
+function Copy-OctoPackageFileAtomic {
+    <#
+    .SYNOPSIS
+        Copies a package into a feed folder so that a concurrent restore never sees half a file (AB#8814): the
+        bytes go to a temporary name in the same folder (no .nupkg extension - NuGet does not list it), then the
+        file is renamed onto <name>.nupkg, which replaces an older copy in one step. Throws when it fails; the
+        temporary file is removed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$source,
+        [Parameter(Mandatory = $true)] [string]$targetDirectory
+    )
+    $target = Join-Path $targetDirectory (Split-Path -Leaf $source)
+    $temporary = Join-Path $targetDirectory (".{0}.{1}.{2}.tmp" -f (Split-Path -Leaf $source), $PID, [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        [IO.File]::Copy($source, $temporary, $true)
+        # Windows refuses the rename while a restore has the old package open; that passes within moments.
+        for ($attempt = 1; ; $attempt++) {
+            try { [IO.File]::Move($temporary, $target, $true); break }
+            catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+                if ($attempt -ge 10) { throw }
+                Start-Sleep -Milliseconds 200
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
 }
 

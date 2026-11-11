@@ -465,6 +465,169 @@ function Invoke-OctoBuildRangeTests {
     return [pscustomobject]@{ Success = ($exitCode -eq 0); Skipped = $false; LogFile = $logFile; ExitCode = $exitCode }
 }
 
+# ---------------------------------------------------------------------------------------------------------------
+# Parallel runs (AB#8814): one child pwsh per repository
+# ---------------------------------------------------------------------------------------------------------------
+
+function Test-OctoRepoHasCkModel {
+    # A ckModel.yaml below <repo>/src: the build of this repository publishes a CK model into the lane's local
+    # catalog (and Sync-OctoCkIntermediateVersions writes there for it). bin/obj/node_modules are not entered.
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $src = Join-Path $path 'src'
+    if (-not (Test-Path -LiteralPath $src -PathType Container)) { return $false }
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($src)
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
+        try {
+            if ([IO.File]::Exists((Join-Path $directory 'ckModel.yaml'))) { return $true }
+            foreach ($child in [IO.Directory]::EnumerateDirectories($directory)) {
+                if (@('bin', 'obj', 'node_modules', '.git') -contains [IO.Path]::GetFileName($child)) { continue }
+                if (([IO.File]::GetAttributes($child) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                $stack.Push($child)
+            }
+        }
+        catch [System.UnauthorizedAccessException] { continue }
+        catch [System.IO.IOException] { continue }
+    }
+    return $false
+}
+
+function Write-OctoJobFile {
+    # Atomic: written under a temporary name in the same folder, then renamed - a reader never sees half a file.
+    param([Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string]$text)
+    $temporary = "$path.$PID.tmp"
+    [IO.File]::WriteAllText($temporary, $text, [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($temporary, $path, $true)
+}
+
+function Invoke-OctoBuildRangeRepoStep {
+    <#
+    .SYNOPSIS
+        The build step of one repository inside its child process (see scripts/Invoke-BuildRangeRepoWorker.ps1):
+        sets the request's environment in this process, builds (Invoke-OctoBuildRangeRepo), compiles the test
+        projects when asked (Invoke-OctoBuildRangeTests) and writes the result file. Not for interactive use.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$requestFile)
+    $request = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($name in @($request['environment'].Keys)) { [Environment]::SetEnvironmentVariable([string]$name, [string]$request['environment'][$name]) }
+    if ($request['rootPath']) { $global:rootPath = [string]$request['rootPath'] }
+    $entry = [pscustomobject]$request['entry']
+    $properties = @{}
+    foreach ($key in @($request['msbuildProperties'].Keys)) { $properties[[string]$key] = $request['msbuildProperties'][$key] }
+    $result = [ordered]@{ success = $false; logFile = $null; buildSeconds = 0.0; testSeconds = 0.0; tests = $null; error = $null }
+    $stage = 'build'
+    try {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration ([string]$request['configuration']) -msbuildProperties $properties -Json
+        $watch.Stop()
+        $result.success = [bool]$build.Success
+        $result.logFile = $build.LogFile
+        $result.buildSeconds = $watch.Elapsed.TotalSeconds
+        if ($build.Success -and $request['verifyTests']) {
+            $stage = 'tests'
+            Write-OctoJobFile -path ([string]$request['phaseFile']) -text 'tests'
+            $watch.Restart()
+            $tests = Invoke-OctoBuildRangeTests -entry $entry -configuration ([string]$request['configuration']) -msbuildProperties $properties -Json
+            $watch.Stop()
+            $result.testSeconds = $watch.Elapsed.TotalSeconds
+            $result.tests = [ordered]@{ success = [bool]$tests.Success; skipped = [bool]$tests.Skipped; logFile = $tests.LogFile }
+        }
+    }
+    catch {
+        # A throw is a failure of the phase it happened in - never a repository that passes for built and verified.
+        $result.error = $_.Exception.Message
+        if ($stage -eq 'tests') { $result.tests = [ordered]@{ success = $false; skipped = $false; logFile = $result.logFile } }
+        else { $result.success = $false }
+    }
+    Write-OctoJobFile -path ([string]$request['resultFile']) -text (ConvertTo-Json -InputObject $result -Depth 5)
+}
+
+function Start-OctoRepoBuildJob {
+    <#
+    .SYNOPSIS
+        Starts the build of one repository in its own child pwsh and returns the job handle
+        { Name; Process; ResultFile; PhaseFile; WorkerLog }. The child's environment is $environment on top of
+        what this process has; nothing is set in this process.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [object]$entry,
+        [Parameter(Mandatory = $true)] [string]$configuration,
+        [hashtable]$msbuildProperties = @{},
+        [switch]$verifyTests,
+        [System.Collections.IDictionary]$environment = @{},
+        [Parameter(Mandatory = $true)] [string]$workDirectory
+    )
+    $base = Join-Path $workDirectory $entry.Name
+    $request = [ordered]@{
+        rootPath          = [string](Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue)
+        configuration     = $configuration
+        verifyTests       = [bool]$verifyTests
+        environment       = $environment
+        msbuildProperties = $msbuildProperties
+        resultFile        = "$base.result.json"
+        phaseFile         = "$base.phase"
+        entry             = [ordered]@{ Name = $entry.Name; Path = $entry.Path; Mode = $entry.Mode; Target = $entry.Target; Solution = $entry.Solution; Projects = @($entry.Projects); TestProjects = @($entry.TestProjects) }
+    }
+    # The request can carry feed settings: it lives in the run's owner-only temporary folder and is deleted with it.
+    [IO.File]::WriteAllText("$base.request.json", (ConvertTo-Json -InputObject $request -Depth 6), [Text.UTF8Encoding]::new($false))
+    $worker = Join-Path $PSScriptRoot 'scripts/Invoke-BuildRangeRepoWorker.ps1'
+    $pwsh = [Environment]::ProcessPath
+    if (-not $pwsh -or (Split-Path -Leaf $pwsh) -notmatch '^pwsh') { $pwsh = 'pwsh' }
+    # Start-Process joins the arguments with spaces and quotes nothing: quote the paths (a checkout or a temporary
+    # folder with a space in its name).
+    $process = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-NonInteractive', '-File', "`"$worker`"", '-RequestFile', "`"$base.request.json`"") `
+        -RedirectStandardOutput "$base.worker.log" -RedirectStandardError "$base.worker.err.log" -PassThru -NoNewWindow
+    [void]$process.Handle   # keeps the exit state readable after the process is gone
+    return [pscustomobject]@{ Name = $entry.Name; RepoPath = $entry.Path; Process = $process; ResultFile = "$base.result.json"; PhaseFile = "$base.phase"; WorkerLog = "$base.worker.err.log" }
+}
+
+function Get-OctoRepoBuildJobState {
+    <#
+    .SYNOPSIS
+        { Done; Phase (build|tests); Build ({ Success; LogFile }); Tests ($null | { Success; Skipped; LogFile });
+        BuildSeconds; TestSeconds } of a job started by Start-OctoRepoBuildJob. A child that ended without a
+        result file is a failed build whose log is the child's error output.
+    #>
+    param([Parameter(Mandatory = $true)] $job)
+    $state = [ordered]@{ Done = $false; Phase = 'build'; Build = $null; Tests = $null; BuildSeconds = 0.0; TestSeconds = 0.0 }
+    if (Test-Path -LiteralPath $job.PhaseFile) { $state.Phase = 'tests' }
+    if (-not $job.Process.HasExited) { return [pscustomobject]$state }
+    $state.Done = $true
+    if (Test-Path -LiteralPath $job.ResultFile) {
+        $result = Get-Content -LiteralPath $job.ResultFile -Raw | ConvertFrom-Json
+        $state.Build = [pscustomobject]@{ Success = [bool]$result.success; LogFile = $result.logFile }
+        if ($result.error) { Write-Warning "$($job.Name): $($result.error)" }
+        if ($null -ne $result.tests) { $state.Tests = [pscustomobject]@{ Success = [bool]$result.tests.success; Skipped = [bool]$result.tests.skipped; LogFile = $result.tests.logFile } }
+        $state.BuildSeconds = [double]$result.buildSeconds
+        $state.TestSeconds = [double]$result.testSeconds
+    }
+    else {
+        # The child's own output lives in the run's temporary folder, which is deleted at the end: keep the diagnostic
+        # in the repository's build log (ignored by git like every Invoke-Build.log).
+        $logFile = $job.WorkerLog
+        try {
+            $repoLog = Join-Path $job.RepoPath 'Invoke-Build.log'
+            $exitCode = try { $job.Process.ExitCode } catch { $null }
+            $lines = @("Invoke-BuildRange: the build process of $($job.Name) ended without a result (exit code $exitCode).")
+            foreach ($file in @($job.WorkerLog, ($job.WorkerLog -replace '\.err\.log$', '.log'))) {
+                if (Test-Path -LiteralPath $file) { $lines += @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue) }
+            }
+            Add-Content -LiteralPath $repoLog -Value $lines -ErrorAction Stop
+            $logFile = $repoLog
+        }
+        catch { }
+        $state.Build = [pscustomobject]@{ Success = $false; LogFile = $logFile }
+    }
+    return [pscustomobject]$state
+}
+
+function Stop-OctoRepoBuildJob {
+    # Kills the child and everything it started (dotnet, MSBuild nodes). Never throws.
+    param([Parameter(Mandatory = $true)] $job)
+    try { if ($job.Process -and -not $job.Process.HasExited) { $job.Process.Kill($true) } } catch { }
+}
+
 function Format-OctoDuration {
     param([TimeSpan]$duration)
     if ($duration.TotalMinutes -ge 1) {
@@ -739,6 +902,26 @@ function Write-OctoBuildRangePlan {
     plan and are reported as skipped (status "skipped", event repoSkipped); nothing of them is checked, built,
     copied or purged and their stamp is left alone. Used by Invoke-BuildEnvironment -repos / -skip.
 
+.PARAMETER maxParallel
+    AB#8814: how many repositories build at the same time. 1 (default) is the sequential run. With more, a
+    repository starts as soon as every repository of the range it depends on is finished - built, tested, its
+    packages copied into the feed and purged from the package cache - and a slot is free:
+      - dependencies: -repoInputs.<repo>.dependsOn (Invoke-BuildEnvironment passes the transitive package graph);
+        a repository without that entry depends on every repository before it in the range, so a plain
+        Invoke-BuildRange -maxParallel 2 without -repoInputs still builds one after the other;
+      - each repository builds in its own child pwsh (scripts/Invoke-BuildRangeRepoWorker.ps1) that sets its own
+        environment (NUGET_PACKAGES, MSBUILDDISABLENODEREUSE, the repository's RestoreSources and
+        UseSharedCompilation=false), so nothing bleeds between two builds; log: <repo>/Invoke-Build.log as always;
+      - this process alone copies packages (temporary name + rename, a restore never sees half a nupkg), purges
+        the package cache, writes build stamps and the events file - one after the other;
+      - repositories with a CK model (a ckModel.yaml below src/) never build at the same time and keep their
+        build order: the CK publish into <lane>/.octo/local-catalog and the intermediate-version sync stay serial;
+      - build.ps1, frontend and zenon repositories build alone (their dependencies are not in the package graph);
+      - after a failure nothing new starts; repositories that are running finish (packages, stamp, repoDone), the
+        rest is reported as not built. failedRepo is the first failure, failedRepos lists all.
+    Events: index is the start order (1..count) and repoDone repeats the index of its repoStart; plan and the
+    -Json document carry parallel / maxParallel, plan.repos[] and -WhatIf repositories[] carry dependsOn.
+
 .PARAMETER EventsFile
     Append build progress events to this file while the run is going (one JSON object per line,
     see Write-OctoBuildEvent): plan, then per repository repoStart, phase (build, tests, packages,
@@ -801,6 +984,7 @@ function Invoke-BuildRange {
         [switch]$recordStamps,
         [hashtable]$repoInputs = @{},
         [hashtable]$skipRepos = @{},
+        [ValidateRange(1, 16)] [int]$maxParallel = 1,
         [string]$EventsFile = '',
         [string]$EventsCommand = 'Invoke-BuildRange',
         [switch]$Json
@@ -922,6 +1106,7 @@ function Invoke-OctoBuildRangeCore {
         [switch]$recordStamps,
         [hashtable]$repoInputs = @{},
         [hashtable]$skipRepos = @{},
+        [int]$maxParallel = 1,
         [hashtable]$events,
         [switch]$Json
     )
@@ -1108,7 +1293,7 @@ function Invoke-OctoBuildRangeCore {
         param($entry)
         $known = $null
         foreach ($key in @($repoInputs.Keys)) { if ([string]$key -ieq $entry.Name -and $repoInputs[$key].Contains('packages')) { $known = [string[]]@($repoInputs[$key]['packages']) } }
-        Get-OctoRepoBuildInputs -path $entry.Path -feedPath $nugetTarget -packageIds $known -ownPackageIds @($entry.PackageIds)
+        Get-OctoRepoBuildInputs -path $entry.Path -feedPath $nugetTarget -packageIds $known -ownPackageIds @($entry.PackageIds) -msbuildProperties $entry.MsBuildProperties
     }
     # { Action build|skip; Reason; Detail; Inputs } for one repository, as things are now.
     $decide = {
@@ -1150,7 +1335,21 @@ function Invoke-OctoBuildRangeCore {
         if ($decision.Action -eq 'build') { $predictedBuild.Add($entry.Name) }
         $entry | Add-Member -NotePropertyName Decision -NotePropertyValue $decision -Force
     }
-    $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and -not $skipMap.ContainsKey($_.Name) }))
+    # Scheduling facts (-maxParallel): what a repository waits for. Without -repoInputs.dependsOn: everything before it.
+    $parallel = $maxParallel -gt 1
+    $planNames = @($plan | ForEach-Object { $_.Name })
+    for ($i = 0; $i -lt $plan.Count; $i++) {
+        $entry = $plan[$i]
+        $dependsOn = $null
+        foreach ($key in @($repoInputs.Keys)) { if ([string]$key -ieq $entry.Name -and $repoInputs[$key].Contains('dependsOn')) { $dependsOn = @($repoInputs[$key]['dependsOn'] | Where-Object { $planNames -contains $_ -and $_ -ine $entry.Name }) } }
+        if ($null -eq $dependsOn) { $dependsOn = @($planNames | Select-Object -First $i) }
+        $entry | Add-Member -NotePropertyName DependsOn -NotePropertyValue @($dependsOn) -Force
+        $entry | Add-Member -NotePropertyName Exclusive -NotePropertyValue ($entry.Mode -in @('script', 'frontend', 'zenon')) -Force
+        $entry | Add-Member -NotePropertyName CkWriter -NotePropertyValue ($parallel -and $entry.Mode -eq 'dotnet' -and (Test-OctoRepoHasCkModel -path $entry.Path)) -Force
+    }
+    # Only repositories that are going to be built: a run that skips everything replaces no output and must not
+    # refuse (or, with -stopServices, stop) running services. The prediction counts a consumer of a rebuilt library as built.
+    $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and $_.Decision.Action -eq 'build' }))
     # Purge of the lane's package caches: DebugL, never for a private feed.
     $purgeCaches = $purgeEnabled -and -not $privateFeed
     $staleCache = @()
@@ -1167,12 +1366,14 @@ function Invoke-OctoBuildRangeCore {
                     packageCaches    = @($globalPackagesPath)
                     verifyTests      = $verify
                     skipUnchanged    = [bool]$skipUnchangedEnabled
+                    parallel         = $parallel
+                    maxParallel      = $maxParallel
                     configuration    = $configuration
                     nugetPath        = $nugetTarget
                     feedPath         = if ($privateFeed) { $nugetTarget } else { $null }
                     repoPaths        = $repoPathsReport
                     repositories     = @($plan | ForEach-Object {
-                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes); action = $_.Decision.Action; reason = $_.Decision.Reason; detail = $_.Decision.Detail }
+                            [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes); action = $_.Decision.Action; reason = $_.Decision.Reason; detail = $_.Decision.Detail; dependsOn = @($_.DependsOn); exclusive = [bool]($_.Exclusive -or $_.CkWriter) }
                         })
                     runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
                     msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
@@ -1196,7 +1397,7 @@ function Invoke-OctoBuildRangeCore {
             $deadline = [DateTime]::UtcNow.AddSeconds(120)
             do {
                 Start-Sleep -Seconds 2
-                $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' }))
+                $runningProcesses = @(Get-OctoRunningRepoProcesses -repos @($plan | Where-Object { $_.Mode -ne 'none' -and $_.Decision.Action -eq 'build' }))
             } while ($runningProcesses.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
             if ($runningProcesses.Count -gt 0) {
                 & $fail "Processes still running after Stop-Octo: $(($runningProcesses | ForEach-Object { "$($_.Repo) (pid $($_.Pid))" }) -join ', ')"
@@ -1219,7 +1420,7 @@ function Invoke-OctoBuildRangeCore {
 
     $repoCount = $plan.Count
     # action/reason are the prediction made before the run; repoDone / repoSkipped say what happened.
-    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.Name; mode = $_.Mode; action = $_.Decision.Action; reason = $_.Decision.Reason } }); count = $repoCount })
+    & $emit 'plan' ([ordered]@{ repos = @($plan | ForEach-Object { [ordered]@{ repo = $_.Name; mode = $_.Mode; action = $_.Decision.Action; reason = $_.Decision.Reason; dependsOn = @($_.DependsOn) } }); count = $repoCount; parallel = $parallel; maxParallel = $maxParallel })
     if ($privateFeed -and !(Test-Path -LiteralPath $nugetTarget)) {
         New-Item -ItemType Directory -Force -Path $nugetTarget | Out-Null
     }
@@ -1263,8 +1464,213 @@ function Invoke-OctoBuildRangeCore {
             })
         $events.RepoDone = $true
     }
+    # A stamp records the feed packages a repository consumes. While the package cache holds another build of one of
+    # them (reported above, not purged), the build may have used that one: no stamp, the next run builds again.
+    $staleIds = @(if (-not $purgeStaleCache) { $staleCache | ForEach-Object { ([string]$_.PackageId).ToLowerInvariant() } })
+    $mayStamp = {
+        param($decision)
+        if ($null -eq $decision.Inputs -or $decision.Inputs.Source.Problem) { return $false }
+        foreach ($id in @($decision.Inputs.Packages.Keys)) { if ($staleIds -contains $id) { return $false } }
+        return $true
+    }
     $repoIndex = 0
+    $failedNames = @()
     try {
+    if ($parallel) {
+        # AB#8814 - see -maxParallel. This process schedules, the children build; everything that writes shared
+        # state of the lane (feed, package cache, stamps, events, the CK sync) happens here, one step at a time.
+        $workDirectory = [IO.Directory]::CreateTempSubdirectory('octo-buildrange-').FullName
+        $status = @{}
+        foreach ($name in $planNames) { $status[$name] = 'pending' }
+        $running = [System.Collections.Generic.List[object]]::new()
+        $childEnvironment = [ordered]@{}
+        foreach ($name in @($runEnvironment.Keys)) { $childEnvironment[$name] = [string]$runEnvironment[$name] }
+        # The compiler server is left as the sequential run has it (shared, the SDK default): UseSharedCompilation=false
+        # in the children made every build about three times slower in real builds, and the server is built for
+        # concurrent clients. A caller that wants it off passes -msbuildProperties @{ UseSharedCompilation = 'false' }.
+        $isReady = {
+            param([int]$position)
+            $entry = $plan[$position]
+            foreach ($name in $entry.DependsOn) { if ($status[$name] -ne 'finished') { return $false } }
+            for ($j = 0; $j -lt $position; $j++) {
+                $earlier = $plan[$j]
+                if ($status[$earlier.Name] -eq 'finished') { continue }
+                # Builds alone: nothing starts past an unfinished build.ps1/frontend/zenon repository, and such a
+                # repository waits for everything before it. CK repositories keep their order among themselves.
+                if ($earlier.Exclusive -or $entry.Exclusive) { return $false }
+                if ($entry.CkWriter -and $earlier.CkWriter) { return $false }
+            }
+            if ($entry.Exclusive -and $running.Count -gt 0) { return $false }
+            return $true
+        }
+        # Everything after the build step of one repository: package copy, cache purge, stamp, result, repoDone.
+        $finishRepo = {
+            param($slot, $build, $tests, [TimeSpan]$buildDuration, [TimeSpan]$testDuration)
+            $entry = $slot.Entry
+            $result = [ordered]@{
+                repo = $entry.Name; success = [bool]$build.Success; status = $(if ($build.Success) { 'built' } else { 'failed' })
+                reason = $slot.Decision.Reason; detail = $slot.Decision.Detail
+                buildDuration = $buildDuration; packageDuration = [TimeSpan]::Zero; testDuration = $testDuration
+                testsCompiled = if ($null -ne $tests -and -not $tests.Skipped) { [bool]$tests.Success } else { $null }
+                copiedCount = 0; purged = @(); staleSkipped = @(); logFile = $build.LogFile; msbuildProperties = @($entry.PropertyArgs)
+            }
+            $step = $null
+            if (-not $build.Success) { $step = 'build' }
+            elseif ($null -ne $tests -and -not $tests.Success) { $result.success = $false; $result.status = 'failed'; $result.logFile = $tests.LogFile; $step = 'tests' }
+            elseif ($purgeEnabled) {
+                & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'packages' })
+                $packageWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                $copyArgs = @{ directory = $entry.Path; branch = $branch; onlyChanged = $true; Json = $true }
+                if ($privateFeed) { $copyArgs['nugetPath'] = $nugetTarget }
+                $copy = Copy-NuGetPackages @copyArgs | ConvertFrom-Json
+                $copiedFiles = @($copy.data.files | Where-Object { $_ })
+                $result.copiedCount = $copiedFiles.Count
+                $copyFailed = ($null -eq $copy -or $copy.data.success -ne $true)
+                if ($purgeCaches -and $copiedFiles.Count -gt 0) {
+                    # Only what this repository produced. No running build restores these packages: a repository
+                    # that consumes them depends on this one and starts only after this block.
+                    if (-not $copyFailed) { & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'purge' }) }
+                    $packageIds = @($copiedFiles | ForEach-Object { Get-OctoPackageIdFromFile -fileName $_ })
+                    $result.purged = @(Remove-OctoGlobalPackageVersions -directories @(Get-OctoGlobalPackageDirectories -packageIds $packageIds -globalPackagesPath $globalPackagesPath))
+                }
+                if ($copyFailed) {
+                    $result.success = $false; $result.status = 'failed'; $step = 'packages'
+                    Write-Error "Copy-NuGetPackages failed for $($entry.Name)$(if ($copy.data.error) { ": $($copy.data.error)" })"
+                }
+                else { $result.staleSkipped = @($copy.data.skipped | Where-Object { $_ } | ForEach-Object { "$($_.file) ($($_.reason))" } | Sort-Object -Unique) }
+                $packageWatch.Stop()
+                $result.packageDuration = $packageWatch.Elapsed
+            }
+            if ($result.success -and $stampsEnabled -and (& $mayStamp $slot.Decision)) {
+                Write-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name -inputs $slot.Decision.Inputs -configuration $configuration -tests $stampTests
+            }
+            $results.Add($result)
+            & $emitRepoDone $result $slot.Index $slot.Watch.Elapsed
+            $slot.Reported = $true
+            if ($result.success) {
+                $status[$entry.Name] = 'finished'
+                if (-not $Json) { Write-Host ("<== {0}: built in {1} (copied {2} package(s), purged {3} cache folder(s))" -f $entry.Name, (Format-OctoDuration $slot.Watch.Elapsed), $result.copiedCount, @($result.purged).Count) -ForegroundColor Green }
+            }
+            else {
+                $status[$entry.Name] = 'failed'
+                $failures.Add([pscustomobject]@{ Entry = $entry; Step = $step })
+                if (-not $Json) { Write-Host "<== $($entry.Name): FAILED ($step) - nothing new is started, running repositories finish" -ForegroundColor Red }
+            }
+        }
+        $failures = [System.Collections.Generic.List[object]]::new()
+        $completedRun = $false
+        try {
+            while ($true) {
+                # 1. Start what is ready, in build order, while a slot is free and nothing failed.
+                $progress = $false
+                if ($failures.Count -eq 0) {
+                    for ($position = 0; $position -lt $plan.Count; $position++) {
+                        $entry = $plan[$position]
+                        if ($status[$entry.Name] -ne 'pending' -or -not (& $isReady $position)) { continue }
+                        # No free slot: wait (also with the unchanged check, it reads git and hashes packages).
+                        if ($running.Count -ge $maxParallel -and $entry.Mode -ne 'none' -and -not $skipMap.ContainsKey($entry.Name)) { continue }
+                        # Decided now: the packages of everything it depends on are in the feed.
+                        $decision = & $decide $entry
+                        $skip = $decision.Action -eq 'skip' -and ($entry.Mode -ne 'none' -or $skipMap.ContainsKey($entry.Name))
+                        $repoIndex++
+                        $progress = $true
+                        if ($skip) {
+                            $results.Add([ordered]@{
+                                    repo = $entry.Name; success = $true; status = 'skipped'; reason = $decision.Reason; detail = $decision.Detail
+                                    buildDuration = [TimeSpan]::Zero; packageDuration = [TimeSpan]::Zero; testDuration = [TimeSpan]::Zero; testsCompiled = $null
+                                    copiedCount = 0; purged = @(); staleSkipped = @(); logFile = $null; msbuildProperties = @($entry.PropertyArgs)
+                                })
+                            & $emit 'repoSkipped' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount; reason = $decision.Reason; detail = $decision.Detail })
+                            if (-not $Json) { Write-Host "==> $($entry.Name): skipped ($($decision.Reason)$(if ($decision.Detail) { " - $($decision.Detail)" }))" -ForegroundColor DarkGray }
+                            $status[$entry.Name] = 'finished'
+                            continue
+                        }
+                        $slot = [pscustomobject]@{ Entry = $entry; Index = $repoIndex; Decision = $decision; Watch = [System.Diagnostics.Stopwatch]::StartNew(); Job = $null; Phase = 'build'; Reported = $false }
+                        & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
+                        & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
+                        if ($entry.Mode -eq 'none') {
+                            # Nothing to build: the same repoStart/repoDone pair as the sequential run.
+                            $result = [ordered]@{
+                                repo = $entry.Name; success = $true; status = 'skipped'; reason = $decision.Reason; detail = $decision.Detail
+                                buildDuration = [TimeSpan]::Zero; packageDuration = [TimeSpan]::Zero; testDuration = [TimeSpan]::Zero; testsCompiled = $null
+                                copiedCount = 0; purged = @(); staleSkipped = @(); logFile = $null; msbuildProperties = @($entry.PropertyArgs)
+                            }
+                            $results.Add($result)
+                            & $emitRepoDone $result $slot.Index $slot.Watch.Elapsed
+                            $status[$entry.Name] = 'finished'
+                            continue
+                        }
+                        if (-not $Json) { Write-Host "==> $($entry.Name)$(if ($skipUnchangedEnabled) { " ($($decision.Reason)$(if ($decision.Detail) { ": $($decision.Detail)" }))" }) [$($running.Count + 1) of $maxParallel running]" -ForegroundColor Cyan }
+                        if ($purgeEnabled) { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
+                        $status[$entry.Name] = 'running'
+                        if ($configuration -ieq 'DebugL' -and $entry.Mode -eq 'dotnet' -and -not $skipCkSync) {
+                            # Writes the lane's local catalog: here, never in a child (CK repositories are serial).
+                            [void](Sync-OctoCkIntermediateVersions -repositoryPath $entry.Path -localCatalogRoot (Join-Path $branchRootPath '.octo/local-catalog') -Quiet:$Json)
+                        }
+                        if ($entry.Exclusive) {
+                            # build.ps1 / frontend / zenon: alone and in this process, exactly like the sequential run.
+                            $running.Add($slot)
+                            $buildWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                            $savedRepoEnvironment = if ($entry.RestoreSources) { Set-OctoBuildEnvironment -environment @{ RestoreSources = $entry.RestoreSources } } else { $null }
+                            try { $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json }
+                            finally { Restore-OctoBuildEnvironment -saved $savedRepoEnvironment }
+                            $buildWatch.Stop()
+                            & $finishRepo $slot $build $null $buildWatch.Elapsed ([TimeSpan]::Zero)
+                            [void]$running.Remove($slot)
+                            break   # re-evaluate from the top: it may have failed
+                        }
+                        $environment = [ordered]@{}
+                        foreach ($name in @($childEnvironment.Keys)) { $environment[$name] = $childEnvironment[$name] }
+                        if ($entry.RestoreSources) { $environment['RestoreSources'] = [string]$entry.RestoreSources }
+                        $running.Add($slot)
+                        $slot.Job = Start-OctoRepoBuildJob -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -verifyTests:$verify -environment $environment -workDirectory $workDirectory
+                    }
+                }
+                # 2. Collect what finished.
+                foreach ($slot in @($running)) {
+                    $state = Get-OctoRepoBuildJobState -job $slot.Job
+                    if ($state.Phase -ne $slot.Phase) { $slot.Phase = $state.Phase; & $emit 'phase' ([ordered]@{ repo = $slot.Entry.Name; phase = $state.Phase }) }
+                    if (-not $state.Done) { continue }
+                    $progress = $true
+                    # Still in $running while its packages are copied: a throw in there reaches the cleanup below.
+                    & $finishRepo $slot $state.Build $state.Tests ([TimeSpan]::FromSeconds($state.BuildSeconds)) ([TimeSpan]::FromSeconds($state.TestSeconds))
+                    [void]$running.Remove($slot)
+                }
+                if ($running.Count -eq 0) {
+                    if ($failures.Count -gt 0 -or @($planNames | Where-Object { $status[$_] -eq 'pending' }).Count -eq 0) { break }
+                    if (-not $progress) { throw "Invoke-BuildRange: no repository can start - the dependencies of $(@($planNames | Where-Object { $status[$_] -eq 'pending' }) -join ', ') form a cycle." }
+                }
+                elseif (-not $progress) { Start-Sleep -Milliseconds 200 }
+            }
+            $completedRun = $true
+        }
+        finally {
+            # A throw or Ctrl+C: no child is left behind, and every repository that was running gets its repoDone.
+            if (-not $completedRun) {
+                foreach ($slot in @($running)) {
+                    if ($slot.Job) { Stop-OctoRepoBuildJob -job $slot.Job }
+                    if ($slot.Reported) { continue }   # its repoDone is written
+                    & $emit 'repoDone' ([ordered]@{ repo = $slot.Entry.Name; index = $slot.Index; count = $repoCount; success = $false; status = 'failed'; reason = $slot.Decision.Reason; seconds = $slot.Watch.Elapsed.TotalSeconds; buildSeconds = $null; testSeconds = $null; packageSeconds = $null; copied = $null; purged = $null; logFile = $null })
+                    if (-not $events.FailedRepo) { $events.FailedRepo = $slot.Entry.Name; $events.FailedStep = $slot.Phase }
+                }
+                # Complete-OctoBuildEvents: the repoDone events are written; a throw between two repositories is no preflight failure.
+                $events.Repo = $null
+                $events.RepoDone = $true
+                if (-not $events.FailedStep) { $events.FailedStep = 'build' }
+            }
+            Remove-Item -LiteralPath $workDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($failures.Count -gt 0) {
+            $failed = $failures[0].Entry
+            $failedStep = $failures[0].Step
+            $failedNames = @($failures | ForEach-Object { $_.Entry.Name })
+        }
+        # Report in build order, whatever order the repositories finished in.
+        $ordered = @($planNames | ForEach-Object { $name = $_; $results | Where-Object { $_.repo -eq $name } })
+        $results.Clear()
+        foreach ($result in $ordered) { $results.Add($result) }
+    }
+    else {
     foreach ($entry in $plan) {
         $repoIndex++
         # Decided now, not from the plan: packages rebuilt earlier in this run are in the feed by now.
@@ -1281,7 +1687,8 @@ function Invoke-OctoBuildRangeCore {
             continue
         }
         # A stamp only ever describes a build that succeeded: gone while the repository is built.
-        if ($stampsEnabled -and $entry.Mode -ne 'none') { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
+        # Also in a run that records no stamps: its build replaces the output an existing stamp vouches for.
+        if ($purgeEnabled -and $entry.Mode -ne 'none') { Remove-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name }
         $repoWatch = [System.Diagnostics.Stopwatch]::StartNew()
         $events.Repo = $entry.Name
         $events.Index = $repoIndex
@@ -1407,11 +1814,12 @@ function Invoke-OctoBuildRangeCore {
             }
         }
         # Built, tests compiled (when asked) and packages copied: record what it was built from.
-        if ($stampsEnabled -and $entry.Mode -ne 'none' -and $null -ne $decision.Inputs -and -not $decision.Inputs.Source.Problem) {
+        if ($stampsEnabled -and $entry.Mode -ne 'none' -and (& $mayStamp $decision)) {
             Write-OctoBuildStamp -stampRoot $stampRoot -repo $entry.Name -inputs $decision.Inputs -configuration $configuration -tests $stampTests
         }
         $results.Add($result)
         & $emitRepoDone $result $repoIndex $repoWatch.Elapsed
+    }
     }
     }
     finally {
@@ -1438,6 +1846,9 @@ function Invoke-OctoBuildRangeCore {
                 success        = ($null -eq $failed)
                 failedRepo     = if ($failed) { $failed.Name } else { $null }
                 failedStep     = $failedStep
+                failedRepos    = @(if ($failedNames.Count -gt 0) { $failedNames } elseif ($failed) { $failed.Name })
+                parallel       = $parallel
+                maxParallel    = $maxParallel
                 lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                 packageCaches  = @($globalPackagesPath)
                 feedPath       = if ($privateFeed) { $nugetTarget } else { $null }
@@ -1465,7 +1876,7 @@ function Invoke-OctoBuildRangeCore {
                             msbuildProperties      = @($_.msbuildProperties)
                         }
                     })
-                notBuilt       = @($plan | Select-Object -Skip $results.Count | ForEach-Object { $_.Name })
+                notBuilt       = @($plan | Where-Object { $name = $_.Name; -not ($results | Where-Object { $_.repo -eq $name }) } | ForEach-Object { $_.Name })
                 msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
                 staleGlobalCache = @($staleCache | ForEach-Object { [ordered]@{ packageId = $_.PackageId; cachePath = $_.CachePath; reason = $_.Reason } })
                 staleGlobalCachePurged = @($stalePurged)
@@ -1485,7 +1896,7 @@ function Invoke-OctoBuildRangeCore {
             if ($verify) { $line += "   tests {0,8}" -f (Format-OctoDuration $result.testDuration) }
             Write-Host $line -ForegroundColor $(if ($result.success) { 'Green' } else { 'Red' })
         }
-        foreach ($skipped in @($plan | Select-Object -Skip $results.Count)) {
+        foreach ($skipped in @($plan | Where-Object { $name = $_.Name; -not ($results | Where-Object { $_.repo -eq $name }) })) {
             Write-Host ("{0,-45} not built (stopped after failure)" -f $skipped.Name) -ForegroundColor DarkGray
         }
         Write-Host "---------------------------------"
@@ -1496,7 +1907,7 @@ function Invoke-OctoBuildRangeCore {
     if ($failed) {
         $global:LASTEXITCODE = 1
         $message = if ($failedStep -eq 'tests') { "Invoke-BuildRange: test projects of $($failed.Name) do not compile (-verifyTests)." } else { "Invoke-BuildRange: build of $($failed.Name) failed." }
-        $logFile = $results[$results.Count - 1].logFile
+        $logFile = @($results | Where-Object { $_.repo -eq $failed.Name })[0].logFile
         if ($logFile -and (Test-Path $logFile)) {
             $message += " Log: $logFile"
             if (-not $Json) {
@@ -1511,4 +1922,4 @@ function Invoke-OctoBuildRangeCore {
     $global:LASTEXITCODE = 0
 }
 
-Export-ModuleMember -Function @('Invoke-BuildRange')
+Export-ModuleMember -Function @('Invoke-BuildRange', 'Invoke-OctoBuildRangeRepoStep')
