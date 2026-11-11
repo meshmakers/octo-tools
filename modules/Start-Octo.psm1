@@ -9,6 +9,13 @@ The Start-Octo function starts all OctoMesh services, but gives the user control
 .PARAMETER SystemDatabase
 The name of the system database to use. Defaults to "OctoSystem".
 
+.PARAMETER TenantDatabasePrefix
+Optional MongoDB tenant-database prefix of this instance (AB#8797, OCTO_SYSTEM__TENANTDATABASEPREFIX). Use it
+together with a SystemDatabase of its own when a second local instance shares the MongoDB: tenants created
+without an explicit database name then get the database <prefix><tenantId>, and explicit names without the
+prefix are refused. Empty (default) sets nothing, so the services keep the unprefixed names (or a value the
+caller already put into the environment).
+
 .PARAMETER botService
 If set to $true, the Bot Service will be started. If set to $false, it will not be started.
 
@@ -105,6 +112,12 @@ Start-Octo -SystemDatabase "MyCustomSystem"
 This example starts all services using "MyCustomSystem" as the system database name.
 
 .EXAMPLE
+Start-Octo -SystemDatabase "OctoSystem_s2" -TenantDatabasePrefix "s2_"
+
+This example starts a second instance on the same MongoDB: its own system database, and its tenants get
+databases named s2_<tenantId>.
+
+.EXAMPLE
 Start-Octo -nonInteractive $true -configuration DebugL -identityAssetRepoOnly $true
 
 This example starts only Identity and Asset Repo services in non-interactive mode with DebugL configuration.
@@ -118,6 +131,7 @@ Use this function to selectively start OctoMesh services based on your requireme
         [string]$branch = "",
         [Parameter()] [string]$configuration = "Release",
         [Parameter()] [string]$SystemDatabase = "OctoSystem",
+        [Parameter()] [string]$TenantDatabasePrefix = "",
         [Parameter()] [Boolean]$botService = $true,
         [Parameter()] [Boolean]$identityService = $true,
         [Parameter()] [Boolean]$assetRepoService = $true,
@@ -224,6 +238,10 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
 
     $env:OCTO_SYSTEM__SYSTEMDATABASENAME = $SystemDatabase
+    # AB#8797: only set when given, so a value from the caller's environment (octo-devstack slot) is kept.
+    if (-not [string]::IsNullOrWhiteSpace($TenantDatabasePrefix)) {
+        $env:OCTO_SYSTEM__TENANTDATABASEPREFIX = $TenantDatabasePrefix
+    }
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
