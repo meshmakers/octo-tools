@@ -108,6 +108,27 @@ function Invoke-OctoCkcRefresh {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
+function Enter-OctoCatalogRefreshLock {
+    <#
+    .SYNOPSIS
+        Exclusive lock for the one catalog read of a build run: an open handle on <cache folder>/.octo-tools-refresh.lock
+        that no second process gets (FileShare.None). Waits up to -timeoutSeconds for a run that is reading; returns
+        the handle (Dispose releases it), or $null when the lock cannot be had - the read then runs without it.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$directory, [int]$timeoutSeconds = 600)
+    try { if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Force -Path $directory | Out-Null } } catch { return $null }
+    $path = Join-Path $directory '.octo-tools-refresh.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while ($true) {
+        try { return [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [System.IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) { return $null }
+            Start-Sleep -Milliseconds 500
+        }
+        catch { return $null }
+    }
+}
+
 function Initialize-OctoRunCatalogs {
     <#
     .SYNOPSIS
@@ -137,12 +158,25 @@ function Initialize-OctoRunCatalogs {
             if ([string]::IsNullOrWhiteSpace($ckc)) {
                 return & $result $false 'unavailable' 'no octo-ckc found (lane build, base lane, PATH) - every CK compile refreshes the catalogs itself'
             }
-            $run = Invoke-OctoCkcRefresh -ckc $ckc
-            if ($run.ExitCode -ne 0) {
-                return & $result $false 'failed' "octo-ckc -c RefreshAllCatalogCaches exited with $($run.ExitCode): $(@($run.Output | Select-Object -Last 2) -join ' ') - every CK compile refreshes the catalogs itself"
+            # The caches are user-level: two runs (two environments, two sessions) may find them due at the same
+            # moment. One reads, the other waits for it and then finds them fresh. The engine itself writes a cache
+            # file atomically (temporary file + rename) and its readers retry, so a half-written cache is never
+            # read either way - the lock only saves the second two-minute read.
+            $lock = Enter-OctoCatalogRefreshLock -directory (Split-Path -Parent $files[0])
+            try {
+                $now = [DateTime]::UtcNow
+                $oldest = (@($files | ForEach-Object { if (Test-Path -LiteralPath $_ -PathType Leaf) { ($now - [IO.File]::GetLastWriteTimeUtc($_)).TotalMinutes } else { [double]::PositiveInfinity } }) | Measure-Object -Maximum).Maximum
+                if ($oldest -gt $maxAgeMinutes) {
+                    $run = Invoke-OctoCkcRefresh -ckc $ckc
+                    if ($run.ExitCode -ne 0) {
+                        return & $result $false 'failed' "octo-ckc -c RefreshAllCatalogCaches exited with $($run.ExitCode): $(@($run.Output | Select-Object -Last 2) -join ' ') - every CK compile refreshes the catalogs itself"
+                    }
+                    $mode = 'refreshed'
+                    $detail = "remote catalogs read once with $ckc"
+                }
+                else { $detail = 'another build run read the remote catalogs just now' }
             }
-            $mode = 'refreshed'
-            $detail = "remote catalogs read once with $ckc"
+            finally { if ($lock) { $lock.Dispose() } }
         }
         # The local catalog's cache is rebuilt from the folder by the first compile (the engine does that for a
         # missing cache file) - files that reached the catalog by a copy (environment sync) are in it then.
@@ -182,4 +216,4 @@ function Test-OctoCatalogPropertySet {
     return $false
 }
 
-Export-ModuleMember -Function @('Test-OctoRepoUsesCk', 'Get-OctoCkRemoteCacheFiles', 'Resolve-OctoCkc', 'Invoke-OctoCkcRefresh', 'Initialize-OctoRunCatalogs', 'Add-OctoCatalogProperty', 'Test-OctoCatalogPropertySet')
+Export-ModuleMember -Function @('Enter-OctoCatalogRefreshLock', 'Test-OctoRepoUsesCk', 'Get-OctoCkRemoteCacheFiles', 'Resolve-OctoCkc', 'Invoke-OctoCkcRefresh', 'Initialize-OctoRunCatalogs', 'Add-OctoCatalogProperty', 'Test-OctoCatalogPropertySet')

@@ -197,8 +197,10 @@ function Get-BuildAllPlan {
     -branchRootPath; Windows only, other OSes report them), never other lanes. On Windows a DebugL run
     whose purge includes the global package cache (legacy lane, e.g. main) runs `dotnet build-server
     shutdown` right before the purge (compiler servers can lock 999.0.0 analyzer DLLs there).
-    For the whole run MSBUILDDISABLENODEREUSE=1 and UseSharedCompilation=false are set (restored
-    afterwards), so no reused MSBuild node or compiler server keeps files locked.
+    For the whole run MSBUILDDISABLENODEREUSE=1 is set (restored afterwards), so no reused MSBuild node keeps
+    files locked. On Windows UseSharedCompilation=false is set as well: a compiler server keeps the analyzer DLLs
+    of 999.0.0 packages open there. macOS and Linux keep the shared compiler server (an open file does not block
+    a delete there, and a build without it compiles 1.7 to 2.5 times slower - AB#8831).
 
 .PARAMETER EventsFile
     Append build progress events (plan, repoStart, phase build/packages, repoDone, done) to this file,
@@ -351,7 +353,8 @@ function Invoke-BuildAllCore {
     $runEnvironment = [ordered]@{}
     foreach ($name in @($laneSettings.environment.Keys)) { $runEnvironment[$name] = $laneSettings.environment[$name] }
     $runEnvironment['MSBUILDDISABLENODEREUSE'] = '1'
-    $runEnvironment['UseSharedCompilation'] = 'false'
+    # The compiler server only locks files on Windows; elsewhere it stays on (AB#8831: 1.7-2.5x compile time without it).
+    if (Test-OctoBuildAllWindows) { $runEnvironment['UseSharedCompilation'] = 'false' }
     # Windows, DebugL, purge that includes the global package cache (legacy lane, e.g. main): a running
     # compiler server / MSBuild node can hold meshmakers.*/999.0.0 analyzer DLLs there and make the purge
     # fail. Then `dotnet build-server shutdown` runs right before the purge (servers restart on demand).
@@ -393,7 +396,7 @@ function Invoke-BuildAllCore {
         foreach ($name in $laneSettings.environment.Keys) {
             Write-Host "  env $name=$($laneSettings.environment[$name])"
         }
-        Write-Host "Run environment: MSBUILDDISABLENODEREUSE=1, UseSharedCompilation=false (whole run, restored afterwards)"
+        Write-Host "Run environment: $(@($runEnvironment.Keys | Where-Object { $_ -in 'MSBUILDDISABLENODEREUSE', 'UseSharedCompilation' } | ForEach-Object { "$_=$($runEnvironment[$_])" }) -join ', ') (whole run, restored afterwards)"
         Write-Host "Kill dotnet:     $(if ($skipKill) { 'skipped (-skipKill)' } else { "only processes of this lane ($branchRootPath)" })"
         if ($shutdownBuildServer) { Write-Host "Build server:    dotnet build-server shutdown before the purge (Windows; the purge includes the global package cache)" }
         if ($configuration -ieq 'DebugL') {
