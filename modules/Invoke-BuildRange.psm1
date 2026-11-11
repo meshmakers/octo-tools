@@ -516,6 +516,7 @@ function Invoke-OctoBuildRangeRepoStep {
     $properties = @{}
     foreach ($key in @($request['msbuildProperties'].Keys)) { $properties[[string]$key] = $request['msbuildProperties'][$key] }
     $result = [ordered]@{ success = $false; logFile = $null; buildSeconds = 0.0; testSeconds = 0.0; tests = $null; error = $null }
+    $stage = 'build'
     try {
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
         $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration ([string]$request['configuration']) -msbuildProperties $properties -Json
@@ -524,6 +525,7 @@ function Invoke-OctoBuildRangeRepoStep {
         $result.logFile = $build.LogFile
         $result.buildSeconds = $watch.Elapsed.TotalSeconds
         if ($build.Success -and $request['verifyTests']) {
+            $stage = 'tests'
             Write-OctoJobFile -path ([string]$request['phaseFile']) -text 'tests'
             $watch.Restart()
             $tests = Invoke-OctoBuildRangeTests -entry $entry -configuration ([string]$request['configuration']) -msbuildProperties $properties -Json
@@ -532,7 +534,12 @@ function Invoke-OctoBuildRangeRepoStep {
             $result.tests = [ordered]@{ success = [bool]$tests.Success; skipped = [bool]$tests.Skipped; logFile = $tests.LogFile }
         }
     }
-    catch { $result.error = $_.Exception.Message }
+    catch {
+        # A throw is a failure of the phase it happened in - never a repository that passes for built and verified.
+        $result.error = $_.Exception.Message
+        if ($stage -eq 'tests') { $result.tests = [ordered]@{ success = $false; skipped = $false; logFile = $result.logFile } }
+        else { $result.success = $false }
+    }
     Write-OctoJobFile -path ([string]$request['resultFile']) -text (ConvertTo-Json -InputObject $result -Depth 5)
 }
 
@@ -567,10 +574,12 @@ function Start-OctoRepoBuildJob {
     $worker = Join-Path $PSScriptRoot 'scripts/Invoke-BuildRangeRepoWorker.ps1'
     $pwsh = [Environment]::ProcessPath
     if (-not $pwsh -or (Split-Path -Leaf $pwsh) -notmatch '^pwsh') { $pwsh = 'pwsh' }
-    $process = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $worker, '-RequestFile', "$base.request.json") `
+    # Start-Process joins the arguments with spaces and quotes nothing: quote the paths (a checkout or a temporary
+    # folder with a space in its name).
+    $process = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-NonInteractive', '-File', "`"$worker`"", '-RequestFile', "`"$base.request.json`"") `
         -RedirectStandardOutput "$base.worker.log" -RedirectStandardError "$base.worker.err.log" -PassThru -NoNewWindow
     [void]$process.Handle   # keeps the exit state readable after the process is gone
-    return [pscustomobject]@{ Name = $entry.Name; Process = $process; ResultFile = "$base.result.json"; PhaseFile = "$base.phase"; WorkerLog = "$base.worker.err.log" }
+    return [pscustomobject]@{ Name = $entry.Name; RepoPath = $entry.Path; Process = $process; ResultFile = "$base.result.json"; PhaseFile = "$base.phase"; WorkerLog = "$base.worker.err.log" }
 }
 
 function Get-OctoRepoBuildJobState {
@@ -594,7 +603,21 @@ function Get-OctoRepoBuildJobState {
         $state.TestSeconds = [double]$result.testSeconds
     }
     else {
-        $state.Build = [pscustomobject]@{ Success = $false; LogFile = $job.WorkerLog }
+        # The child's own output lives in the run's temporary folder, which is deleted at the end: keep the diagnostic
+        # in the repository's build log (ignored by git like every Invoke-Build.log).
+        $logFile = $job.WorkerLog
+        try {
+            $repoLog = Join-Path $job.RepoPath 'Invoke-Build.log'
+            $exitCode = try { $job.Process.ExitCode } catch { $null }
+            $lines = @("Invoke-BuildRange: the build process of $($job.Name) ended without a result (exit code $exitCode).")
+            foreach ($file in @($job.WorkerLog, ($job.WorkerLog -replace '\.err\.log$', '.log'))) {
+                if (Test-Path -LiteralPath $file) { $lines += @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue) }
+            }
+            Add-Content -LiteralPath $repoLog -Value $lines -ErrorAction Stop
+            $logFile = $repoLog
+        }
+        catch { }
+        $state.Build = [pscustomobject]@{ Success = $false; LogFile = $logFile }
     }
     return [pscustomobject]$state
 }
@@ -1523,6 +1546,7 @@ function Invoke-OctoBuildRangeCore {
             }
             $results.Add($result)
             & $emitRepoDone $result $slot.Index $slot.Watch.Elapsed
+            $slot.Reported = $true
             if ($result.success) {
                 $status[$entry.Name] = 'finished'
                 if (-not $Json) { Write-Host ("<== {0}: built in {1} (copied {2} package(s), purged {3} cache folder(s))" -f $entry.Name, (Format-OctoDuration $slot.Watch.Elapsed), $result.copiedCount, @($result.purged).Count) -ForegroundColor Green }
@@ -1561,7 +1585,7 @@ function Invoke-OctoBuildRangeCore {
                             $status[$entry.Name] = 'finished'
                             continue
                         }
-                        $slot = [pscustomobject]@{ Entry = $entry; Index = $repoIndex; Decision = $decision; Watch = [System.Diagnostics.Stopwatch]::StartNew(); Job = $null; Phase = 'build' }
+                        $slot = [pscustomobject]@{ Entry = $entry; Index = $repoIndex; Decision = $decision; Watch = [System.Diagnostics.Stopwatch]::StartNew(); Job = $null; Phase = 'build'; Reported = $false }
                         & $emit 'repoStart' ([ordered]@{ repo = $entry.Name; index = $repoIndex; count = $repoCount })
                         & $emit 'phase' ([ordered]@{ repo = $entry.Name; phase = 'build' })
                         if ($entry.Mode -eq 'none') {
@@ -1591,8 +1615,8 @@ function Invoke-OctoBuildRangeCore {
                             try { $build = Invoke-OctoBuildRangeRepo -entry $entry -configuration $configuration -msbuildProperties $entry.MsBuildProperties -Json:$Json }
                             finally { Restore-OctoBuildEnvironment -saved $savedRepoEnvironment }
                             $buildWatch.Stop()
-                            [void]$running.Remove($slot)
                             & $finishRepo $slot $build $null $buildWatch.Elapsed ([TimeSpan]::Zero)
+                            [void]$running.Remove($slot)
                             break   # re-evaluate from the top: it may have failed
                         }
                         $environment = [ordered]@{}
@@ -1607,9 +1631,10 @@ function Invoke-OctoBuildRangeCore {
                     $state = Get-OctoRepoBuildJobState -job $slot.Job
                     if ($state.Phase -ne $slot.Phase) { $slot.Phase = $state.Phase; & $emit 'phase' ([ordered]@{ repo = $slot.Entry.Name; phase = $state.Phase }) }
                     if (-not $state.Done) { continue }
-                    [void]$running.Remove($slot)
                     $progress = $true
+                    # Still in $running while its packages are copied: a throw in there reaches the cleanup below.
                     & $finishRepo $slot $state.Build $state.Tests ([TimeSpan]::FromSeconds($state.BuildSeconds)) ([TimeSpan]::FromSeconds($state.TestSeconds))
+                    [void]$running.Remove($slot)
                 }
                 if ($running.Count -eq 0) {
                     if ($failures.Count -gt 0 -or @($planNames | Where-Object { $status[$_] -eq 'pending' }).Count -eq 0) { break }
@@ -1624,6 +1649,7 @@ function Invoke-OctoBuildRangeCore {
             if (-not $completedRun) {
                 foreach ($slot in @($running)) {
                     if ($slot.Job) { Stop-OctoRepoBuildJob -job $slot.Job }
+                    if ($slot.Reported) { continue }   # its repoDone is written
                     & $emit 'repoDone' ([ordered]@{ repo = $slot.Entry.Name; index = $slot.Index; count = $repoCount; success = $false; status = 'failed'; reason = $slot.Decision.Reason; seconds = $slot.Watch.Elapsed.TotalSeconds; buildSeconds = $null; testSeconds = $null; packageSeconds = $null; copied = $null; purged = $null; logFile = $null })
                     if (-not $events.FailedRepo) { $events.FailedRepo = $slot.Entry.Name; $events.FailedStep = $slot.Phase }
                 }

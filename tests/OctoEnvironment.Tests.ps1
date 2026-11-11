@@ -1922,6 +1922,22 @@ Describe 'Parallel environment builds (AB#8814)' {
         $records[-1].failedRepo | Should -Not -BeNullOrEmpty
     }
 
+    It 'a throw while the packages of a finished repository are copied still writes its repoDone, once' {
+        Mock -ModuleName Invoke-BuildRange Copy-NuGetPackages { throw 'feed folder is gone' }
+        $events = Join-Path $TestDrive 'events-copy-throw.jsonl'
+        { Invoke-BuildEnvironment -env 'env-p' -maxParallel 2 -EventsFile $events -Json } | Should -Throw '*feed folder is gone*'
+        $records = @(Get-Content $events | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+        $started = @($records | Where-Object event -eq 'repoStart' | ForEach-Object repo)
+        $started.Count | Should -BeGreaterThan 0
+        foreach ($name in $started) {
+            $done = @($records | Where-Object { $_.event -eq 'repoDone' -and $_.repo -eq $name })
+            $done.Count | Should -Be 1
+            $done[0].success | Should -BeFalse
+        }
+        @($records | Where-Object event -eq 'done').Count | Should -Be 1
+        $records[-1].success | Should -BeFalse
+    }
+
     It 'repositories with a CK model never build at the same time and keep their order' {
         foreach ($name in @('octo-asset-repo-services', 'octo-cli')) {
             $folder = (Get-ChildItem (Join-Path $envPath "$name/src") -Directory | Select-Object -First 1).FullName
@@ -1973,8 +1989,8 @@ Describe 'Parallel environment builds (AB#8814)' {
 
 Describe 'Child process of a parallel build and the atomic package copy (AB#8814)' {
     It 'each job runs in its own pwsh with its own environment; nothing reaches this process or the other job' {
-        $root = Join-Path $TestDrive 'jobs'
-        $work = Join-Path $root 'work'
+        $root = Join-Path $TestDrive 'jobs with a space'      # paths with spaces must survive the child's command line
+        $work = Join-Path $root 'work dir'
         New-Item -ItemType Directory -Force -Path $work | Out-Null
         $entries = foreach ($name in @('octo-one', 'octo-two')) {
             $repo = Join-Path $root $name
@@ -1998,7 +2014,7 @@ Describe 'Child process of a parallel build and the atomic package copy (AB#8814
     }
 
     It 'a child that dies without a result is a failed build; Stop-OctoRepoBuildJob ends a running child' {
-        $work = Join-Path $TestDrive 'jobs-fail'
+        $work = Join-Path $TestDrive 'jobs fail'
         $repo = Join-Path $work 'octo-crash'
         New-Item -ItemType Directory -Force -Path $repo | Out-Null
         Set-Content -Path (Join-Path $repo 'build.ps1') -Value 'param($configuration) [Environment]::Exit(7)'
@@ -2011,6 +2027,9 @@ Describe 'Child process of a parallel build and the atomic package copy (AB#8814
             do { Start-Sleep -Milliseconds 200; $state = Get-OctoRepoBuildJobState -job $job } while (-not $state.Done -and [DateTime]::UtcNow -lt $deadline)
             $state.Done | Should -BeTrue
             $state.Build.Success | Should -BeFalse
+            # the diagnostic outlives the run's temporary folder: it is in the repository's build log
+            $state.Build.LogFile | Should -Be (Join-Path $repo 'Invoke-Build.log')
+            Get-Content $state.Build.LogFile -Raw | Should -Match 'ended without a result \(exit code 7\)'
 
             $running = Start-OctoRepoBuildJob -entry ([pscustomobject]@{ Name = 'octo-slow'; Path = $slow; Mode = 'script'; Target = 'build.ps1'; Solution = $null; Projects = @(); TestProjects = @() }) -configuration 'DebugL' -workDirectory $work
             Start-Sleep -Milliseconds 500
@@ -2019,6 +2038,34 @@ Describe 'Child process of a parallel build and the atomic package copy (AB#8814
             [void]$running.Process.WaitForExit(10000)
             $running.Process.HasExited | Should -BeTrue
             (Get-OctoRepoBuildJobState -job $running).Build.Success | Should -BeFalse
+        }
+    }
+
+    It 'a throw in the build or in the test verification fails the repository in that phase' {
+        $work = Join-Path $TestDrive 'step'
+        New-Item -ItemType Directory -Force -Path $work | Out-Null
+        InModuleScope Invoke-BuildRange -Parameters @{ work = $work } {
+            $request = { param($name) [ordered]@{ rootPath = ''; configuration = 'DebugL'; verifyTests = $true; environment = @{}; msbuildProperties = @{}
+                    resultFile = (Join-Path $work "$name.result.json"); phaseFile = (Join-Path $work "$name.phase")
+                    entry = @{ Name = $name; Path = $work; Mode = 'dotnet'; Target = 'slnf'; Solution = 'x.slnx'; Projects = @('src/a.csproj'); TestProjects = @('tests/t.csproj') } } }
+            $run = { param($name)
+                $file = Join-Path $work "$name.request.json"
+                Set-Content -Path $file -Value (ConvertTo-Json -InputObject (& $request $name) -Depth 5)
+                Invoke-OctoBuildRangeRepoStep -requestFile $file
+                Get-Content (Join-Path $work "$name.result.json") -Raw | ConvertFrom-Json }
+
+            Mock Invoke-OctoBuildRangeRepo { [pscustomobject]@{ Success = $true; LogFile = 'build.log' } }
+            Mock Invoke-OctoBuildRangeTests { throw 'cannot write the solution filter' }
+            $result = & $run 'tests-throw'
+            $result.success | Should -BeTrue            # the build itself was fine
+            $result.tests.success | Should -BeFalse     # the verification was not: the parent reports failedStep tests, copies nothing, writes no stamp
+            $result.tests.skipped | Should -BeFalse
+            $result.error | Should -Match 'solution filter'
+
+            Mock Invoke-OctoBuildRangeRepo { throw 'dotnet not found' }
+            $result = & $run 'build-throw'
+            $result.success | Should -BeFalse
+            $result.tests | Should -BeNullOrEmpty
         }
     }
 
@@ -2032,31 +2079,42 @@ Describe 'Child process of a parallel build and the atomic package copy (AB#8814
         $target = Join-Path $feed $name
         [IO.File]::WriteAllBytes($target, [byte[]]::new($size))
         $modules = Join-Path $PSScriptRoot '../modules'
-        # writer: 60 times a new package of one repeated byte value, copied into the feed like a build does
-        $writer = Start-ThreadJob -ArgumentList $modules, $lane, $bin, $feed, $name, $size -ScriptBlock {
-            param($modules, $lane, $bin, $feed, $name, $size)
+        # Writer and reader are tied together, so the result does not depend on how the scheduler runs them: the writer
+        # starts when the reader says so and replaces the package (a new repeated byte value each time) until the reader
+        # has seen enough versions - or a bound is reached.
+        $go = Join-Path $lane 'go'
+        $stop = Join-Path $lane 'stop'
+        $writer = Start-ThreadJob -ArgumentList $modules, $lane, $bin, $feed, $name, $size, $go, $stop -ScriptBlock {
+            param($modules, $lane, $bin, $feed, $name, $size, $go, $stop)
             Import-Module (Join-Path $modules 'OctoJsonOutput.psm1'), (Join-Path $modules 'OctoBuildOrder.psm1'), (Join-Path $modules 'Copy-NuGetPackages.psm1') -Force
-            foreach ($round in 1..60) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while (-not (Test-Path $go) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 20 }
+            $round = 0
+            while (-not (Test-Path $stop) -and $round -lt 250 -and [DateTime]::UtcNow -lt $deadline) {
+                $round++
                 $bytes = [byte[]]::new($size)
                 [Array]::Fill($bytes, [byte]$round)
                 [IO.File]::WriteAllBytes((Join-Path $bin $name), $bytes)
                 Copy-NuGetPackages -directory (Join-Path $lane 'octo-x') -nugetPath $feed -Json | Out-Null
             }
+            $round
         }
         $reads = 0
         $torn = 0
         $values = [System.Collections.Generic.HashSet[int]]::new()
-        while ($writer.State -eq 'Running' -or $writer.State -eq 'NotStarted') {
+        Set-Content -Path $go -Value 'go'
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        while ($values.Count -lt 5 -and $writer.State -in 'NotStarted', 'Running' -and [DateTime]::UtcNow -lt $deadline) {
             $bytes = [IO.File]::ReadAllBytes($target)
             $reads++
             if ($bytes.Length -ne $size -or $bytes[0] -ne $bytes[$size - 1] -or $bytes[0] -ne $bytes[$size / 2]) { $torn++ }
             [void]$values.Add([int]$bytes[0])
         }
-        Receive-Job $writer -Wait -AutoRemoveJob | Out-Null
+        Set-Content -Path $stop -Value 'stop'
+        $rounds = [int](Receive-Job $writer -Wait -AutoRemoveJob | Select-Object -Last 1)
         $torn | Should -Be 0
-        $reads | Should -BeGreaterThan 20
-        $values.Count | Should -BeGreaterThan 1                 # the reader did see the package change
-        ([IO.File]::ReadAllBytes($target))[0] | Should -Be 60
+        $values.Count | Should -BeGreaterOrEqual 5              # the reader did see the package being replaced
+        ([IO.File]::ReadAllBytes($target))[0] | Should -Be ([byte]$rounds)
         @(Get-ChildItem $feed -Force).Count | Should -Be 1       # no temporary file left
     }
 }
