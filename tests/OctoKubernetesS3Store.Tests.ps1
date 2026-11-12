@@ -220,7 +220,29 @@ Describe 'Relay address (AB#8892)' {
         }
     }
 
-    It 'reads the IPv4 subnet of the kind network, skipping the IPv6 one' {
+    It 'IPv6 <subnet> (from end <fromEnd>) -> <expected>' -ForEach @(
+        @{ subnet = 'fc00:f853:ccd:e793::/64';       fromEnd = 1; expected = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }
+        @{ subnet = 'fc00:f853:ccd:e793::/64';       fromEnd = 2; expected = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffd' }
+        @{ subnet = 'FC00:F853:0CCD:E793:0:0:0:0/64'; fromEnd = 1; expected = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }
+        @{ subnet = 'fc00:f853:ccd:e793::1234/64';   fromEnd = 1; expected = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }
+        @{ subnet = 'fd00:1::/48';                   fromEnd = 1; expected = 'fd00:1:0:ffff:ffff:ffff:ffff:fffe' }
+        @{ subnet = 'fd00::/120';                    fromEnd = 1; expected = 'fd00::fe' }
+        @{ subnet = '2001:db8::/0';                  fromEnd = 1; expected = 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe' }
+        @{ subnet = 'fd00::/126';                    fromEnd = 2; expected = 'fd00::1' }
+        @{ subnet = 'fd00::/126';                    fromEnd = 3; expected = $null }
+        @{ subnet = 'fd00::/127';                    fromEnd = 1; expected = $null }
+        @{ subnet = 'fd00::/128';                    fromEnd = 1; expected = $null }
+        @{ subnet = 'fd00::/129';                    fromEnd = 1; expected = $null }
+        @{ subnet = '172.23.0.0/16';                 fromEnd = 1; expected = $null }
+        @{ subnet = '';                              fromEnd = 1; expected = $null }
+        @{ subnet = 'fd00::zz/64';                   fromEnd = 1; expected = $null }
+    ) {
+        InModuleScope OctoKubernetesS3Store -Parameters @{ subnet = $subnet; fromEnd = $fromEnd; expected = $expected } {
+            Get-OctoIPv6SubnetLastHost $subnet -FromEnd $fromEnd | Should -Be $expected
+        }
+    }
+
+    It 'reads both subnets of the dual-stack kind network' {
         InModuleScope OctoKubernetesS3Store {
             $script:inspected = $null
             function docker {
@@ -228,15 +250,28 @@ Describe 'Relay address (AB#8892)' {
                 $global:LASTEXITCODE = 0
                 'fc00:f853:ccd:e793::/64|fc00:f853:ccd:e793::1 172.23.0.0/16|172.23.0.1 '
             }
-            Get-OctoKubernetesS3RelayAddress | Should -Be '172.23.255.254'
+            $addresses = Get-OctoKubernetesS3RelayAddress
+            $addresses.IPv4 | Should -Be '172.23.255.254'
+            $addresses.IPv6 | Should -Be 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe'
             $script:inspected[0..2] -join ' ' | Should -Be 'network inspect kind'
         }
     }
 
-    It 'steps below a gateway that sits at the end of the subnet' {
+    It 'has no IPv6 address on an IPv4-only network' {
         InModuleScope OctoKubernetesS3Store {
-            function docker { $global:LASTEXITCODE = 0; '10.89.0.0/24|10.89.0.254' }
-            Get-OctoKubernetesS3RelayAddress | Should -Be '10.89.0.253'
+            function docker { $global:LASTEXITCODE = 0; '172.18.0.0/16|172.18.0.1 ' }
+            $addresses = Get-OctoKubernetesS3RelayAddress
+            $addresses.IPv4 | Should -Be '172.18.255.254'
+            $addresses.IPv6 | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'steps below a gateway that sits at the end of the subnet (IPv4 and IPv6)' {
+        InModuleScope OctoKubernetesS3Store {
+            function docker { $global:LASTEXITCODE = 0; '10.89.0.0/24|10.89.0.254 fd00:1::/64|FD00:1:0:0:FFFF:FFFF:FFFF:FFFE' }
+            $addresses = Get-OctoKubernetesS3RelayAddress
+            $addresses.IPv4 | Should -Be '10.89.0.253'
+            $addresses.IPv6 | Should -Be 'fd00:1::ffff:ffff:ffff:fffd'
         }
     }
 
@@ -251,19 +286,39 @@ Describe 'Relay address (AB#8892)' {
 }
 
 Describe 'Relay decision (AB#8892)' {
-    It '<case> -> <action>' -ForEach @(
-        @{ case = 'no relay';                              relay = $null; action = 'Create' }
-        @{ case = 'running with the expected address';     relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254' }; action = 'Keep' }
-        @{ case = 'stopped with the expected address';     relay = @{ Running = $false; Owner = 'kind'; FixedAddress = '172.23.255.254' }; action = 'Start' }
-        @{ case = 'running without a fixed address';       relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '' }; action = 'Recreate' }
-        @{ case = 'stopped without a fixed address';       relay = @{ Running = $false; Owner = 'kind'; FixedAddress = '' }; action = 'Recreate' }
-        @{ case = 'with another fixed address';            relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.18.255.254' }; action = 'Recreate' }
-        @{ case = 'of another cluster';                    relay = @{ Running = $true;  Owner = 'other'; FixedAddress = '' }; action = 'Foreign' }
-        @{ case = 'without the cluster label';             relay = @{ Running = $true;  Owner = ''; FixedAddress = '172.23.255.254' }; action = 'Foreign' }
+    BeforeAll {
+        $script:v4 = '172.23.255.254'
+        $script:v6 = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe'
+    }
+
+    It 'dual-stack: <case> -> <action>' -ForEach @(
+        @{ case = 'no relay';                                 relay = $null; action = 'Create' }
+        @{ case = 'running with both expected addresses';     relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }; action = 'Keep' }
+        @{ case = 'running, IPv6 spelled differently';        relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = 'FC00:F853:0CCD:E793:FFFF:FFFF:FFFF:FFFE' }; action = 'Keep' }
+        @{ case = 'stopped with both expected addresses';     relay = @{ Running = $false; Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }; action = 'Start' }
+        @{ case = 'right IPv4, no fixed IPv6 (PR #51 relay)'; relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = '' }; action = 'Recreate' }
+        @{ case = 'right IPv4, another IPv6';                 relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = 'fc00:f853:ccd:e793::2' }; action = 'Recreate' }
+        @{ case = 'right IPv6, another IPv4';                 relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.18.255.254'; FixedIPv6Address = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }; action = 'Recreate' }
+        @{ case = 'right IPv6, no fixed IPv4';                relay = @{ Running = $false; Owner = 'kind'; FixedAddress = '';               FixedIPv6Address = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }; action = 'Recreate' }
+        @{ case = 'running without fixed addresses';          relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '';               FixedIPv6Address = '' }; action = 'Recreate' }
+        @{ case = 'of another cluster';                       relay = @{ Running = $true;  Owner = 'other'; FixedAddress = '';              FixedIPv6Address = '' }; action = 'Foreign' }
+        @{ case = 'without the cluster label';                relay = @{ Running = $true;  Owner = '';     FixedAddress = '172.23.255.254'; FixedIPv6Address = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }; action = 'Foreign' }
     ) {
-        InModuleScope OctoKubernetesS3Store -Parameters @{ relay = $relay; action = $action } {
+        InModuleScope OctoKubernetesS3Store -Parameters @{ relay = $relay; action = $action; v4 = $v4; v6 = $v6 } {
             $r = if ($relay) { [pscustomobject]$relay } else { $null }
-            Get-OctoKubernetesS3RelayAction -Relay $r -ExpectedAddress '172.23.255.254' -ClusterName 'kind' | Should -Be $action
+            Get-OctoKubernetesS3RelayAction -Relay $r -ExpectedAddress $v4 -ExpectedIPv6Address $v6 -ClusterName 'kind' | Should -Be $action
+        }
+    }
+
+    It 'IPv4-only network: <case> -> <action>' -ForEach @(
+        @{ case = 'running with the expected IPv4, no IPv6';  relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = '' }; action = 'Keep' }
+        @{ case = 'stopped with the expected IPv4, no IPv6';  relay = @{ Running = $false; Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = '' }; action = 'Start' }
+        @{ case = 'with another IPv4';                        relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.18.255.254'; FixedIPv6Address = '' }; action = 'Recreate' }
+        @{ case = 'with a fixed IPv6 the network lacks';      relay = @{ Running = $true;  Owner = 'kind'; FixedAddress = '172.23.255.254'; FixedIPv6Address = 'fc00:f853:ccd:e793:ffff:ffff:ffff:fffe' }; action = 'Recreate' }
+    ) {
+        InModuleScope OctoKubernetesS3Store -Parameters @{ relay = $relay; action = $action; v4 = $v4 } {
+            $r = [pscustomobject]$relay
+            Get-OctoKubernetesS3RelayAction -Relay $r -ExpectedAddress $v4 -ExpectedIPv6Address $null -ClusterName 'kind' | Should -Be $action
         }
     }
 }
@@ -273,6 +328,7 @@ Describe 'Relay setup (Initialize-OctoKubernetesS3HostPort, AB#8892)' {
         InModuleScope OctoKubernetesS3Store {
             $script:dockerCalls = [System.Collections.Generic.List[string]]::new()
             $script:relayLine = $null
+            $script:networkConfig = 'fc00:f853:ccd:e793::/64|fc00:f853:ccd:e793::1 172.23.0.0/16|172.23.0.1 '
             # A function defined here would not outlive this scope; every test dot-sources this block so
             # that its fake docker shadows the real one (the real docker is never called).
             $script:fakeDocker = {
@@ -282,7 +338,7 @@ Describe 'Relay setup (Initialize-OctoKubernetesS3HostPort, AB#8892)' {
                     $global:LASTEXITCODE = 0
                     switch ($args[0]) {
                         'port'    { $global:LASTEXITCODE = 1; return }
-                        'network' { return '172.23.0.0/16|172.23.0.1' }
+                        'network' { return $script:networkConfig }
                         'inspect' {
                             if ($null -eq $script:relayLine) { $global:LASTEXITCODE = 1; return }
                             return $script:relayLine
@@ -296,23 +352,35 @@ Describe 'Relay setup (Initialize-OctoKubernetesS3HostPort, AB#8892)' {
         }
     }
 
-    It 'creates the relay with the fixed address at the end of the kind subnet' {
+    It 'creates the relay with fixed addresses at the end of both kind subnets' {
         InModuleScope OctoKubernetesS3Store {
             . $script:fakeDocker
             Initialize-OctoKubernetesS3HostPort -ClusterName 'kind' | Should -BeTrue
             $run = $script:dockerCalls | Where-Object { $_ -like 'run *' }
             $run | Should -HaveCount 1
-            $run | Should -Match '--network kind --ip 172\.23\.255\.254 '
+            $run | Should -Match '--network kind --ip 172\.23\.255\.254 --ip6 fc00:f853:ccd:e793:ffff:ffff:ffff:fffe '
             $run | Should -Match '--restart unless-stopped'
             $run | Should -Match '-p 127\.0\.0\.1:8333:8333 '
             $run | Should -Match 'TCP:kind-control-plane:30333$'
         }
     }
 
-    It 'keeps a running relay that already has the fixed address (no recreate)' {
+    It 'creates the relay without --ip6 on an IPv4-only kind network' {
         InModuleScope OctoKubernetesS3Store {
             . $script:fakeDocker
-            $script:relayLine = 'true|kind|172.23.255.254'
+            $script:networkConfig = '172.18.0.0/16|172.18.0.1 '
+            Initialize-OctoKubernetesS3HostPort -ClusterName 'kind' | Should -BeTrue
+            $run = $script:dockerCalls | Where-Object { $_ -like 'run *' }
+            $run | Should -HaveCount 1
+            $run | Should -Match '--network kind --ip 172\.18\.255\.254 -p '
+            $run | Should -Not -Match '--ip6'
+        }
+    }
+
+    It 'keeps a running relay that already has both fixed addresses (no recreate)' {
+        InModuleScope OctoKubernetesS3Store {
+            . $script:fakeDocker
+            $script:relayLine = 'true|kind|172.23.255.254|fc00:f853:ccd:e793:ffff:ffff:ffff:fffe'
             Initialize-OctoKubernetesS3HostPort -ClusterName 'kind' | Should -BeTrue
             $script:dockerCalls | Should -Contain 'network inspect kind -f {{range .IPAM.Config}}{{.Subnet}}|{{.Gateway}} {{end}}'
             $script:dockerCalls | Where-Object { $_ -match '^(run|rm|start|stop) ' } | Should -BeNullOrEmpty
@@ -322,30 +390,34 @@ Describe 'Relay setup (Initialize-OctoKubernetesS3HostPort, AB#8892)' {
     It 'starts a stopped relay that has the fixed address' {
         InModuleScope OctoKubernetesS3Store {
             . $script:fakeDocker
-            $script:relayLine = 'false|kind|172.23.255.254'
+            $script:relayLine = 'false|kind|172.23.255.254|fc00:f853:ccd:e793:ffff:ffff:ffff:fffe'
             Initialize-OctoKubernetesS3HostPort -ClusterName 'kind' | Should -BeTrue
             $script:dockerCalls | Where-Object { $_ -match '^(run|rm) ' } | Should -BeNullOrEmpty
             $script:dockerCalls | Should -Contain 'start octo-kind-s3-relay'
         }
     }
 
-    It 'recreates a relay of this cluster that has no fixed address' {
-        InModuleScope OctoKubernetesS3Store {
+    It 'recreates a relay of this cluster that has <case>' -ForEach @(
+        @{ case = 'no fixed address';                       relayLine = 'true|kind||' }
+        @{ case = 'the fixed IPv4 but no fixed IPv6 (PR #51)'; relayLine = 'true|kind|172.23.255.254|' }
+        @{ case = 'the fixed IPv4 and the node''s IPv6';      relayLine = 'false|kind|172.23.255.254|fc00:f853:ccd:e793::2' }
+    ) {
+        InModuleScope OctoKubernetesS3Store -Parameters @{ relayLine = $relayLine } {
             . $script:fakeDocker
-            $script:relayLine = 'true|kind|'
+            $script:relayLine = $relayLine
             Initialize-OctoKubernetesS3HostPort -ClusterName 'kind' | Should -BeTrue
             $rm = [array]::IndexOf($script:dockerCalls.ToArray(), 'rm -f octo-kind-s3-relay')
             $rm | Should -BeGreaterOrEqual 0
             $run = $script:dockerCalls.FindIndex({ param($c) $c -like 'run *' })
             $run | Should -BeGreaterThan $rm
-            $script:dockerCalls[$run] | Should -Match '--ip 172\.23\.255\.254 '
+            $script:dockerCalls[$run] | Should -Match '--ip 172\.23\.255\.254 --ip6 fc00:f853:ccd:e793:ffff:ffff:ffff:fffe '
         }
     }
 
     It 'leaves a relay of another cluster alone' {
         InModuleScope OctoKubernetesS3Store {
             . $script:fakeDocker
-            $script:relayLine = 'true|other|'
+            $script:relayLine = 'true|other||'
             Initialize-OctoKubernetesS3HostPort -ClusterName 'kind' | Should -BeFalse
             $script:dockerCalls | Where-Object { $_ -match '^(run|rm|start|stop) ' } | Should -BeNullOrEmpty
             Should -Invoke Write-Warning -Times 1

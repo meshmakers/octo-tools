@@ -9,8 +9,8 @@
 # This module only ADDS to a cluster: it never restarts, recreates or deletes an existing pod, volume
 # or namespace (Uninstall-OctoKubernetesS3Store removes only what it created itself). The one exception
 # lies outside the cluster: its own host relay container is removed and recreated, even while it runs,
-# when it has no fixed address or another one than expected (Initialize-OctoKubernetesS3HostPort,
-# AB#8892). Credentials are
+# when its fixed IPv4 or IPv6 address is missing or another one than expected
+# (Initialize-OctoKubernetesS3HostPort, AB#8892). Credentials are
 # generated at install time into the Kubernetes Secret octo-infra/seaweedfs-s3; they are never written
 # to a file in a repository, printed or logged.
 
@@ -40,9 +40,9 @@ The non-secret facts about the local S3 store (names, ports, bucket, both endpoi
         # port mapping to a running cluster): a docker container next to the node, outside the cluster.
         RelayContainer    = "octo-kind-s3-relay"
         RelayImage        = "alpine/socat:1.8.1.3"
-        # Docker network of the kind node. The relay gets a fixed address at the end of its IPv4 subnet
-        # (Get-OctoKubernetesS3RelayAddress), so that it never takes the node's address when Docker
-        # starts the relay first after a reboot (AB#8892).
+        # Docker network of the kind node. The relay gets fixed addresses at the end of its IPv4 and IPv6
+        # subnets (Get-OctoKubernetesS3RelayAddress), so that it never takes one of the node's addresses
+        # when Docker starts the relay first after a reboot (AB#8892).
         RelayNetwork      = "kind"
         CrateHttpUri      = "http://127.0.0.1:4301"
         # Cluster setting that keeps COPY statements (they carry the S3 key) out of sys.jobs_log.
@@ -252,62 +252,115 @@ function Get-OctoIPv4SubnetLastHost {
     return "{0}.{1}.{2}.{3}" -f (($hostAddress -shr 24) -band 255), (($hostAddress -shr 16) -band 255), (($hostAddress -shr 8) -band 255), ($hostAddress -band 255)
 }
 
+function Get-OctoIPv6SubnetLastHost {
+    # Address near the end of an IPv6 subnet in CIDR notation: the all-ones address of the subnet minus
+    # FromEnd ("fc00:f853:ccd:e793::/64" -> "fc00:f853:ccd:e793:ffff:ffff:ffff:fffe"). The all-ones
+    # address itself is never returned. $null for anything that is not an IPv6 subnet with such an
+    # address (an IPv4 subnet, /127, /128, garbage).
+    param([string]$Subnet, [ValidateRange(1, 1024)] [int]$FromEnd = 1)
+    if ($Subnet -notmatch '^\s*([0-9A-Fa-f:.]+)/(\d{1,3})\s*$') { return $null }
+    $prefix = [int]$Matches[2]
+    if ($prefix -gt 128) { return $null }
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($Matches[1], [ref]$address)) { return $null }
+    if ($address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) { return $null }
+    $one = [System.Numerics.BigInteger]::One
+    # Big-endian bytes, read as an unsigned number.
+    $value = [System.Numerics.BigInteger]::new([byte[]]$address.GetAddressBytes(), $true, $true)
+    $hostMask = [System.Numerics.BigInteger]::op_LeftShift($one, 128 - $prefix) - $one
+    $network = $value - ($value -band $hostMask)
+    $lastAddress = $network + $hostMask
+    # The address must lie strictly between the subnet address and the all-ones address.
+    if ($lastAddress -lt $network + $FromEnd + 1) { return $null }
+    $hostAddress = $lastAddress - $FromEnd
+    $bytes = $hostAddress.ToByteArray($true, $true)
+    $padded = [byte[]]::new(16)
+    [System.Array]::Copy($bytes, 0, $padded, 16 - $bytes.Length, $bytes.Length)
+    return ([System.Net.IPAddress]::new($padded)).ToString()
+}
+
+function ConvertTo-OctoCanonicalIPAddress {
+    # One spelling per address, so that addresses from docker and computed ones compare equal
+    # ("FC00:0:0::1" and "fc00::1"). Empty for nothing; anything that does not parse stays as it is.
+    param([AllowNull()] [AllowEmptyString()] [string]$Address)
+    $text = "$Address".Trim()
+    if (-not $text) { return '' }
+    $parsed = $null
+    if ([System.Net.IPAddress]::TryParse($text, [ref]$parsed)) { return $parsed.ToString() }
+    return $text
+}
+
 function Get-OctoKubernetesS3RelayAddress {
-    # The fixed IPv4 address of the relay container: the last host address of the relay network's IPv4
-    # subnet, read from `docker network inspect` (never hard-coded; the subnet differs per machine).
-    # Docker hands out dynamic addresses from the start of the subnet and the kind node keeps the
-    # address it got first, so the end of the subnet is never the node's. $null when the network does
-    # not exist or has no IPv4 subnet.
+    # The fixed addresses of the relay container: IPv4 is the last host address of the relay network's
+    # IPv4 subnet, IPv6 the last address but one of its IPv6 subnet (only when the network has one; the
+    # kind network is dual-stack), read from `docker network inspect` (never hard-coded; the subnets
+    # differ per machine). Docker hands out dynamic addresses from the start of a subnet and the kind node
+    # keeps the addresses it got first (in both families), so the end of a subnet is never the node's.
+    # $null when the network does not exist or has no IPv4 subnet.
     param([string]$Network = (Get-OctoKubernetesS3StoreInfo).RelayNetwork)
     $config = & docker network inspect $Network -f '{{range .IPAM.Config}}{{.Subnet}}|{{.Gateway}} {{end}}' 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $config) { return $null }
+    $ipv4 = $null
+    $ipv6 = $null
     foreach ($entry in ("$config" -split '\s+' | Where-Object { $_ })) {
         $subnet, $gateway = $entry -split '\|', 2
-        $address = Get-OctoIPv4SubnetLastHost $subnet
-        if (-not $address) { continue }
-        if ($address -eq $gateway) {
-            # A gateway at the end of the subnet is unusual; take the address below it.
-            $address = Get-OctoIPv4SubnetLastHost $subnet -FromEnd 2
+        $gateway = ConvertTo-OctoCanonicalIPAddress $gateway
+        foreach ($family in 'IPv4', 'IPv6') {
+            if (($family -eq 'IPv4' -and $ipv4) -or ($family -eq 'IPv6' -and $ipv6)) { continue }
+            $lastHost = if ($family -eq 'IPv4') { ${function:Get-OctoIPv4SubnetLastHost} } else { ${function:Get-OctoIPv6SubnetLastHost} }
+            $address = & $lastHost $subnet
             if (-not $address) { continue }
+            if ($address -eq $gateway) {
+                # A gateway at the end of the subnet is unusual; take the address below it.
+                $address = & $lastHost $subnet -FromEnd 2
+                if (-not $address) { continue }
+            }
+            if ($family -eq 'IPv4') { $ipv4 = $address } else { $ipv6 = $address }
         }
-        return $address
     }
-    return $null
+    if (-not $ipv4) { return $null }
+    return [pscustomobject]@{ IPv4 = $ipv4; IPv6 = $ipv6 }
 }
 
 function Get-OctoKubernetesS3RelayState {
-    # The relay container as far as the setup needs it, or $null when there is none. FixedAddress is the
-    # static address the container was created with (--ip), not the one it holds right now: a stopped
-    # container holds none, and a container without --ip gets whatever is free when it starts.
+    # The relay container as far as the setup needs it, or $null when there is none. FixedAddress and
+    # FixedIPv6Address are the static addresses the container was created with (--ip, --ip6), not the ones
+    # it holds right now: a stopped container holds none, and a container without them gets whatever is
+    # free when it starts.
     $info = Get-OctoKubernetesS3StoreInfo
     $format = '{{.State.Running}}|{{index .Config.Labels "octo-tools.cluster"}}|' +
-        '{{with index .NetworkSettings.Networks "' + $info.RelayNetwork + '"}}{{with .IPAMConfig}}{{.IPv4Address}}{{end}}{{end}}'
+        '{{with index .NetworkSettings.Networks "' + $info.RelayNetwork + '"}}{{with .IPAMConfig}}{{.IPv4Address}}|{{.IPv6Address}}{{end}}{{end}}'
     $line = & docker inspect -f $format $info.RelayContainer 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $line) { return $null }
-    $running, $owner, $fixed = "$line".Trim() -split '\|', 3
+    $running, $owner, $fixed, $fixedIPv6 = "$line".Trim() -split '\|', 4
     [pscustomobject]@{
-        Running      = ($running -eq 'true')
-        Owner        = "$owner".Trim()
-        FixedAddress = "$fixed".Trim()
+        Running          = ($running -eq 'true')
+        Owner            = "$owner".Trim()
+        FixedAddress     = "$fixed".Trim()
+        FixedIPv6Address = "$fixedIPv6".Trim()
     }
 }
 
 function Get-OctoKubernetesS3RelayAction {
     # What the setup does with the relay container (pure decision, no docker call):
     #   Create   - there is none
-    #   Keep     - it runs with the expected fixed address
-    #   Start    - it is stopped but has the expected fixed address
-    #   Recreate - it belongs to this cluster but has no or another fixed address (created before AB#8892,
-    #              or the kind subnet changed); left as it is it can take the kind node's address on a reboot
+    #   Keep     - it runs with the expected fixed IPv4 and IPv6 address
+    #   Start    - it is stopped but has the expected fixed addresses
+    #   Recreate - it belongs to this cluster but its fixed IPv4 or IPv6 address is missing or another one
+    #              (created before AB#8892, or the kind subnets changed); left as it is it can take one of
+    #              the kind node's addresses on a reboot
     #   Foreign  - a container of that name that belongs to another cluster or to nobody; never touched
+    # ExpectedIPv6Address is empty when the network has no IPv6 subnet; the relay then has none either.
     param(
         [AllowNull()] [object]$Relay,
         [AllowNull()] [string]$ExpectedAddress,
+        [AllowNull()] [AllowEmptyString()] [string]$ExpectedIPv6Address,
         [string]$ClusterName = "kind"
     )
     if (-not $Relay) { return 'Create' }
     if ($Relay.Owner -ne $ClusterName) { return 'Foreign' }
-    if ($Relay.FixedAddress -ne $ExpectedAddress) { return 'Recreate' }
+    if ((ConvertTo-OctoCanonicalIPAddress $Relay.FixedAddress) -ne (ConvertTo-OctoCanonicalIPAddress $ExpectedAddress)) { return 'Recreate' }
+    if ((ConvertTo-OctoCanonicalIPAddress $Relay.FixedIPv6Address) -ne (ConvertTo-OctoCanonicalIPAddress $ExpectedIPv6Address)) { return 'Recreate' }
     if (-not $Relay.Running) { return 'Start' }
     return 'Keep'
 }
@@ -320,11 +373,12 @@ itself; a cluster created before cannot get a new mapping without being recreate
 container (socat, outside the cluster) forwards 127.0.0.1:8333 to the node port.
 
 .DESCRIPTION
-The relay runs on the kind network with a fixed address at the end of its IPv4 subnet
-(Get-OctoKubernetesS3RelayAddress). Without it, Docker could start the relay before the kind node after a
-reboot and give it the node's address, and the node would not start ("Address already in use", AB#8892).
-A relay of this cluster with no fixed address or another one is removed and recreated, even while it
-runs; nothing else is.
+The relay runs on the kind network with a fixed address at the end of its IPv4 subnet and, when the
+network is dual-stack, a fixed address at the end of its IPv6 subnet (Get-OctoKubernetesS3RelayAddress).
+Without them, Docker could start the relay before the kind node after a reboot and give it one of the
+node's addresses, and the node would not start ("Address already in use", AB#8892). A relay of this
+cluster whose fixed IPv4 or IPv6 address is missing or another one is removed and recreated, even while
+it runs; nothing else is.
 #>
     [CmdletBinding()]
     param([string]$ClusterName = "kind")
@@ -337,16 +391,20 @@ runs; nothing else is.
         return $true
     }
 
-    $address = Get-OctoKubernetesS3RelayAddress -Network $info.RelayNetwork
-    if (-not $address) {
+    $addresses = Get-OctoKubernetesS3RelayAddress -Network $info.RelayNetwork
+    if (-not $addresses) {
         Write-Warning "Docker network '$($info.RelayNetwork)' has no IPv4 subnet (or does not exist); the S3 store relay cannot get a fixed address and is not started."
         return $false
     }
 
+    $address = $addresses.IPv4
+    $ipv6 = $addresses.IPv6
+    $shown = if ($ipv6) { "$address, $ipv6" } else { $address }
+
     $relay = Get-OctoKubernetesS3RelayState
-    switch (Get-OctoKubernetesS3RelayAction -Relay $relay -ExpectedAddress $address -ClusterName $ClusterName) {
+    switch (Get-OctoKubernetesS3RelayAction -Relay $relay -ExpectedAddress $address -ExpectedIPv6Address $ipv6 -ClusterName $ClusterName) {
         'Keep' {
-            Write-Host "S3 store: relay container '$($info.RelayContainer)' provides the host port ($address)" -ForegroundColor DarkGray
+            Write-Host "S3 store: relay container '$($info.RelayContainer)' provides the host port ($shown)" -ForegroundColor DarkGray
             return $true
         }
         'Start' {
@@ -355,7 +413,7 @@ runs; nothing else is.
                 Write-Warning "Starting the relay container '$($info.RelayContainer)' failed; the S3 store is not reachable from the host."
                 return $false
             }
-            Write-Host "S3 store: relay container '$($info.RelayContainer)' started ($address)" -ForegroundColor DarkGray
+            Write-Host "S3 store: relay container '$($info.RelayContainer)' started ($shown)" -ForegroundColor DarkGray
             return $true
         }
         'Foreign' {
@@ -363,11 +421,12 @@ runs; nothing else is.
             return $false
         }
         'Recreate' {
-            $was = if ($relay.FixedAddress) { "fixed address $($relay.FixedAddress)" } else { "no fixed address" }
-            Write-Host "S3 store: recreating relay container '$($info.RelayContainer)' ($was, expected $address)" -ForegroundColor Green
+            $was = @($relay.FixedAddress, $relay.FixedIPv6Address | Where-Object { $_ }) -join ', '
+            $was = if ($was) { "fixed addresses $was" } else { "no fixed address" }
+            Write-Host "S3 store: recreating relay container '$($info.RelayContainer)' ($was, expected $shown)" -ForegroundColor Green
             & docker rm -f $info.RelayContainer | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Could not remove the relay container '$($info.RelayContainer)'; it keeps its old address."
+                Write-Warning "Could not remove the relay container '$($info.RelayContainer)'; it keeps its old addresses."
                 return $false
             }
         }
@@ -378,9 +437,11 @@ runs; nothing else is.
         return $false
     }
 
-    Write-Host "S3 store: starting relay container '$($info.RelayContainer)' (127.0.0.1:$($info.HostPort) -> $node`:$($info.NodePort), address $address); this kind cluster has no host port mapping for the store" -ForegroundColor Green
+    Write-Host "S3 store: starting relay container '$($info.RelayContainer)' (127.0.0.1:$($info.HostPort) -> $node`:$($info.NodePort), address $shown); this kind cluster has no host port mapping for the store" -ForegroundColor Green
+    $addressArgs = @('--ip', $address)
+    if ($ipv6) { $addressArgs += @('--ip6', $ipv6) }
     & docker run -d --name $info.RelayContainer --label "octo-tools.cluster=$ClusterName" --restart unless-stopped `
-        --network $info.RelayNetwork --ip $address `
+        --network $info.RelayNetwork @addressArgs `
         -p "127.0.0.1:$($info.HostPort):$($info.HostPort)" $info.RelayImage `
         "TCP-LISTEN:$($info.HostPort),fork,reuseaddr" "TCP:$node`:$($info.NodePort)" | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -399,8 +460,8 @@ volume, bucket, host port and the CrateDB job log filter. Idempotent and purely 
 .DESCRIPTION
 Install-OctoKubernetes calls this as a step; it can be run on its own on a cluster that already exists,
 because it does not touch anything that is already there (no restart, no recreate, no delete) - except
-its own host relay container, which is removed and recreated (even while it runs) when it has no fixed
-address on the kind network or another one than expected.
+its own host relay container, which is removed and recreated (even while it runs) when its fixed IPv4 or
+IPv6 address on the kind network is missing or another one than expected.
 
 .PARAMETER ClusterName
 Name of the kind cluster. Defaults to "kind".
