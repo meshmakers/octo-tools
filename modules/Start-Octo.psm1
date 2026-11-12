@@ -9,6 +9,13 @@ The Start-Octo function starts all OctoMesh services, but gives the user control
 .PARAMETER SystemDatabase
 The name of the system database to use. Defaults to "OctoSystem".
 
+.PARAMETER TenantDatabasePrefix
+Optional MongoDB tenant-database prefix of this instance (AB#8797, OCTO_SYSTEM__TENANTDATABASEPREFIX). Use it
+together with a SystemDatabase of its own when a second local instance shares the MongoDB: tenants created
+without an explicit database name then get the database <prefix><tenantId>, and explicit names without the
+prefix are refused. Empty (default) sets nothing, so the services keep the unprefixed names (or a value the
+caller already put into the environment).
+
 .PARAMETER botService
 If set to $true, the Bot Service will be started. If set to $false, it will not be started.
 
@@ -105,6 +112,14 @@ Start-Octo -SystemDatabase "MyCustomSystem"
 This example starts all services using "MyCustomSystem" as the system database name.
 
 .EXAMPLE
+Start-Octo -SystemDatabase "OctoSystem_s2" -TenantDatabasePrefix "s2_"
+
+This example starts an instance that shares the MongoDB with another one: its own system database, and its
+tenants get databases named s2_<tenantId>. The service ports are fixed, so it cannot run next to another
+Start-Octo stack on the same host (Identity and Asset Repo use 5000-5003): start it on another machine, or stop
+the other stack first.
+
+.EXAMPLE
 Start-Octo -nonInteractive $true -configuration DebugL -identityAssetRepoOnly $true
 
 This example starts only Identity and Asset Repo services in non-interactive mode with DebugL configuration.
@@ -140,7 +155,9 @@ Use this function to selectively start OctoMesh services based on your requireme
         [Parameter()] [Boolean]$aiWorker = $false,
         [Parameter()] [Boolean]$s3Store = $true,
         [Parameter()] [Boolean]$httpActivator = $false,
-        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "https://{release}.localhost"
+        [Parameter()] [string]$httpActivatorWorkloadAddressTemplate = "https://{release}.localhost",
+        # Last on purpose: a parameter in the middle would shift the positional binding of the ones after it.
+        [Parameter()] [string]$TenantDatabasePrefix = ""
     )
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Error "docker is not on PATH. Install Docker before running Start-Octo."
@@ -224,6 +241,7 @@ Use this function to selectively start OctoMesh services based on your requireme
     }
 
     $env:OCTO_SYSTEM__SYSTEMDATABASENAME = $SystemDatabase
+    Set-OctoTenantDatabasePrefixEnvironment -TenantDatabasePrefix $TenantDatabasePrefix
     $env:OCTO_SYSTEM__ADMINUSERPASSWORD = "OctoAdmin1"
     $env:OCTO_SYSTEM__DATABASEUSERPASSWORD = "OctoUser1"
     $env:OCTO_SYSTEM__USEDIRECTCONNECTION = "true"
@@ -533,6 +551,30 @@ Use this function to selectively start OctoMesh services based on your requireme
     Write-Host "Jobs stopped"
 
     Get-ServiceStatus
+}
+
+# AB#8797: whether OCTO_SYSTEM__TENANTDATABASEPREFIX holds a value an earlier Start-Octo of this session set.
+$script:StartOctoSetTenantDatabasePrefix = $false
+
+<#
+.SYNOPSIS
+Sets OCTO_SYSTEM__TENANTDATABASEPREFIX for the services Start-Octo starts (AB#8797).
+
+.DESCRIPTION
+A given prefix is set. Without one, a value from the caller's environment (for example an octo-devstack slot)
+is kept, but a value an earlier Start-Octo of this session set is removed: otherwise a later start of another
+instance in the same shell would inherit that instance's prefix. The services inherit the environment when they
+start, so the value stays set after Start-Octo returns.
+#>
+function Set-OctoTenantDatabasePrefixEnvironment([string]$TenantDatabasePrefix) {
+    if (-not [string]::IsNullOrWhiteSpace($TenantDatabasePrefix)) {
+        $env:OCTO_SYSTEM__TENANTDATABASEPREFIX = $TenantDatabasePrefix
+        $script:StartOctoSetTenantDatabasePrefix = $true
+    }
+    elseif ($script:StartOctoSetTenantDatabasePrefix) {
+        Remove-Item Env:OCTO_SYSTEM__TENANTDATABASEPREFIX -ErrorAction SilentlyContinue
+        $script:StartOctoSetTenantDatabasePrefix = $false
+    }
 }
 
 Export-ModuleMember -Function @('Start-Octo')
