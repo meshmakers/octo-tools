@@ -193,7 +193,15 @@ Test-OctoKubernetesS3Store             # the check below
 `Install-OctoKubernetesS3Store` starts a small relay container, `octo-kind-s3-relay` (`alpine/socat`,
 `--restart unless-stopped`, bound to `127.0.0.1:8333`, on the docker network `kind`, labelled
 `octo-tools.cluster=<name>`) that forwards to the node port. It is not part of the cluster;
-`Uninstall-OctoKubernetes` removes it. Another cluster that maps the same host ports (`octomesh` of
+`Uninstall-OctoKubernetes` removes it.
+
+The relay has a fixed address on the `kind` network: the last host address of the network's IPv4
+subnet, read from `docker network inspect kind` (for `172.23.0.0/16` that is `172.23.255.254`). Docker
+hands out dynamic addresses from the start of the subnet, where the kind node has its address; a relay
+without a fixed address could take the node's address when Docker starts it first after a reboot, and
+the node would not start (`Address already in use`). `Install-OctoKubernetesS3Store` recreates a relay of
+this cluster that has no or another fixed address, so older machines heal on the next run; a relay with
+the right address is left running. This is the only thing the setup ever recreates. Another cluster that maps the same host ports (`octomesh` of
 getting-started) cannot run at the same time, as for all other infra ports.
 
 **Job log filter.** CrateDB records every finished statement with its full text in `sys.jobs_log`,
@@ -403,7 +411,8 @@ docker start kind-control-plane     # then: kubectl --context kind-kind -n octo-
 ```
 
 The S3 store's host relay container (`octo-kind-s3-relay`, clusters created before the host port mapping)
-keeps running on its own (`--restart unless-stopped`); `Test-OctoKubernetesS3Store` shows whether
+keeps running on its own (`--restart unless-stopped`); its fixed address keeps it from taking the
+node's address, whichever of the two Docker starts first. `Test-OctoKubernetesS3Store` shows whether
 everything is back.
 
 ## Teardown
@@ -500,6 +509,11 @@ The legacy volume-tar backup cmdlets (`Backup-OctoInfrastructure` / `Restore-Oct
 - **`Test-OctoKubernetesS3Store` fails on `host` although the pod is ready** — nothing listens on
   `localhost:8333`: the relay container is stopped (`docker start octo-kind-s3-relay`, or re-run
   `Install-OctoKubernetesS3Store`), or another process holds the port (`lsof -nP -iTCP:8333`).
+- **After a reboot `kind-control-plane` does not start: `failed to set up container networking: Address
+  already in use`** — the S3 relay container was created before it had a fixed address and took the
+  node's address. Stop the relay (`docker stop octo-kind-s3-relay`), start the node (`docker start
+  kind-control-plane`) and run `Install-OctoKubernetesS3Store`: it recreates the relay with its fixed
+  address at the end of the `kind` subnet.
 - **`jobLogFilter` fails** — `stats.jobs_log_filter` is not the expected filter. Run
   `Set-OctoKubernetesCrateDbJobLogFilter`. Do not run a `COPY` with the S3 key until the check passes:
   the key would be readable in `sys.jobs_log`.

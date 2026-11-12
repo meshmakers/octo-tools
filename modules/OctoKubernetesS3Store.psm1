@@ -7,7 +7,9 @@
 #   * CrateDB (in the cluster) uses the cluster name      seaweedfs.octo-infra:8333   (protocol = 'http')
 #
 # This module only ADDS to a cluster: it never restarts, recreates or deletes an existing pod, volume
-# or namespace (Uninstall-OctoKubernetesS3Store removes only what it created itself). Credentials are
+# or namespace (Uninstall-OctoKubernetesS3Store removes only what it created itself). The one exception
+# lies outside the cluster: its own host relay container is recreated when it lacks the fixed address
+# (Initialize-OctoKubernetesS3HostPort, AB#8892). Credentials are
 # generated at install time into the Kubernetes Secret octo-infra/seaweedfs-s3; they are never written
 # to a file in a repository, printed or logged.
 
@@ -37,6 +39,10 @@ The non-secret facts about the local S3 store (names, ports, bucket, both endpoi
         # port mapping to a running cluster): a docker container next to the node, outside the cluster.
         RelayContainer    = "octo-kind-s3-relay"
         RelayImage        = "alpine/socat:1.8.1.3"
+        # Docker network of the kind node. The relay gets a fixed address at the end of its IPv4 subnet
+        # (Get-OctoKubernetesS3RelayAddress), so that it never takes the node's address when Docker
+        # starts the relay first after a reboot (AB#8892).
+        RelayNetwork      = "kind"
         CrateHttpUri      = "http://127.0.0.1:4301"
         # Cluster setting that keeps COPY statements (they carry the S3 key) out of sys.jobs_log.
         JobLogFilter      = "stmt NOT ILIKE 'copy %'"
@@ -223,12 +229,100 @@ function Test-OctoLocalPortOpen([int]$port) {
     finally { $client.Dispose() }
 }
 
+function Get-OctoIPv4SubnetLastHost {
+    # Host address near the end of an IPv4 subnet in CIDR notation: the broadcast address minus FromEnd
+    # ("172.23.0.0/16" -> "172.23.255.254", with -FromEnd 2 "172.23.255.253"). $null for anything that is
+    # not an IPv4 subnet with such a host address (an IPv6 subnet, /31, /32, garbage).
+    param([string]$Subnet, [ValidateRange(1, 1024)] [int]$FromEnd = 1)
+    if ($Subnet -notmatch '^\s*(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})\s*$') { return $null }
+    $prefix = [int]$Matches[2]
+    if ($prefix -gt 32) { return $null }
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($Matches[1], [ref]$address)) { return $null }
+    if ($address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $null }
+    $bytes = $address.GetAddressBytes()
+    [uint64]$value = ([uint64]$bytes[0] -shl 24) -bor ([uint64]$bytes[1] -shl 16) -bor ([uint64]$bytes[2] -shl 8) -bor [uint64]$bytes[3]
+    [uint64]$hostMask = ([uint64]1 -shl (32 - $prefix)) - 1
+    [uint64]$network = $value -band (-bnot $hostMask -band [uint64][uint32]::MaxValue)
+    [uint64]$broadcast = $network -bor $hostMask
+    # The host address must lie strictly between the network and the broadcast address.
+    if ($broadcast -lt $network + $FromEnd + 1) { return $null }
+    [uint64]$hostAddress = $broadcast - $FromEnd
+    return "{0}.{1}.{2}.{3}" -f (($hostAddress -shr 24) -band 255), (($hostAddress -shr 16) -band 255), (($hostAddress -shr 8) -band 255), ($hostAddress -band 255)
+}
+
+function Get-OctoKubernetesS3RelayAddress {
+    # The fixed IPv4 address of the relay container: the last host address of the relay network's IPv4
+    # subnet, read from `docker network inspect` (never hard-coded; the subnet differs per machine).
+    # Docker hands out dynamic addresses from the start of the subnet and the kind node keeps the
+    # address it got first, so the end of the subnet is never the node's. $null when the network does
+    # not exist or has no IPv4 subnet.
+    param([string]$Network = (Get-OctoKubernetesS3StoreInfo).RelayNetwork)
+    $config = & docker network inspect $Network -f '{{range .IPAM.Config}}{{.Subnet}}|{{.Gateway}} {{end}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $config) { return $null }
+    foreach ($entry in ("$config" -split '\s+' | Where-Object { $_ })) {
+        $subnet, $gateway = $entry -split '\|', 2
+        $address = Get-OctoIPv4SubnetLastHost $subnet
+        if (-not $address) { continue }
+        if ($address -eq $gateway) {
+            # A gateway at the end of the subnet is unusual; take the address below it.
+            $address = Get-OctoIPv4SubnetLastHost $subnet -FromEnd 2
+            if (-not $address) { continue }
+        }
+        return $address
+    }
+    return $null
+}
+
+function Get-OctoKubernetesS3RelayState {
+    # The relay container as far as the setup needs it, or $null when there is none. FixedAddress is the
+    # static address the container was created with (--ip), not the one it holds right now: a stopped
+    # container holds none, and a container without --ip gets whatever is free when it starts.
+    $info = Get-OctoKubernetesS3StoreInfo
+    $format = '{{.State.Running}}|{{index .Config.Labels "octo-tools.cluster"}}|' +
+        '{{with index .NetworkSettings.Networks "' + $info.RelayNetwork + '"}}{{with .IPAMConfig}}{{.IPv4Address}}{{end}}{{end}}'
+    $line = & docker inspect -f $format $info.RelayContainer 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $line) { return $null }
+    $running, $owner, $fixed = "$line".Trim() -split '\|', 3
+    [pscustomobject]@{
+        Running      = ($running -eq 'true')
+        Owner        = "$owner".Trim()
+        FixedAddress = "$fixed".Trim()
+    }
+}
+
+function Get-OctoKubernetesS3RelayAction {
+    # What the setup does with the relay container (pure decision, no docker call):
+    #   Create   - there is none
+    #   Keep     - it runs with the expected fixed address
+    #   Start    - it is stopped but has the expected fixed address
+    #   Recreate - it belongs to this cluster but has no or another fixed address (created before AB#8892,
+    #              or the kind subnet changed); left as it is it can take the kind node's address on a reboot
+    #   Foreign  - a container of that name that belongs to another cluster or to nobody; never touched
+    param(
+        [AllowNull()] [object]$Relay,
+        [AllowNull()] [string]$ExpectedAddress,
+        [string]$ClusterName = "kind"
+    )
+    if (-not $Relay) { return 'Create' }
+    if ($Relay.Owner -ne $ClusterName) { return 'Foreign' }
+    if ($Relay.FixedAddress -ne $ExpectedAddress) { return 'Recreate' }
+    if (-not $Relay.Running) { return 'Start' }
+    return 'Keep'
+}
+
 function Initialize-OctoKubernetesS3HostPort {
     <#
 .SYNOPSIS
 Makes the store reachable on the host port. A cluster created from the current kind-cluster.yaml maps it
 itself; a cluster created before cannot get a new mapping without being recreated, so a small relay
 container (socat, outside the cluster) forwards 127.0.0.1:8333 to the node port.
+
+.DESCRIPTION
+The relay runs on the kind network with a fixed address at the end of its IPv4 subnet
+(Get-OctoKubernetesS3RelayAddress). Without it, Docker could start the relay before the kind node after a
+reboot and give it the node's address, and the node would not start ("Address already in use", AB#8892).
+A relay of this cluster without that fixed address is recreated; nothing else is.
 #>
     [CmdletBinding()]
     param([string]$ClusterName = "kind")
@@ -241,11 +335,40 @@ container (socat, outside the cluster) forwards 127.0.0.1:8333 to the node port.
         return $true
     }
 
-    $state = (& docker inspect -f '{{.State.Running}}' $info.RelayContainer 2>$null)
-    if ($LASTEXITCODE -eq 0) {
-        if ($state -ne "true") { & docker start $info.RelayContainer | Out-Null }
-        Write-Host "S3 store: relay container '$($info.RelayContainer)' provides the host port" -ForegroundColor DarkGray
-        return $true
+    $address = Get-OctoKubernetesS3RelayAddress -Network $info.RelayNetwork
+    if (-not $address) {
+        Write-Warning "Docker network '$($info.RelayNetwork)' has no IPv4 subnet (or does not exist); the S3 store relay cannot get a fixed address and is not started."
+        return $false
+    }
+
+    $relay = Get-OctoKubernetesS3RelayState
+    switch (Get-OctoKubernetesS3RelayAction -Relay $relay -ExpectedAddress $address -ClusterName $ClusterName) {
+        'Keep' {
+            Write-Host "S3 store: relay container '$($info.RelayContainer)' provides the host port ($address)" -ForegroundColor DarkGray
+            return $true
+        }
+        'Start' {
+            & docker start $info.RelayContainer | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Starting the relay container '$($info.RelayContainer)' failed; the S3 store is not reachable from the host."
+                return $false
+            }
+            Write-Host "S3 store: relay container '$($info.RelayContainer)' started ($address)" -ForegroundColor DarkGray
+            return $true
+        }
+        'Foreign' {
+            Write-Warning "A container '$($info.RelayContainer)' exists that does not belong to cluster '$ClusterName' (label octo-tools.cluster='$($relay.Owner)'); it is left alone. Remove it with 'docker rm -f $($info.RelayContainer)' and run Install-OctoKubernetesS3Store again."
+            return $false
+        }
+        'Recreate' {
+            $was = if ($relay.FixedAddress) { "fixed address $($relay.FixedAddress)" } else { "no fixed address" }
+            Write-Host "S3 store: recreating relay container '$($info.RelayContainer)' ($was, expected $address)" -ForegroundColor Green
+            & docker rm -f $info.RelayContainer | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Could not remove the relay container '$($info.RelayContainer)'; it keeps running without a fixed address."
+                return $false
+            }
+        }
     }
 
     if (Test-OctoLocalPortOpen $info.HostPort) {
@@ -253,8 +376,9 @@ container (socat, outside the cluster) forwards 127.0.0.1:8333 to the node port.
         return $false
     }
 
-    Write-Host "S3 store: starting relay container '$($info.RelayContainer)' (127.0.0.1:$($info.HostPort) -> $node`:$($info.NodePort)); this kind cluster has no host port mapping for the store" -ForegroundColor Green
-    & docker run -d --name $info.RelayContainer --label "octo-tools.cluster=$ClusterName" --restart unless-stopped --network kind `
+    Write-Host "S3 store: starting relay container '$($info.RelayContainer)' (127.0.0.1:$($info.HostPort) -> $node`:$($info.NodePort), address $address); this kind cluster has no host port mapping for the store" -ForegroundColor Green
+    & docker run -d --name $info.RelayContainer --label "octo-tools.cluster=$ClusterName" --restart unless-stopped `
+        --network $info.RelayNetwork --ip $address `
         -p "127.0.0.1:$($info.HostPort):$($info.HostPort)" $info.RelayImage `
         "TCP-LISTEN:$($info.HostPort),fork,reuseaddr" "TCP:$node`:$($info.NodePort)" | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -272,7 +396,8 @@ volume, bucket, host port and the CrateDB job log filter. Idempotent and purely 
 
 .DESCRIPTION
 Install-OctoKubernetes calls this as a step; it can be run on its own on a cluster that already exists,
-because it does not touch anything that is already there (no restart, no recreate, no delete).
+because it does not touch anything that is already there (no restart, no recreate, no delete) - except
+its own host relay container, which is recreated when it has no fixed address on the kind network.
 
 .PARAMETER ClusterName
 Name of the kind cluster. Defaults to "kind".
