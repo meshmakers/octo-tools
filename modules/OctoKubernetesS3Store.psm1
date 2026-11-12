@@ -8,8 +8,9 @@
 #
 # This module only ADDS to a cluster: it never restarts, recreates or deletes an existing pod, volume
 # or namespace (Uninstall-OctoKubernetesS3Store removes only what it created itself). The one exception
-# lies outside the cluster: its own host relay container is recreated when it lacks the fixed address
-# (Initialize-OctoKubernetesS3HostPort, AB#8892). Credentials are
+# lies outside the cluster: its own host relay container is removed and recreated, even while it runs,
+# when it has no fixed address or another one than expected (Initialize-OctoKubernetesS3HostPort,
+# AB#8892). Credentials are
 # generated at install time into the Kubernetes Secret octo-infra/seaweedfs-s3; they are never written
 # to a file in a repository, printed or logged.
 
@@ -322,7 +323,8 @@ container (socat, outside the cluster) forwards 127.0.0.1:8333 to the node port.
 The relay runs on the kind network with a fixed address at the end of its IPv4 subnet
 (Get-OctoKubernetesS3RelayAddress). Without it, Docker could start the relay before the kind node after a
 reboot and give it the node's address, and the node would not start ("Address already in use", AB#8892).
-A relay of this cluster without that fixed address is recreated; nothing else is.
+A relay of this cluster with no fixed address or another one is removed and recreated, even while it
+runs; nothing else is.
 #>
     [CmdletBinding()]
     param([string]$ClusterName = "kind")
@@ -365,7 +367,7 @@ A relay of this cluster without that fixed address is recreated; nothing else is
             Write-Host "S3 store: recreating relay container '$($info.RelayContainer)' ($was, expected $address)" -ForegroundColor Green
             & docker rm -f $info.RelayContainer | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Could not remove the relay container '$($info.RelayContainer)'; it keeps running without a fixed address."
+                Write-Warning "Could not remove the relay container '$($info.RelayContainer)'; it keeps its old address."
                 return $false
             }
         }
@@ -397,7 +399,8 @@ volume, bucket, host port and the CrateDB job log filter. Idempotent and purely 
 .DESCRIPTION
 Install-OctoKubernetes calls this as a step; it can be run on its own on a cluster that already exists,
 because it does not touch anything that is already there (no restart, no recreate, no delete) - except
-its own host relay container, which is recreated when it has no fixed address on the kind network.
+its own host relay container, which is removed and recreated (even while it runs) when it has no fixed
+address on the kind network or another one than expected.
 
 .PARAMETER ClusterName
 Name of the kind cluster. Defaults to "kind".

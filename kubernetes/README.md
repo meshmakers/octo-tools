@@ -184,7 +184,7 @@ the store the stack behaves exactly as before and the archive dump stays on the 
 cluster that already exists, add it without touching anything else:
 
 ```powershell
-Install-OctoKubernetesS3Store          # idempotent; additive: no restart, recreate or delete of anything existing
+Install-OctoKubernetesS3Store          # idempotent; additive: no restart, recreate or delete of anything existing (except the relay, below)
 Test-OctoKubernetesS3Store             # the check below
 ```
 
@@ -193,16 +193,17 @@ Test-OctoKubernetesS3Store             # the check below
 `Install-OctoKubernetesS3Store` starts a small relay container, `octo-kind-s3-relay` (`alpine/socat`,
 `--restart unless-stopped`, bound to `127.0.0.1:8333`, on the docker network `kind`, labelled
 `octo-tools.cluster=<name>`) that forwards to the node port. It is not part of the cluster;
-`Uninstall-OctoKubernetes` removes it.
+`Uninstall-OctoKubernetes` removes it. Another cluster that maps the same host ports (`octomesh` of
+getting-started) cannot run at the same time, as for all other infra ports.
 
 The relay has a fixed address on the `kind` network: the last host address of the network's IPv4
 subnet, read from `docker network inspect kind` (for `172.23.0.0/16` that is `172.23.255.254`). Docker
 hands out dynamic addresses from the start of the subnet, where the kind node has its address; a relay
 without a fixed address could take the node's address when Docker starts it first after a reboot, and
-the node would not start (`Address already in use`). `Install-OctoKubernetesS3Store` recreates a relay of
-this cluster that has no or another fixed address, so older machines heal on the next run; a relay with
-the right address is left running. This is the only thing the setup ever recreates. Another cluster that maps the same host ports (`octomesh` of
-getting-started) cannot run at the same time, as for all other infra ports.
+the node would not start (`Address already in use`). `Install-OctoKubernetesS3Store` removes and recreates a
+relay of this cluster that has no fixed address or another one, even while it runs, so older machines
+heal on the next run; a relay with the right address is left running. The relay is the only thing the
+setup ever recreates.
 
 **Job log filter.** CrateDB records every finished statement with its full text in `sys.jobs_log`,
 which for a `COPY` includes the S3 secret key. The persistent cluster setting
