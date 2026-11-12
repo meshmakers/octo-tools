@@ -83,8 +83,11 @@ function Compile-RepoCore {
     if ($builder -eq "build.ps1") {
         $buildScript = Join-Path -Path $path -ChildPath "build.ps1"
         Write-Host "Found custom build script in $path" -ForegroundColor Cyan
-        & $buildScript -configuration $configuration
-        return $LASTEXITCODE -eq 0
+        # Everything a builder writes to the pipeline (npm, dotnet, Write-Output) goes to the host: it stays
+        # visible in the log, and Compile-RepoCore returns exactly one [bool] (AB#8831 - Studio's build.ps1
+        # leaked its npm output, Compile-Repo returned an array and the [Boolean] cast of Invoke-BuildAll threw).
+        & $buildScript -configuration $configuration | Out-Host
+        return [bool]($LASTEXITCODE -eq 0)
     }
 
     # Check if a solution file exists. Match both the legacy .sln and the modern
@@ -102,16 +105,16 @@ function Compile-RepoCore {
         # frontends has to be published to build the angular app
         # -laneIsolation Off: Invoke-BuildAll/Compile-Repo already set the lane environment for this repo;
         # the nested cmdlet must neither recompute nor override it (e.g. under -laneIsolation Off).
-        Invoke-Publish -repositoryPath $path -configuration $configuration -laneIsolation Off
+        Invoke-Publish -repositoryPath $path -configuration $configuration -laneIsolation Off | Out-Host
         $state = $Global:LASTEXITCODE -eq 0
     }
     elseif ($builder -eq "Invoke-BuildZenonPlug") {
-        Invoke-BuildZenonPlug -repositoryPath $path -configuration $configuration
+        Invoke-BuildZenonPlug -repositoryPath $path -configuration $configuration | Out-Host
         $state = $Global:LASTEXITCODE -eq 0
     }
     else {
         # -refreshCatalogs = "do not decide about the catalogs": the run did (the property is in $msbuildProperties or not).
-        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off -msbuildProperties $msbuildProperties -refreshCatalogs:$catalogsDecided
+        Invoke-Build -repositoryPath $path -configuration $configuration -laneIsolation Off -msbuildProperties $msbuildProperties -refreshCatalogs:$catalogsDecided | Out-Host
         $state = $Global:LASTEXITCODE -eq 0
     }
 
@@ -120,7 +123,7 @@ function Compile-RepoCore {
             $events.Phase = 'packages'
             Write-OctoBuildEvent -Path $events.Path -Command 'Invoke-BuildAll' -Event 'phase' -Data ([ordered]@{ repo = (Split-Path -Leaf $path); phase = 'packages' })
         }
-        Copy-NuGetPackages -directory $path -branch $branch
+        Copy-NuGetPackages -directory $path -branch $branch | Out-Host
     }
 
     return $state;
