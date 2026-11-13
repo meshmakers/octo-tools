@@ -148,6 +148,24 @@ Describe 'Remove-OctoEnvironment after a merged pull request (AB#8953)' {
         Test-Path $wt | Should -BeTrue
     }
 
+    It 'reads the dirty state again right before the removal (edits made during the merge checks are kept)' {
+        Add-WorktreeCommit 'a.txt' 'a' 'first change' | Out-Null
+        Invoke-OnOrigin { param($clone)
+            Invoke-TestGit $clone merge -q --squash FETCH_HEAD | Out-Null
+            Invoke-TestGit $clone commit -q -m 'feature m (#1)' | Out-Null }
+        # an edit that lands while the merge check runs (the check fetches origin's default branch)
+        Mock -ModuleName OctoEnvironment Resolve-OctoEnvironmentDefaultBranch {
+            Set-Content -Path (Join-Path $script:wt 'edited-meanwhile.txt') -Value 'x'
+            [pscustomobject]@{ Ref = 'origin/main'; Fetched = $true; Note = $null }
+        }
+        Invoke-TestGit $wt fetch -q origin main | Out-Null
+
+        $doc = Get-Doc (Remove-OctoEnvironment -env 'env-m' -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'octo-sdk: uncommitted changes'
+        Test-Path (Join-Path $wt 'edited-meanwhile.txt') | Should -BeTrue
+    }
+
     It 'refuses and names the commits when the base branch cannot be fetched' {
         Add-WorktreeCommit 'a.txt' 'a' 'first change' | Out-Null
         Invoke-TestGit $wt remote set-url origin (Join-Path $TestDrive 'origins/does-not-exist.git') | Out-Null
@@ -183,7 +201,7 @@ Describe 'Remove-OctoEnvironment after a merged pull request (AB#8953)' {
             $state.mergedVia | Should -Be 'pullRequest'
             $state.pullRequest.number | Should -Be 7
             Should -Invoke -ModuleName OctoEnvironment Invoke-OctoEnvironmentGh -Times 1 -ParameterFilter {
-                ($arguments -join ' ') -match '^pr list --repo meshmakers/octo-sdk --head feature/m --state merged'
+                ($arguments -join ' ') -match '^pr list --repo meshmakers/octo-sdk --head feature/m --state merged --base main '
             }
         }
 
@@ -194,6 +212,18 @@ Describe 'Remove-OctoEnvironment after a merged pull request (AB#8953)' {
             $doc = Get-Doc (Remove-OctoEnvironment -env 'env-m' -Json)
             $doc.data.success | Should -BeFalse
             $doc.data.error | Should -Match '1 not on origin/main: \w+ first change'
+        }
+
+        It 'refuses when the merged pull request went into another branch than the default branch' {
+            # gh filters by --base: a PR of the branch merged into release/x is not listed for --base main.
+            Mock -ModuleName OctoEnvironment Invoke-OctoEnvironmentGh {
+                $into = $arguments[[Array]::IndexOf($arguments, '--base') + 1]
+                $json = if ($into -eq 'release/x') { "[{""number"":8,""url"":""https://github.com/meshmakers/octo-sdk/pull/8"",""headRefOid"":""$script:head""}]" } else { '[]' }
+                [pscustomobject]@{ ExitCode = 0; Output = @($json) }
+            }
+            $doc = Get-Doc (Remove-OctoEnvironment -env 'env-m' -Json)
+            $doc.data.success | Should -BeFalse
+            (Get-SdkState $doc).merged | Should -BeFalse
         }
 
         It 'refuses without gh' {

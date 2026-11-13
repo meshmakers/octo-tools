@@ -375,8 +375,8 @@ function Test-OctoEnvironmentWorkMerged {
           squash      the branch's whole change as one patch equals a commit on the base branch (squash merge whose
                       files the base branch changed again later; git cherry of a temporary squash commit - an
                       unreferenced object, removed by git gc);
-          pullRequest a merged GitHub pull request of the branch whose head is exactly HEAD (gh, when installed and
-                      logged in; nothing pushed after the merge).
+          pullRequest a merged GitHub pull request of the branch into the default branch whose head is exactly HEAD
+                      (gh, when installed and logged in; nothing committed after the merge).
         Returns { Merged; Via; Into ('origin/main'); PullRequest ({ number; url } | $null); Unmerged (the unpushed
         commits not on the base branch, '<short sha> <subject>'); Note }.
     #>
@@ -442,7 +442,9 @@ function Test-OctoEnvironmentWorkMerged {
         # The configured URL, not get-url: url.<base>.insteadOf may rewrite it to a mirror.
         $remoteUrl = [string]((Invoke-OctoEnvironmentGit -path $path -arguments @('config', '--get', 'remote.origin.url')).Output | Select-Object -Last 1)
         if ($remoteUrl -match 'github\.com[:/]([^/]+)/([^/]+?)(\.git)?/?$') {
-            $gh = Invoke-OctoEnvironmentGh -path $path -arguments @('pr', 'list', '--repo', "$($Matches[1])/$($Matches[2])", '--head', $branch, '--state', 'merged', '--json', 'number,url,headRefOid')
+            # Only a PR into the default branch: one merged into release/x leaves main without the change.
+            $defaultBranch = $base.Ref -replace '^origin/', ''
+            $gh = Invoke-OctoEnvironmentGh -path $path -arguments @('pr', 'list', '--repo', "$($Matches[1])/$($Matches[2])", '--head', $branch, '--state', 'merged', '--base', $defaultBranch, '--json', 'number,url,headRefOid')
             if ($gh.ExitCode -eq 0) {
                 try {
                     $pr = @(($gh.Output -join "`n") | ConvertFrom-Json) | Where-Object { $_.headRefOid -eq $head } | Select-Object -First 1
@@ -2274,7 +2276,8 @@ function Get-OctoAffectedRepos {
     merge GitHub deletes the branch, so its commits are on no remote, yet nothing is lost. The default branch is
     fetched first; a worktree counts as merged when every unpushed commit has a patch-equivalent commit there (rebase
     merge), when every file the branch changed is identical there, when the branch's whole change equals one commit
-    there (squash merge), or when gh finds a merged pull request of the branch whose head is HEAD. -Json: per repo
+    there (squash merge), or when gh finds a pull request of the branch merged into the default branch whose head is
+    HEAD; the dirty state is read again right before anything is removed. -Json: per repo
     unpushed, unpushedCommits, merged, mergedVia (patch | tree | squash | pullRequest), mergedInto, pullRequest,
     unmergedCommits, mergeCheck. There is no -force: commit and push, or discard, first. Feature branches are kept.
     In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are neither checked nor removed. Only what the environment
@@ -2332,6 +2335,14 @@ function Remove-OctoEnvironment {
 
     if (-not $PSCmdlet.ShouldProcess($environmentPath, "Remove $($owned.Count) worktree(s) and the environment's files")) {
         if ($Json) { Write-OctoJson -Command 'Remove-OctoEnvironment' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; repos = $states; keptInPlace = $keptInPlace }) }
+        return
+    }
+    # The merge checks above fetch and may ask gh, which takes a while: read the dirty state again right before
+    # anything is removed, so edits made meanwhile are never deleted (git worktree remove --force below).
+    $fresh = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ } | Where-Object { $_.dirty -or $_.problem })
+    if ($fresh.Count -gt 0) {
+        $reasons = @($fresh | ForEach-Object { "$($_.name): $(if ($_.problem) { $_.problem } else { 'uncommitted changes' })" })
+        & $fail "Remove-OctoEnvironment refused, nothing removed: $($reasons -join '; ')." $states
         return
     }
     $errors = @()

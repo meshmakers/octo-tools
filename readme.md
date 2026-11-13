@@ -351,9 +351,10 @@ Remove-OctoEnvironment -env ab8625-enum-null
   are on no remote although main has their changes. `Remove-OctoEnvironment` fetches origin's default branch and lets
   such a worktree go when every unpushed commit has a patch-equivalent commit on it (rebase merge, fast-forward),
   when every file the branch changed is identical there or the branch's whole change equals one commit there (squash
-  merge), or when `gh` finds a merged pull request of the branch whose head is the worktree's HEAD. Anything else is
-  still refused, and the refusal names the commits that are not on the default branch. A dirty worktree is always
-  refused. `-Json` reports per repository `unpushed`, `unpushedCommits`, `merged`, `mergedVia`
+  merge), or when `gh` finds a pull request of the branch merged into the default branch whose head is the worktree's
+  HEAD. Anything else is still refused, and the refusal names the commits that are not on the default branch. A dirty
+  worktree is always refused; the dirty state is read again right before the removal, so edits made while the checks
+  run are kept. `-Json` reports per repository `unpushed`, `unpushedCommits`, `merged`, `mergedVia`
   (`patch` | `tree` | `squash` | `pullRequest`), `mergedInto`, `pullRequest`, `unmergedCommits` and `mergeCheck` (why
   the check could not decide, e.g. origin unreachable).
 - **Base: `origin/main`, not the local checkout.** New feature branches and consumer worktrees start from the
