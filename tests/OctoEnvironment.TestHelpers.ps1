@@ -49,6 +49,8 @@ $global:PSDefaultParameterValues['Invoke-BuildEnvironment:maxParallel'] = 1
 # files in TestDrive (no refresh is due), and there is no octo-ckc.
 Mock -ModuleName OctoEnvironment Get-OctoGlobalPackageCachePath { Join-Path $TestDrive 'no-user-level-package-cache' }
 Mock -ModuleName OctoCkCatalogRefresh Resolve-OctoCkc { $null }
+# AB#8953: Remove-OctoEnvironment may ask gh for a merged pull request - never the real gh (network, the developer's login).
+Mock -ModuleName OctoEnvironment Invoke-OctoEnvironmentGh { [pscustomobject]@{ ExitCode = -1; Output = @('gh is not installed') } }
 $script:PreviousCkCacheDirectory = $env:OCTO_CK_CACHE_DIRECTORY
 $env:OCTO_CK_CACHE_DIRECTORY = Join-Path $TestDrive 'ck-cache'
 New-Item -ItemType Directory -Force -Path $env:OCTO_CK_CACHE_DIRECTORY | Out-Null
