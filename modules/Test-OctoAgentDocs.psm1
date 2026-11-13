@@ -4,6 +4,9 @@ Import-Module (Join-Path $PSScriptRoot 'OctoAgentDocs.Common.psm1')
 
 $script:RuleIds = Get-OctoAgentDocsRuleIdList
 $script:Modes = @('logOnly', 'enforce')
+# A repository name written in prose, optionally backticked; it never ends in a dot, so the
+# full stop of "... octo-x. CLAUDE.md ..." is not part of it.
+$script:ProseRepoName = '(?<![\w./-])`?([A-Za-z0-9](?:[\w.-]*[\w-])?)`?'
 
 class AgentDocsRuleSet {
     # The built-in ruleset with the override layers merged on top.
@@ -518,7 +521,8 @@ function Test-ReferenceSet {
     $anchors = @{}
     foreach ($f in $files) {
         $source = @{ Repo = $Repo; Findings = $Findings; Anchors = $anchors; Rel = $Repo.Relative($f) }
-        $prose = ConvertTo-OctoAgentDocsProse $Repo.ReadText($f)
+        $prose = ConvertTo-OctoAgentDocsProse $Repo.ReadText($f) -KeepLineNumbers
+        if ($siblingPattern) { Test-SiblingClaudeMention -Repo $Repo -Findings $Findings -Rel $source.Rel -Text $prose -SiblingRoot $siblingRoot -Pattern $siblingPattern }
         if ($f -eq $Repo.EntryPath) {
             # The generated table is derived, not written: a stale row naming a doc that is
             # gone is fixed by -Fix, not by a reference finding that would outlive the fix.
@@ -536,14 +540,47 @@ function Test-ReferenceSet {
         foreach ($m in [regex]::Matches($prose, '`([^`\s]+\.md)`')) {
             $ref = $m.Groups[1].Value
             $shimPath = $null
-            if ($ref -ceq 'CLAUDE.md') { $shimPath = $Repo.ClaudePath }
+            if ($ref -ceq 'CLAUDE.md') {
+                # octo-x `CLAUDE.md` is the sibling's, reported by Test-SiblingClaudeMention
+                if ($siblingPattern -and $prose.Substring(0, $m.Index) -match "$script:ProseRepoName[ \t]+`$" -and "$($Matches[1])/" -match $siblingPattern) { continue }
+                $shimPath = $Repo.ClaudePath
+            }
             elseif ($ref -notmatch '/' -or $ref -match '^(\.\.|~|/|[A-Za-z]:)' -or $ref -match '[*?\[{<>]') { continue }   # a phrase, an outside path, or a pattern
-            elseif ($siblingPattern -and $ref -match $siblingPattern) { $shimPath = Join-Path $siblingRoot $ref }
+            elseif ($siblingPattern -and $ref -match $siblingPattern) {
+                if ($ref -match '^[^/]+/CLAUDE\.md$') { continue }   # reported by Test-SiblingClaudeMention
+                $shimPath = Join-Path $siblingRoot $ref
+            }
             if ($shimPath) {
                 if ($Repo.PointsAtShim($shimPath)) { $Findings.Add('reference-to-shim', $source.Rel, "``$ref`` $(Get-ShimAdvice -Reference $ref)") }
                 continue
             }
             Test-ReferenceTarget @source -From $Repo.AgentsPath -Target $ref -Kind 'Referenced file'
+        }
+    }
+}
+
+function Test-SiblingClaudeMention {
+    # A sibling repository's CLAUDE.md named in prose, with or without backticks and a section
+    # after it: `octo-x/CLAUDE.md` -> "A", octo-x CLAUDE.md # A, `octo-x` CLAUDE.md, octo-x `CLAUDE.md`.
+    # Migrated sibling: reference-to-shim. Not migrated yet: a warning. Unknown name: a
+    # reference-resolves warning, and only in a workspace - a CI checkout has no siblings, and a
+    # sibling that is not checked out locally may still exist.
+    param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [string]$Rel, [string]$Text, [string]$SiblingRoot, [string]$Pattern)
+    $workspace = $null
+    foreach ($m in [regex]::Matches($Text, "$script:ProseRepoName(?:/|[ \t]+)``?CLAUDE\.md\b")) {
+        $name = $m.Groups[1].Value
+        if ($name -eq $Repo.Name -or "$name/" -notmatch $Pattern) { continue }
+        $at = "${Rel}:$(($Text.Substring(0, $m.Index) -split "`n").Count)"
+        $sibling = Join-Path $SiblingRoot $name
+        if (Test-Path -LiteralPath (Join-Path $sibling 'AGENTS.md') -PathType Leaf) {
+            $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md - $name has migrated; name '$name/AGENTS.md' or the $name/docs/ file that holds the section, since an agent reading the shim gets only '@AGENTS.md'")
+        }
+        elseif (Test-Path -LiteralPath $sibling -PathType Container) {
+            if ($Findings.Rules.IsOn('reference-to-shim')) { $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md - $name has not migrated yet; point this at its AGENTS.md or a docs/ file when it does", 'warn') }
+        }
+        else {
+            if ($null -eq $workspace) { $workspace = [bool](Get-ChildItem -LiteralPath $SiblingRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $Repo.Name -and "$($_.Name)/" -match $Pattern } | Select-Object -First 1) }
+            if ($workspace -and $Findings.Rules.IsOn('reference-resolves')) { $Findings.Add('reference-resolves', $at, "``$name`` CLAUDE.md - no repository '$name' beside this one; check the name", 'warn') }
         }
     }
 }

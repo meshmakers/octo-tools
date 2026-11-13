@@ -641,6 +641,21 @@ outside a git checkout, minus the folders in `scan.ignore`. `**` crosses folders
 stay inside one, `{a,b}` alternates, a glob without a `/` matches at any depth, and matching
 is case-sensitive.
 
+References are Markdown links, backticked paths, and prose mentions of a sibling repository's
+`CLAUDE.md` - `<sibling>/CLAUDE.md`, `<sibling> CLAUDE.md`, with or without backticks around either
+part and with or without a section after it (`→`, `§`, `#`). A sibling is a name that matches
+`siblingRepoPattern` and is looked up beside the repository (`$ROOTPATH`); each prose mention is
+reported as `file:line` with the target repository:
+
+| Target | Finding |
+|---|---|
+| has `AGENTS.md` (migrated) | `reference-to-shim`, at its severity: name `AGENTS.md` or the `docs/` file |
+| checked out, not migrated yet | `reference-to-shim` as a warning: leave it until the target migrates |
+| not beside this repository, others are | `reference-resolves` as a warning: probably not a repository name |
+| no sibling checked out at all (CI) | nothing |
+
+Mentions inside fenced code and of the repository's own name are skipped.
+
 `-Fix` regenerates the routing table between the `<!-- >>> generated: routing -->` markers
 from each doc's `applies_to` frontmatter, writes the `CLAUDE.md` shim, and writes the opening
 sentence below the title of `AGENTS.md` (inserted, or replacing a different first paragraph).
