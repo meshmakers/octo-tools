@@ -34,7 +34,7 @@ Describe 'New-OctoEnvironment' {
         $manifest.base | Should -Be 'branches/main'
         $manifest.owner | Should -Be 'agent-1'
         $manifest.slot | Should -Be 'ab8625-enum-null'
-        { [DateTime]::Parse($manifest.created) } | Should -Not -Throw
+        { [DateTime]$manifest.created } | Should -Not -Throw
         @($manifest.repos).Count | Should -Be 1
         $manifest.repos[0].name | Should -Be 'octo-construction-kit-engine'
         $manifest.repos[0].role | Should -Be 'feature'

@@ -234,7 +234,8 @@ Describe 'Machine-wide test lock' {
         @($held.data.owner.projects) | Should -Be @('A', 'B')
         $held.data.owner.heldSeconds | Should -BeGreaterOrEqual 0
         $held.data.owner.PSObject.Properties.Name | Should -Not -Contain 'id'
-        { [DateTimeOffset]::Parse($held.data.owner.since) } | Should -Not -Throw
+        # ConvertFrom-Json may already turn the ISO text into a DateTime; a PowerShell cast reads both forms in any culture
+        { [DateTimeOffset]$held.data.owner.since } | Should -Not -Throw
 
         Mock -ModuleName OctoTests Get-OctoTestProcessStartTime { $null }
         $stale = Get-Doc (Get-OctoTestLock -LockPath $script:LockPath -Json)
@@ -992,7 +993,7 @@ Describe 'Invoke-OctoTestRun' {
     }
 
     Context 'Docker engine shared with the local stack (AB#8835)' {
-        It 'checks the free memory of the engine with the lock held, limits the test containers and reports both' {
+        It 'checks the free memory of the engine with the lock held, limits the CPUs of the test containers and reports both' {
             $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -lockPath $script:LockPath -Json)
             $docker = $doc.data.docker
             $docker.required | Should -BeTrue
@@ -1005,16 +1006,37 @@ Describe 'Invoke-OctoTestRun' {
             $docker.minFreeGiB | Should -Be 3
             $docker.containers[0].name | Should -Be 'kind-control-plane'
             $docker.limits.cpus | Should -Be 4
-            $docker.limits.memory | Should -Be '4g'
+            # no memory cap by default: set after the start it OOM-kills mongod, which sized its cache to the whole VM
+            $docker.limits.memory | Should -BeNullOrEmpty
+            $docker.limits.memoryWarning | Should -BeNullOrEmpty
             @($docker.limited.name) | Should -Be @('fixture-mongo')
             $script:LimiterStarts.Count | Should -Be 1
             $script:LimiterStarts[0].Cpus | Should -Be 4
-            $script:LimiterStarts[0].Memory | Should -Be '4g'
+            $script:LimiterStarts[0].Memory | Should -BeNullOrEmpty
             # the limits are also handed to the test process, for fixtures that set them at creation
             $integration = $script:Calls | Where-Object Project -eq 'Sample.IntegrationTests'
             $integration.ContainerCpus | Should -Be '4'
-            $integration.ContainerMemory | Should -Be '4294967296'
+            $integration.ContainerMemory | Should -BeNullOrEmpty
             $env:OCTO_TEST_CONTAINER_CPUS | Should -BeNullOrEmpty
+        }
+
+        It 'applies a memory limit only when -dockerMemory asks for it, and warns that it lands after the start' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -dockerMemory '4g' -lockPath $script:LockPath -Json)
+            $doc.data.docker.limits.memory | Should -Be '4g'
+            $doc.data.docker.limits.memoryWarning | Should -Match 'after each test container started'
+            $doc.data.docker.limits.memoryWarning | Should -Match 'OOM-killed'
+            $script:LimiterStarts[0].Memory | Should -Be '4g'
+            ($script:Calls | Where-Object Project -eq 'Sample.IntegrationTests').ContainerMemory | Should -Be '4294967296'
+
+            # 0 is no limit, as '' (octo-devstack passes '0')
+            Reset-TestDotnet
+            $script:LimiterStarts.Clear()
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -dockerMemory '0' -lockPath $script:LockPath -Json)
+            $doc.data.failedStep | Should -Not -Be 'preflight'
+            $doc.data.docker.limits.memory | Should -BeNullOrEmpty
+            $doc.data.docker.limits.memoryWarning | Should -BeNullOrEmpty
+            $script:LimiterStarts[0].Memory | Should -BeNullOrEmpty
+            ($script:Calls | Where-Object Project -eq 'Sample.IntegrationTests').ContainerMemory | Should -BeNullOrEmpty
         }
 
         It 'refuses the Docker-heavy projects when the engine has too little free memory; the others still run' {
