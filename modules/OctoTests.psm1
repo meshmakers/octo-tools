@@ -451,8 +451,10 @@ function Invoke-OctoDockerLimitPass {
         whose creation time cannot be read. With the lock held, no other Invoke-OctoTestRun starts containers in that
         window; a Testcontainers suite somebody starts by hand in that window is limited too.
         A limit set this way starts a moment after the container did: a process that sized itself to the whole VM at
-        start (a JVM heap, a database cache) keeps that size; the memory limit then is a ceiling that kills it when it
-        grows past it. Limits at creation need the test fixture (see the readme).
+        start (a JVM heap, a database cache) keeps that size; a memory limit then is a ceiling that kills it when it
+        grows past it. mongod sizes its WiredTiger cache to the whole VM at start and is OOM-killed (exit 137) under a
+        memory limit set afterwards, so Invoke-OctoTestRun passes no memory by default (AB#8835). Limits at creation
+        need the test fixture (see the readme).
     #>
     param(
         [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$State,
@@ -1428,11 +1430,16 @@ function Format-OctoTestDuration {
 
 .PARAMETER dockerCpus
     CPU limit for every container Testcontainers starts during the run (default 4, 0 = none), set with
-    `docker update` about a second after the container started.
+    `docker update` about a second after the container started. Safe after the start: a CPU limit only slows a
+    container down.
 
 .PARAMETER dockerMemory
-    Memory limit for those containers (default 4g, '' = none). A ceiling: the container is killed when it grows past
-    it.
+    Opt-in memory limit for those containers (default '' = none; 0 = none). Not safe for every image: it is set with
+    `docker update` after the container started, when a process has already sized itself to the whole Docker VM -
+    mongod sizes its WiredTiger cache that way and is OOM-killed (exit 137) under the limit, the tests then hang in
+    database timeouts. Use it only for containers whose memory use is bounded at creation (for MongoDB a
+    `--wiredTigerCacheSizeGB` the fixture sets); the run warns when it is set and passes the value to the test
+    process as OCTO_TEST_CONTAINER_MEMORY_BYTES, so a fixture can set the limit at creation instead.
 
 .PARAMETER lockTimeoutSeconds
     How long to wait for the machine-wide test lock (default 1800). 0 = fail at once when it is taken.
@@ -1477,7 +1484,7 @@ function Invoke-OctoTestRun {
         [ValidateSet('Refuse', 'Warn', 'Off')] [string]$dockerCheck = 'Refuse',
         [double]$minDockerFreeMemoryGiB = 3,
         [double]$dockerCpus = 4,
-        [string]$dockerMemory = '4g',
+        [string]$dockerMemory = '',
         [string]$configuration = 'DebugL',
         [int]$maxFailures = 50,
         [switch]$includePassed,
@@ -1616,6 +1623,10 @@ function Invoke-OctoTestRun {
     $displayProperties = @(ConvertTo-OctoMsBuildPropertyArgs -properties $properties | ForEach-Object { Hide-OctoUrlCredentials $_ })
     $lockNeeded = @($runnable | Where-Object { $_.Docker }).Count -gt 0
     if ($dockerMemory -and $null -eq (ConvertTo-OctoByteCount -text $dockerMemory)) { & $fail "-dockerMemory '$dockerMemory' is no size (e.g. 4g, 2048m, or '' for no limit)."; return }
+    # AB#8835: 0 is no limit, as '' (octo-devstack passes '0' for "none").
+    if ($dockerMemory -and (ConvertTo-OctoByteCount -text $dockerMemory) -eq 0) { $dockerMemory = '' }
+    # A memory limit set after the start kills a process that sized itself to the whole VM (mongod): opt-in only.
+    $memoryWarning = if ($dockerMemory) { "-dockerMemory $dockerMemory is applied with docker update after each test container started: a process that already sized itself to the whole Docker VM (mongod's WiredTiger cache) is OOM-killed (exit 137) under it and the tests hang in timeouts. Use it only for containers whose memory is bounded at creation." }
     if ($lockNeeded) {
         # For test fixtures that set the limits when they create a container (the only way to limit it from its first
         # moment): the same values the run applies from outside afterwards.
@@ -1699,7 +1710,7 @@ function Invoke-OctoTestRun {
     $dockerState = [ordered]@{
         required = $lockNeeded; checked = $false; check = $(if ($dockerCheck -eq 'Off') { 'off' } else { $null }); available = $null
         memoryGiB = $null; cpus = $null; usedGiB = $null; freeGiB = $null; minFreeGiB = $minDockerFreeMemoryGiB; containers = @(); message = $null
-        limits = [ordered]@{ cpus = $(if ($dockerCpus -gt 0) { $dockerCpus } else { $null }); memory = $(if ($dockerMemory) { $dockerMemory } else { $null }) }
+        limits = [ordered]@{ cpus = $(if ($dockerCpus -gt 0) { $dockerCpus } else { $null }); memory = $(if ($dockerMemory) { $dockerMemory } else { $null }); memoryWarning = $memoryWarning }
         limited = @()
     }
     # The projects from $from on (0-based index into the plan) did not run.
@@ -1834,6 +1845,7 @@ function Invoke-OctoTestRun {
                         else { $dockerState.check = 'ok' }
                     }
                 }
+                if ($memoryWarning -and -not $Json) { Write-Warning $memoryWarning }
                 $limiter = Start-OctoDockerLimiter -Cpus $dockerCpus -Memory $dockerMemory
             }
 

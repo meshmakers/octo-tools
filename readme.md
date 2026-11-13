@@ -238,15 +238,23 @@ Get-OctoTestLock
   the local stack (MongoDB, CrateDB, RabbitMQ) share one VM. Before the Docker-heavy projects start, the run checks
   the engine's free memory (`docker info` minus what the running containers use) and refuses them below
   `-minDockerFreeMemoryGiB` (default 3; `-dockerCheck Warn` runs anyway, `Off` skips the check). While they run,
-  every container Testcontainers starts is limited to `-dockerCpus` (default 4) and `-dockerMemory` (default `4g`)
-  with `docker update` - no change to the test code needed. Only containers of this run are touched: they carry
-  the Testcontainers label and were created after the run took the test lock; a labelled container that existed
-  before is never changed. That limit lands about a second after the container
-  started; a fixture that wants it from the first moment reads the values the run puts into its environment:
+  every container Testcontainers starts is limited to `-dockerCpus` (default 4) with `docker update` - no change to
+  the test code needed. Only containers of this run are touched: they carry the Testcontainers label and were
+  created after the run took the test lock; a labelled container that existed before is never changed. That limit
+  lands about a second after the container started, which is harmless for a CPU limit.
+- **No memory limit by default.** `-dockerMemory <size>` (default none; `0` or `''` = none) adds a memory limit the
+  same way, after the start - and that is unsafe: mongod sizes its WiredTiger cache to the whole Docker VM when it
+  starts, so under a memory limit set a second later it is OOM-killed (exit 137) and the tests hang in database
+  timeouts. Set it only for containers whose memory is bounded at creation; the run then warns and reports it in
+  `docker.limits.memoryWarning`. A memory limit needs a bounded cache at creation, which only the fixture can set -
+  it reads the values the run puts into its environment (`OCTO_TEST_CONTAINER_MEMORY_BYTES` only with
+  `-dockerMemory`):
 
   ```csharp
   new MongoDbBuilder().WithCreateParameterModifier(p =>
   {
+      // a memory limit only together with a cache that fits it: start mongod with --wiredTigerCacheSizeGB
+      // well below the limit (WiredTiger takes about half of the memory it sees otherwise)
       if (long.TryParse(Environment.GetEnvironmentVariable("OCTO_TEST_CONTAINER_MEMORY_BYTES"), out var memory))
       { p.HostConfig.Memory = memory; p.HostConfig.MemorySwap = memory; }
       if (double.TryParse(Environment.GetEnvironmentVariable("OCTO_TEST_CONTAINER_CPUS"), NumberStyles.Float, CultureInfo.InvariantCulture, out var cpus))
