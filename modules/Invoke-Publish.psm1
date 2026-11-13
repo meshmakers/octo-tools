@@ -15,7 +15,19 @@
         [switch]$Json
     )
 
+    # AB#8954: a relative path follows the PowerShell location, not the process directory; resolved once, here.
+    $repositoryPath = Resolve-OctoLocationPath -path $repositoryPath
     $buildEnvironment = Get-OctoRepositoryBuildEnvironment -repositoryPath $repositoryPath -configuration $configuration -laneIsolation $laneIsolation
+    if ($buildEnvironment.laneRoot -and -not (Test-OctoPathInLane -path $repositoryPath -laneRoot $buildEnvironment.laneRoot)) {
+        # Safety net (AB#8954): never publish with the environment of a lane the repository is not part of.
+        $message = "Invoke-Publish: repository $repositoryPath does not lie under the lane root $($buildEnvironment.laneRoot) - refused, dotnet was not started."
+        $Global:LASTEXITCODE = 1
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-Publish' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ configuration = $configuration; repositoryPath = $repositoryPath; laneRoot = $buildEnvironment.laneRoot; error = $message })
+        }
+        Write-Error $message
+        return
+    }
     if ($DryRun) {
         Write-OctoLaneDryRun -command 'Invoke-Publish' -repositoryPath $repositoryPath -configuration $configuration -buildEnvironment $buildEnvironment -Json:$Json
         return

@@ -38,7 +38,7 @@ function Get-OctoLaneBuildSettings {
         [string]$laneIsolation = 'Auto'
     )
 
-    $laneRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($laneRootPath))
+    $laneRoot = Resolve-OctoLocationPath -path $laneRootPath
     $laneFeed = Join-Path -Path $laneRoot -ChildPath "nuget"
     $laneCache = Join-Path -Path $laneRoot -ChildPath ".nuget-packages"
     $laneUserProps = Join-Path -Path $laneRoot -ChildPath "Octo.User.props"
@@ -142,7 +142,7 @@ function Get-OctoRepoRestoreSourcesOverride {
     }
     # Like MSBuild, take the nearest Directory.Build.props above the path (Invoke-Publish may be pointed
     # at a project folder inside the repo), but never look above the lane root.
-    $directory = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
+    $directory = Resolve-OctoLocationPath -path $repositoryPath
     while ($directory -and $directory.StartsWith($laneSettings.laneRoot, [StringComparison]::OrdinalIgnoreCase) -and $directory -ine $laneSettings.laneRoot) {
         $props = Join-Path -Path $directory -ChildPath "Directory.Build.props"
         if (Test-Path -Path $props -PathType Leaf) {
@@ -158,6 +158,46 @@ function Get-OctoRepoRestoreSourcesOverride {
 
 <#
 .SYNOPSIS
+    The full path of a user-supplied path, resolved against the PowerShell location ($PWD), without a trailing
+    separator.
+
+.DESCRIPTION
+    [IO.Path]::GetFullPath resolves a relative path against the PROCESS directory
+    ([Environment]::CurrentDirectory), which Set-Location does not change: in a pwsh started in branches/main,
+    `Set-Location wt-<env>/<repo>; Invoke-Build -repositoryPath .` used to build in branches/main (AB#8954).
+    Every path parameter of Invoke-Build, Invoke-Publish and the lane helpers goes through this function.
+    The path does not have to exist.
+#>
+function Resolve-OctoLocationPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+    # The path is absolute now; GetFullPath only normalizes '.' and '..' segments.
+    return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($resolved))
+}
+
+<#
+.SYNOPSIS
+    $true when a resolved repository path is the lane root or lies below it (Invoke-Build / Invoke-Publish safety net).
+#>
+function Test-OctoPathInLane {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path,
+        [Parameter(Mandatory = $true)]
+        [string]$laneRoot
+    )
+
+    $child = (Resolve-OctoLocationPath -path $path) + [IO.Path]::DirectorySeparatorChar
+    $parent = (Resolve-OctoLocationPath -path $laneRoot) + [IO.Path]::DirectorySeparatorChar
+    return $child.StartsWith($parent, [StringComparison]::OrdinalIgnoreCase)
+}
+
+<#
+.SYNOPSIS
     The lane checkout a repository (or a folder inside it) belongs to: the nearest ancestor that holds an
     Octo.User.props - the same file MSBuild finds via GetPathOfFileAbove. $null outside any lane.
 #>
@@ -167,7 +207,7 @@ function Find-OctoLaneRoot {
         [string]$path
     )
 
-    $directory = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path))
+    $directory = Resolve-OctoLocationPath -path $path
     while ($directory) {
         if (Test-Path -Path (Join-Path -Path $directory -ChildPath "Octo.User.props") -PathType Leaf) {
             return $directory
@@ -198,6 +238,7 @@ function Get-OctoRepositoryBuildEnvironment {
     )
 
     $environment = [ordered]@{}
+    $repositoryPath = Resolve-OctoLocationPath -path $repositoryPath
     $laneRoot = Find-OctoLaneRoot -path $repositoryPath
     if ($null -eq $laneRoot) {
         return [PSCustomObject][ordered]@{
@@ -239,7 +280,7 @@ function Write-OctoLaneDryRun {
     if ($Json) {
         Write-OctoJson -Command $command -Data ([ordered]@{
             dryRun         = $true
-            repositoryPath = [IO.Path]::GetFullPath($repositoryPath)
+            repositoryPath = Resolve-OctoLocationPath -path $repositoryPath
             configuration  = $configuration
             laneRoot       = $buildEnvironment.laneRoot
             isolated       = $buildEnvironment.isolated
@@ -249,7 +290,7 @@ function Write-OctoLaneDryRun {
         return
     }
     Write-Host "Dry run ($command) - dotnet is not started" -ForegroundColor Yellow
-    Write-Host "Repository:      $([IO.Path]::GetFullPath($repositoryPath))"
+    Write-Host "Repository:      $(Resolve-OctoLocationPath -path $repositoryPath)"
     Write-Host "Configuration:   $configuration"
     Write-Host "Lane root:       $($buildEnvironment.laneRoot)"
     Write-Host "Lane isolated:   $($buildEnvironment.isolated) ($($buildEnvironment.reason))"
@@ -295,7 +336,7 @@ function Initialize-OctoLaneUserProps {
     )
 
     $standardLine = '<RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath>'
-    $laneRoot = [IO.Path]::GetFullPath((Join-Path -Path $rootPath -ChildPath $branch))
+    $laneRoot = Resolve-OctoLocationPath -path (Join-Path -Path $rootPath -ChildPath $branch)
     if (-not (Test-Path -Path $laneRoot -PathType Container)) {
         Write-Error "Lane root $laneRoot does not exist"
         return
@@ -468,5 +509,7 @@ Export-ModuleMember -Function @(
     'Set-OctoBuildEnvironment',
     'Restore-OctoBuildEnvironment',
     'Get-OctoGlobalPackagesPath',
-    'Get-OctoRangePackageCaches'
+    'Get-OctoRangePackageCaches',
+    'Resolve-OctoLocationPath',
+    'Test-OctoPathInLane'
 )

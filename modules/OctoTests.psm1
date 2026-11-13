@@ -636,7 +636,8 @@ function Get-OctoTestProjects {
         Directory.Build.props, or in a project it references (transitively).
     #>
     param([Parameter(Mandatory = $true)] [string]$repositoryPath)
-    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
+    # Relative to $PWD (AB#8954): [IO.Path]::GetFullPath would resolve against the process start directory.
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($repositoryPath)))
     $extensions = [System.Collections.Generic.HashSet[string]]::new([string[]]@('.csproj'), [StringComparer]::OrdinalIgnoreCase)
     $cache = @{}
     $read = {
@@ -717,7 +718,8 @@ function Get-OctoFrontendTestProjects {
         package.json), Directory.
     #>
     param([Parameter(Mandatory = $true)] [string]$repositoryPath)
-    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
+    # Relative to $PWD (AB#8954): [IO.Path]::GetFullPath would resolve against the process start directory.
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($repositoryPath)))
     $skip = @('node_modules', 'dist', 'bin', 'obj', '.git', '.angular', 'coverage', 'artifacts', 'test-results', '.claude')
     $projects = @()
     $queue = [System.Collections.Generic.Queue[object]]::new()
