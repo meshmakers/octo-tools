@@ -341,11 +341,21 @@ Invoke-BuildEnvironment -env ab8625-enum-null -maxParallel 1                   #
 # 4. main moved on? Take its new packages and catalog entries (yours keep winning)
 Invoke-BuildEnvironment -env ab8625-enum-null -syncMain        # or Sync-OctoEnvironment -env ab8625-enum-null
 
-# 5. Status, and clean-up after the PR is merged (refuses dirty or unpushed worktrees; branches are kept)
+# 5. Status, and clean-up after the PR is merged (refuses dirty worktrees and unpushed work that is not on main;
+#    a squash- or rebase-merged branch is recognised; branches are kept)
 Get-OctoEnvironment -env ab8625-enum-null
 Remove-OctoEnvironment -env ab8625-enum-null
 ```
 
+- **Removal after the merge** (AB#8953). After a squash or rebase merge GitHub deletes the branch, so its commits
+  are on no remote although main has their changes. `Remove-OctoEnvironment` fetches origin's default branch and lets
+  such a worktree go when every unpushed commit has a patch-equivalent commit on it (rebase merge, fast-forward),
+  when every file the branch changed is identical there or the branch's whole change equals one commit there (squash
+  merge), or when `gh` finds a merged pull request of the branch whose head is the worktree's HEAD. Anything else is
+  still refused, and the refusal names the commits that are not on the default branch. A dirty worktree is always
+  refused. `-Json` reports per repository `unpushed`, `unpushedCommits`, `merged`, `mergedVia`
+  (`patch` | `tree` | `squash` | `pullRequest`), `mergedInto`, `pullRequest`, `unmergedCommits` and `mergeCheck` (why
+  the check could not decide, e.g. origin unreachable).
 - **Base: `origin/main`, not the local checkout.** New feature branches and consumer worktrees start from the
   upstream of the base checkout's branch (`branches/main`: `origin/main`), fetched first; a checkout without an
   upstream uses origin's default branch. A stale local `branches/main/<repo>` no longer leaks into the environment:

@@ -267,10 +267,23 @@ function Resolve-OctoEnvironmentBase {
 }
 
 function Get-OctoEnvironmentRepoState {
-    # Dirty / unpushed state of an environment worktree (Remove-OctoEnvironment refuses either).
-    param([Parameter(Mandatory = $true)] [System.Collections.IDictionary]$repo)
+    <#
+        Dirty / unpushed state of an environment worktree (Remove-OctoEnvironment refuses either).
+        unpushed: commits on top of the base commit that are on no remote branch; unpushedCommits names them
+        ('<short sha> <subject>'). -checkMerged (Remove-OctoEnvironment, AB#8953): when there are unpushed commits,
+        also asks whether their changes are already on origin's default branch - after a squash or rebase merge
+        GitHub deletes the branch, so the commits are on no remote although nothing would be lost
+        (Test-OctoEnvironmentWorkMerged). merged / mergedVia / mergedInto / pullRequest report the answer;
+        unmergedCommits names the commits that are not on the base branch; mergeCheck says why the check could not
+        decide (base branch unknown, ...).
+    #>
+    param([Parameter(Mandatory = $true)] [System.Collections.IDictionary]$repo, [switch]$checkMerged)
     $path = [string]$repo['path']
-    $state = [ordered]@{ name = $repo['name']; role = $repo['role']; path = $path; exists = $false; dirty = $false; unpushed = 0; problem = $null }
+    $state = [ordered]@{
+        name = $repo['name']; role = $repo['role']; path = $path; exists = $false; dirty = $false; unpushed = 0
+        unpushedCommits = @(); merged = $false; mergedVia = $null; mergedInto = $null; pullRequest = $null
+        unmergedCommits = @(); mergeCheck = $null; problem = $null
+    }
     if (-not (Test-Path -LiteralPath $path -PathType Container)) { return [pscustomobject]$state }
     $state.exists = $true
     $status = Invoke-OctoEnvironmentGit -path $path -arguments @('status', '--porcelain')
@@ -283,13 +296,167 @@ function Get-OctoEnvironmentRepoState {
     # branch (the base commit itself may be an unpushed commit of the base checkout - not this environment's work).
     $exclude = @('--not', '--remotes')
     if ($repo['baseCommit']) { $exclude += [string]$repo['baseCommit'] }
-    $unpushed = Invoke-OctoEnvironmentGit -path $path -arguments (@('rev-list', '--count', 'HEAD') + $exclude)
+    $unpushed = Invoke-OctoEnvironmentGit -path $path -arguments (@('rev-list', '--format=%h %s', '--no-commit-header', 'HEAD') + $exclude)
     if ($unpushed.ExitCode -ne 0) {
         $state.problem = "git rev-list failed: $($unpushed.Output -join ' ')"
         return [pscustomobject]$state
     }
-    $state.unpushed = [int]($unpushed.Output | Select-Object -Last 1)
+    $state.unpushedCommits = @($unpushed.Output | Where-Object { $_ })
+    $state.unpushed = $state.unpushedCommits.Count
+    if ($checkMerged -and $state.unpushed -gt 0) {
+        $merge = Test-OctoEnvironmentWorkMerged -path $path -branch ([string]$repo['branch']) -unpushedCommits $state.unpushedCommits
+        $state.merged = $merge.Merged
+        $state.mergedVia = $merge.Via
+        $state.mergedInto = $merge.Into
+        $state.pullRequest = $merge.PullRequest
+        $state.unmergedCommits = @($merge.Unmerged)
+        $state.mergeCheck = $merge.Note
+    }
     return [pscustomobject]$state
+}
+
+function Resolve-OctoEnvironmentDefaultBranch {
+    <#
+        origin's default branch for a worktree, fetched first, as a remote-tracking ref ('origin/main'); $null when
+        there is none. Returns { Ref; Fetched; Note }. The name is asked from origin (ls-remote --symref), else the
+        local origin/HEAD, origin/main, origin/master; a failed fetch keeps the last fetched state (Note says so).
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $result = [ordered]@{ Ref = $null; Fetched = $false; Note = $null }
+    $branch = $null
+    $symref = Invoke-OctoEnvironmentGit -path $path -arguments @('ls-remote', '--symref', 'origin', 'HEAD') -noPrompt
+    if ($symref.ExitCode -eq 0) {
+        $branch = @($symref.Output | ForEach-Object { if ($_ -match '^ref:\s+refs/heads/(\S+)\s+HEAD$') { $Matches[1] } }) | Select-Object -First 1
+    }
+    if (-not $branch) {
+        $originHead = Invoke-OctoEnvironmentGit -path $path -arguments @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')
+        $candidates = @()
+        if ($originHead.ExitCode -eq 0) { $candidates += [string]($originHead.Output | Select-Object -Last 1) }
+        $candidates += 'origin/main', 'origin/master'
+        foreach ($candidate in $candidates) {
+            if ((Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$candidate")).ExitCode -eq 0) { $branch = ($candidate -split '/', 2)[1]; break }
+        }
+    }
+    if (-not $branch) { $result.Note = 'origin has no default branch'; return [pscustomobject]$result }
+    $fetch = Invoke-OctoEnvironmentGit -path $path -arguments @('fetch', '--quiet', 'origin', "+refs/heads/${branch}:refs/remotes/origin/$branch") -noPrompt
+    $result.Fetched = $fetch.ExitCode -eq 0
+    if ((Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/origin/$branch^{commit}")).ExitCode -ne 0) {
+        $result.Note = "origin/$branch does not exist (fetch failed)"
+        return [pscustomobject]$result
+    }
+    $result.Ref = "origin/$branch"
+    if (-not $result.Fetched) { $result.Note = "git fetch origin $branch failed - checked against origin/$branch as last fetched" }
+    return [pscustomobject]$result
+}
+
+function Invoke-OctoEnvironmentGh {
+    # Runs gh in a folder; returns { ExitCode; Output (string[]) }, ExitCode -1 when gh is not installed. Never throws.
+    param([Parameter(Mandatory = $true)] [string]$path, [Parameter(Mandatory = $true)] [string[]]$arguments)
+    if (-not (Get-Command gh -CommandType Application -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ExitCode = -1; Output = @('gh is not installed') } }
+    $previous = $env:GH_PROMPT_DISABLED
+    $env:GH_PROMPT_DISABLED = '1'
+    Push-Location -LiteralPath $path
+    try {
+        $output = @(& gh @arguments 2>&1 | ForEach-Object { "$_" })
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    }
+    catch { return [pscustomobject]@{ ExitCode = 1; Output = @($_.Exception.Message) } }
+    finally { Pop-Location; $env:GH_PROMPT_DISABLED = $previous }
+}
+
+function Test-OctoEnvironmentWorkMerged {
+    <#
+        Whether the unpushed commits of a worktree are already on origin's default branch (AB#8953), so removing the
+        worktree loses nothing. Checked in this order, the first that holds wins (Via):
+          patch       every unpushed commit has a patch-equivalent commit on the base branch (rebase merge, cherry-pick;
+                      git cherry);
+          tree        every file the branch changed since its merge base is identical on the base branch (squash
+                      merge; also when the branch's net change is empty);
+          squash      the branch's whole change as one patch equals a commit on the base branch (squash merge whose
+                      files the base branch changed again later; git cherry of a temporary squash commit - an
+                      unreferenced object, removed by git gc);
+          pullRequest a merged GitHub pull request of the branch whose head is exactly HEAD (gh, when installed and
+                      logged in; nothing pushed after the merge).
+        Returns { Merged; Via; Into ('origin/main'); PullRequest ({ number; url } | $null); Unmerged (the unpushed
+        commits not on the base branch, '<short sha> <subject>'); Note }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$path,
+        [string]$branch,
+        [Parameter(Mandatory = $true)] [string[]]$unpushedCommits
+    )
+    $result = [ordered]@{ Merged = $false; Via = $null; Into = $null; PullRequest = $null; Unmerged = @($unpushedCommits); Note = $null }
+    $base = Resolve-OctoEnvironmentDefaultBranch -path $path
+    $result.Note = $base.Note
+    if (-not $base.Ref) { return [pscustomobject]$result }
+    $result.Into = $base.Ref
+    $head = [string]((Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', 'HEAD')).Output | Select-Object -Last 1)
+    $mergeBase = Invoke-OctoEnvironmentGit -path $path -arguments @('merge-base', 'HEAD', $base.Ref)
+    if ($mergeBase.ExitCode -ne 0) {
+        $result.Note = (@($result.Note, "HEAD has no merge base with $($base.Ref)") | Where-Object { $_ }) -join '; '
+        return [pscustomobject]$result
+    }
+    $fork = [string]($mergeBase.Output | Select-Object -Last 1)
+
+    # patch: git cherry marks the commits of fork..HEAD with '-' when the base branch has an equivalent change. An
+    # unpushed commit at or before the fork is on the base branch itself (fast-forward merge); a commit after the fork
+    # that git cherry does not mark '-' (also a merge commit, which it does not list) is not.
+    $cherry = Invoke-OctoEnvironmentGit -path $path -arguments @('cherry', '--abbrev=40', $base.Ref, 'HEAD', $fork)
+    $afterFork = Invoke-OctoEnvironmentGit -path $path -arguments @('rev-list', "$fork..HEAD")
+    if ($cherry.ExitCode -eq 0 -and $afterFork.ExitCode -eq 0) {
+        $equivalent = @{}
+        foreach ($line in $cherry.Output) { if ($line -match '^-\s+([0-9a-f]+)') { $equivalent[$Matches[1]] = $true } }
+        $pending = @{}
+        foreach ($commit in $afterFork.Output) { if ($commit) { $pending[[string]$commit] = $true } }
+        $result.Unmerged = @($unpushedCommits | Where-Object {
+                $full = [string]((Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', "$(($_ -split ' ', 2)[0])^{commit}")).Output | Select-Object -Last 1)
+                $pending.ContainsKey($full) -and -not $equivalent.ContainsKey($full)
+            })
+        if ($result.Unmerged.Count -eq 0) { $result.Merged = $true; $result.Via = 'patch'; return [pscustomobject]$result }
+    }
+
+    # tree: no file the branch changed differs from the base branch (renames as delete + add, so both paths count).
+    $changed = Invoke-OctoEnvironmentGit -path $path -arguments @('diff', '--no-renames', '--name-only', '-z', $fork, 'HEAD')
+    $differs = Invoke-OctoEnvironmentGit -path $path -arguments @('diff', '--no-renames', '--name-only', '-z', $base.Ref, 'HEAD')
+    if ($changed.ExitCode -eq 0 -and $differs.ExitCode -eq 0) {
+        $split = { param($output) @(($output -join "`n") -split "`0" | Where-Object { $_ }) }
+        $differing = @{}
+        foreach ($file in (& $split $differs.Output)) { $differing[$file] = $true }
+        if (@((& $split $changed.Output) | Where-Object { $differing.ContainsKey($_) }).Count -eq 0) {
+            $result.Merged = $true; $result.Via = 'tree'; $result.Unmerged = @(); return [pscustomobject]$result
+        }
+    }
+
+    # squash: the branch's whole change as one commit on the merge base, compared by patch id with the base branch.
+    $squash = Invoke-OctoEnvironmentGit -path $path -arguments @('-c', 'user.name=octo-tools', '-c', 'user.email=octo-tools@localhost', 'commit-tree', 'HEAD^{tree}', '-p', $fork, '-m', 'octo-tools merge check')
+    if ($squash.ExitCode -eq 0) {
+        $squashCommit = [string]($squash.Output | Select-Object -Last 1)
+        $squashCherry = Invoke-OctoEnvironmentGit -path $path -arguments @('cherry', $base.Ref, $squashCommit, $fork)
+        if ($squashCherry.ExitCode -eq 0 -and @($squashCherry.Output | Where-Object { $_ -match '^-\s' }).Count -eq 1 -and @($squashCherry.Output | Where-Object { $_ -match '^\+\s' }).Count -eq 0) {
+            $result.Merged = $true; $result.Via = 'squash'; $result.Unmerged = @(); return [pscustomobject]$result
+        }
+    }
+
+    # pullRequest: a merged PR of this branch whose head is exactly HEAD.
+    if ($branch) {
+        # The configured URL, not get-url: url.<base>.insteadOf may rewrite it to a mirror.
+        $remoteUrl = [string]((Invoke-OctoEnvironmentGit -path $path -arguments @('config', '--get', 'remote.origin.url')).Output | Select-Object -Last 1)
+        if ($remoteUrl -match 'github\.com[:/]([^/]+)/([^/]+?)(\.git)?/?$') {
+            $gh = Invoke-OctoEnvironmentGh -path $path -arguments @('pr', 'list', '--repo', "$($Matches[1])/$($Matches[2])", '--head', $branch, '--state', 'merged', '--json', 'number,url,headRefOid')
+            if ($gh.ExitCode -eq 0) {
+                try {
+                    $pr = @(($gh.Output -join "`n") | ConvertFrom-Json) | Where-Object { $_.headRefOid -eq $head } | Select-Object -First 1
+                    if ($pr) {
+                        $result.Merged = $true; $result.Via = 'pullRequest'; $result.Unmerged = @()
+                        $result.PullRequest = [ordered]@{ number = $pr.number; url = $pr.url }
+                        return [pscustomobject]$result
+                    }
+                }
+                catch { }
+            }
+        }
+    }
+    return [pscustomobject]$result
 }
 
 function Add-OctoEnvironmentWorktree {
@@ -2102,7 +2269,14 @@ function Get-OctoAffectedRepos {
     Removes a feature environment: its worktrees and its folder (feed, cache, catalogs, logs).
 .DESCRIPTION
     Refuses - and removes nothing - when a worktree has uncommitted or untracked changes, or commits on top of its base
-    commit that no remote has. There is no -force: commit and push, or discard, first. Feature branches are kept.
+    commit that no remote has and whose changes are not on origin's default branch either; the refusal names those
+    commits. Commits whose changes are already on the default branch do not block (AB#8953): after a squash or rebase
+    merge GitHub deletes the branch, so its commits are on no remote, yet nothing is lost. The default branch is
+    fetched first; a worktree counts as merged when every unpushed commit has a patch-equivalent commit there (rebase
+    merge), when every file the branch changed is identical there, when the branch's whole change equals one commit
+    there (squash merge), or when gh finds a merged pull request of the branch whose head is HEAD. -Json: per repo
+    unpushed, unpushedCommits, merged, mergedVia (patch | tree | squash | pullRequest), mergedInto, pullRequest,
+    unmergedCommits, mergeCheck. There is no -force: commit and push, or discard, first. Feature branches are kept.
     In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are neither checked nor removed. Only what the environment
     owns is deleted (worktrees, nuget/, .nuget-packages/, logFiles/, Octo.User.props, the catalogs, .octo/sync,
     .octo/build-stamps and the manifest); anything else in the folder is kept, the folder goes only when empty. Stop the environment's
@@ -2133,13 +2307,22 @@ function Remove-OctoEnvironment {
     # In-place worktrees (Add-OctoEnvironmentRepo -path -inPlace) are not the environment's: never checked, never removed.
     $owned = @($manifest['repos'] | Where-Object { -not (Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath) })
     $keptInPlace = @($manifest['repos'] | Where-Object { Test-OctoEnvironmentRepoInPlace -repo $_ -environmentPath $environmentPath } | ForEach-Object { [string]$_['path'] })
-    $states = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ })
-    $blocking = @($states | Where-Object { $_.dirty -or $_.unpushed -gt 0 -or $_.problem })
+    # -checkMerged: unpushed commits whose changes are already on origin's default branch (squash or rebase merge,
+    # GitHub deleted the branch) do not block (AB#8953).
+    $states = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ -checkMerged })
+    $blocking = @($states | Where-Object { $_.dirty -or ($_.unpushed -gt 0 -and -not $_.merged) -or $_.problem })
     if ($blocking.Count -gt 0) {
         $reasons = @($blocking | ForEach-Object {
                 $why = @()
                 if ($_.dirty) { $why += 'uncommitted changes' }
-                if ($_.unpushed -gt 0) { $why += "$($_.unpushed) unpushed commit(s)" }
+                if ($_.unpushed -gt 0 -and -not $_.merged) {
+                    $commits = if (@($_.unmergedCommits).Count -gt 0) { @($_.unmergedCommits) } else { @($_.unpushedCommits) }
+                    $text = "$($_.unpushed) unpushed commit(s)"
+                    if ($_.mergedInto) { $text += ", $($commits.Count) not on $($_.mergedInto)" }
+                    $text += ": $($commits -join ' | ')"
+                    if ($_.mergeCheck) { $text += " ($($_.mergeCheck))" }
+                    $why += $text
+                }
                 if ($_.problem) { $why += $_.problem }
                 "$($_.name): $($why -join ', ')"
             })
@@ -2184,6 +2367,10 @@ function Remove-OctoEnvironment {
         return
     }
     if ($success) { Write-Host "Removed environment $env ($environmentPath); feature branches are kept." -ForegroundColor Green }
+    foreach ($state in @($states | Where-Object { $_.merged })) {
+        $how = if ($state.pullRequest) { "pull request #$($state.pullRequest.number)" } else { "$($state.mergedVia)-equivalent" }
+        Write-Host "  $($state.name): $($state.unpushed) local commit(s) already on $($state.mergedInto) ($how)"
+    }
     foreach ($kept in $keptInPlace) { Write-Host "  kept in-place worktree $kept" }
     if ($leftOver.Count -gt 0) { Write-Host "  lane folder kept, it still holds: $($leftOver -join ', ')" }
     foreach ($message in $errors) { Write-Error $message }
