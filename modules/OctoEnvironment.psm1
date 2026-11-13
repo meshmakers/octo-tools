@@ -268,8 +268,8 @@ function Resolve-OctoEnvironmentBase {
 
 function Get-OctoEnvironmentRepoState {
     <#
-        Dirty / unpushed state of an environment worktree (Remove-OctoEnvironment refuses either).
-        unpushed: commits on top of the base commit that are on no remote branch; unpushedCommits names them
+        Dirty / unpushed state of an environment worktree (Remove-OctoEnvironment refuses either). head: the HEAD
+        commit the state was read at. unpushed: commits on top of the base commit that are on no remote branch; unpushedCommits names them
         ('<short sha> <subject>'). -checkMerged (Remove-OctoEnvironment, AB#8953): when there are unpushed commits,
         also asks whether their changes are already on origin's default branch - after a squash or rebase merge
         GitHub deletes the branch, so the commits are on no remote although nothing would be lost
@@ -280,7 +280,7 @@ function Get-OctoEnvironmentRepoState {
     param([Parameter(Mandatory = $true)] [System.Collections.IDictionary]$repo, [switch]$checkMerged)
     $path = [string]$repo['path']
     $state = [ordered]@{
-        name = $repo['name']; role = $repo['role']; path = $path; exists = $false; dirty = $false; unpushed = 0
+        name = $repo['name']; role = $repo['role']; path = $path; exists = $false; head = $null; dirty = $false; unpushed = 0
         unpushedCommits = @(); merged = $false; mergedVia = $null; mergedInto = $null; pullRequest = $null
         unmergedCommits = @(); mergeCheck = $null; problem = $null
     }
@@ -292,6 +292,8 @@ function Get-OctoEnvironmentRepoState {
         return [pscustomobject]$state
     }
     $state.dirty = @($status.Output | Where-Object { $_ }).Count -gt 0
+    $headCommit = Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', '--verify', '--quiet', 'HEAD')
+    if ($headCommit.ExitCode -eq 0) { $state.head = [string]($headCommit.Output | Select-Object -Last 1) }
     # Work done in the environment that no remote has: commits on top of the base commit that are on no remote
     # branch (the base commit itself may be an unpushed commit of the base checkout - not this environment's work).
     $exclude = @('--not', '--remotes')
@@ -2277,7 +2279,7 @@ function Get-OctoAffectedRepos {
     fetched first; a worktree counts as merged when every unpushed commit has a patch-equivalent commit there (rebase
     merge), when every file the branch changed is identical there, when the branch's whole change equals one commit
     there (squash merge), or when gh finds a pull request of the branch merged into the default branch whose head is
-    HEAD; the dirty state is read again right before anything is removed. -Json: per repo
+    HEAD; the dirty state and HEAD are read again right before anything is removed. -Json: per repo
     unpushed, unpushedCommits, merged, mergedVia (patch | tree | squash | pullRequest), mergedInto, pullRequest,
     unmergedCommits, mergeCheck. There is no -force: commit and push, or discard, first. Feature branches are kept.
     In-place worktrees (Add-OctoEnvironmentRepo -inPlace) are neither checked nor removed. Only what the environment
@@ -2337,11 +2339,17 @@ function Remove-OctoEnvironment {
         if ($Json) { Write-OctoJson -Command 'Remove-OctoEnvironment' -Data ([ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; repos = $states; keptInPlace = $keptInPlace }) }
         return
     }
-    # The merge checks above fetch and may ask gh, which takes a while: read the dirty state again right before
-    # anything is removed, so edits made meanwhile are never deleted (git worktree remove --force below).
-    $fresh = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ } | Where-Object { $_.dirty -or $_.problem })
+    # The merge checks above fetch and may ask gh, which takes a while: read the state again right before anything is
+    # removed, so edits and commits made meanwhile are never deleted (git worktree remove --force below). A HEAD that
+    # moved was not part of the merge decision.
+    $checkedHead = @{}
+    foreach ($state in $states) { $checkedHead[[string]$state.path] = $state.head }
+    $fresh = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ } | Where-Object { $_.dirty -or $_.problem -or $_.head -ne $checkedHead[[string]$_.path] })
     if ($fresh.Count -gt 0) {
-        $reasons = @($fresh | ForEach-Object { "$($_.name): $(if ($_.problem) { $_.problem } else { 'uncommitted changes' })" })
+        $reasons = @($fresh | ForEach-Object {
+                $why = if ($_.problem) { $_.problem } elseif ($_.dirty) { 'uncommitted changes' } else { 'HEAD moved during the check (new commits), run it again' }
+                "$($_.name): $why"
+            })
         & $fail "Remove-OctoEnvironment refused, nothing removed: $($reasons -join '; ')." $states
         return
     }

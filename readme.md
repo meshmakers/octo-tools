@@ -353,8 +353,8 @@ Remove-OctoEnvironment -env ab8625-enum-null
   when every file the branch changed is identical there or the branch's whole change equals one commit there (squash
   merge), or when `gh` finds a pull request of the branch merged into the default branch whose head is the worktree's
   HEAD. Anything else is still refused, and the refusal names the commits that are not on the default branch. A dirty
-  worktree is always refused; the dirty state is read again right before the removal, so edits made while the checks
-  run are kept. `-Json` reports per repository `unpushed`, `unpushedCommits`, `merged`, `mergedVia`
+  worktree is always refused; the dirty state and HEAD are read again right before the removal, so edits and commits
+  made while the checks run are kept. `-Json` reports per repository `unpushed`, `unpushedCommits`, `merged`, `mergedVia`
   (`patch` | `tree` | `squash` | `pullRequest`), `mergedInto`, `pullRequest`, `unmergedCommits` and `mergeCheck` (why
   the check could not decide, e.g. origin unreachable).
 - **Base: `origin/main`, not the local checkout.** New feature branches and consumer worktrees start from the

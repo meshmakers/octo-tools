@@ -166,6 +166,23 @@ Describe 'Remove-OctoEnvironment after a merged pull request (AB#8953)' {
         Test-Path (Join-Path $wt 'edited-meanwhile.txt') | Should -BeTrue
     }
 
+    It 'refuses when HEAD moved during the merge checks (a commit made meanwhile is kept)' {
+        Add-WorktreeCommit 'a.txt' 'a' 'first change' | Out-Null
+        Invoke-OnOrigin { param($clone)
+            Invoke-TestGit $clone merge -q --squash FETCH_HEAD | Out-Null
+            Invoke-TestGit $clone commit -q -m 'feature m (#1)' | Out-Null }
+        Mock -ModuleName OctoEnvironment Resolve-OctoEnvironmentDefaultBranch {
+            Add-WorktreeCommit 'late.txt' 'x' 'committed during the check' | Out-Null
+            [pscustomobject]@{ Ref = 'origin/main'; Fetched = $true; Note = $null }
+        }
+        Invoke-TestGit $wt fetch -q origin main | Out-Null
+
+        $doc = Get-Doc (Remove-OctoEnvironment -env 'env-m' -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'octo-sdk: HEAD moved during the check'
+        Test-Path (Join-Path $wt 'late.txt') | Should -BeTrue
+    }
+
     It 'refuses and names the commits when the base branch cannot be fetched' {
         Add-WorktreeCommit 'a.txt' 'a' 'first change' | Out-Null
         Invoke-TestGit $wt remote set-url origin (Join-Path $TestDrive 'origins/does-not-exist.git') | Out-Null
