@@ -10,7 +10,9 @@
     Build configuration (default Release; DebugL for local development).
 
 .PARAMETER repositoryPath
-    Repository root containing the solution.
+    Repository root containing the solution. A relative path follows the PowerShell location (Set-Location), not
+    the folder pwsh was started in; it is resolved once, before the lane is chosen (AB#8954). The build refuses
+    when the repository does not lie under the lane root that was found.
 
 .PARAMETER laneIsolation
     Auto (default) / On / Off - see Get-OctoRepositoryBuildEnvironment.
@@ -50,6 +52,11 @@ function Invoke-Build {
         [string]$EventsFile = '',
         [switch]$Json
     )
+
+    # AB#8954: resolve once, against the PowerShell location. [IO.Path]::GetFullPath would use the process
+    # directory, so `Set-Location wt-<env>/<repo>; Invoke-Build -repositoryPath .` in a pwsh started in
+    # branches/main built in branches/main.
+    $repositoryPath = Resolve-OctoLocationPath -path $repositoryPath
 
     if ($DryRun -or [string]::IsNullOrWhiteSpace($EventsFile)) {
         Invoke-BuildMain -configuration $configuration -repositoryPath $repositoryPath -laneIsolation $laneIsolation -DryRun:$DryRun -msbuildProperties $msbuildProperties -refreshCatalogs:$refreshCatalogs -Json:$Json
@@ -96,6 +103,16 @@ function Invoke-BuildMain {
 
     $propertyArgs = @(ConvertTo-OctoMsBuildPropertyArgs -properties $msbuildProperties)
     $buildEnvironment = Get-OctoRepositoryBuildEnvironment -repositoryPath $repositoryPath -configuration $configuration -laneIsolation $laneIsolation
+    if ($buildEnvironment.laneRoot -and -not (Test-OctoPathInLane -path $repositoryPath -laneRoot $buildEnvironment.laneRoot)) {
+        # Safety net (AB#8954): never build with the environment of a lane the repository is not part of.
+        $message = "Invoke-Build: repository $repositoryPath does not lie under the lane root $($buildEnvironment.laneRoot) - refused, dotnet was not started."
+        $Global:LASTEXITCODE = 1
+        if ($Json) {
+            Write-OctoJson -Command 'Invoke-Build' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ configuration = $configuration; repositoryPath = $repositoryPath; laneRoot = $buildEnvironment.laneRoot; error = $message })
+        }
+        Write-Error $message
+        return
+    }
     if ($DryRun) {
         Write-OctoLaneDryRun -command 'Invoke-Build' -repositoryPath $repositoryPath -configuration $configuration -buildEnvironment $buildEnvironment -Json:$Json
         return
@@ -159,7 +176,7 @@ function Invoke-BuildCore {
     if (-not $refreshCatalogs -and -not (Test-OctoCatalogPropertySet -properties $msbuildProperties) -and (Test-OctoRepoUsesCk -path $repositoryPath)) {
         & $setPhase 'catalogs'
         $laneRoot = Find-OctoLaneRoot -path $repositoryPath
-        if (-not $laneRoot) { $laneRoot = Split-Path -Parent ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))) }
+        if (-not $laneRoot) { $laneRoot = Split-Path -Parent ([IO.Path]::TrimEndingDirectorySeparator($repositoryPath)) }
         $read = Initialize-OctoRunCatalogs -laneRootPath $laneRoot
         $catalogs.mode = $read.mode; $catalogs.usable = [bool]$read.usable; $catalogs.seconds = [double]$read.seconds; $catalogs.detail = $read.detail
         if (-not $Json) { Write-Host "CK catalogs: $($read.mode) - $($read.detail)" -ForegroundColor $(if ($read.usable) { 'DarkGray' } else { 'Yellow' }) }

@@ -105,6 +105,14 @@ follows the lane: `<lane>/.nuget-packages` for an isolated lane; for a legacy la
 global cache (`NUGET_PACKAGES` or `~/.nuget/packages`). `-WhatIf` prints the lane, its environment, the caches and
 the per-repo `RestoreSources`.
 
+**Single repositories: `Invoke-Build` / `Invoke-Publish`.** They apply the same isolation to one repository: the lane
+is the nearest folder above `-repositoryPath` that holds an `Octo.User.props` (`Find-OctoLaneRoot`). A relative
+`-repositoryPath` (the default is `.\`) follows the **PowerShell location** (`Set-Location`, `$PWD`), not the folder
+pwsh was started in: `Set-Location wt-<env>/<repo>; Invoke-Build -repositoryPath . -configuration DebugL` builds in
+the environment, also in a pwsh started in `branches/main`. The path is resolved once, before the lane is chosen;
+`-DryRun -Json` shows the resolved `repositoryPath` and `laneRoot`. Should the repository not lie under the lane root
+that was found, the build refuses before `dotnet` starts and names both paths (AB#8954).
+
 **Private feeds for library worktrees.** `-repoPaths @{ 'octo-construction-kit-engine' = '<absolute worktree folder>' }`
 builds that repository from the given folder (e.g. a git worktree) instead of `<checkout>/<repo>`, at the same
 position in the build order; the folder must exist and contain a `.sln`/`.slnx` or a `src/` folder.
@@ -358,6 +366,9 @@ Remove-OctoEnvironment -env ab8625-enum-null
   those packages - `Invoke-BuildEnvironment` rebuilds them - and which libraries outside the environment are behind
   their upstream in the base lane, so their seeded packages may lack what the newer consumers need (`CS0246`):
   add them as consumers, or update and rebuild them in the base lane and run `Sync-OctoEnvironment`.
+- **Building one repository by hand**: `Set-Location wt-<env>/<repo>; Invoke-Build -repositoryPath . -configuration DebugL`
+  builds with the environment's feed and package cache - relative paths follow the PowerShell location, not the
+  folder pwsh was started in (AB#8954). Check it first with `-DryRun -Json` (`laneRoot` is `wt-<env>`).
 - **Consumers** are detached worktrees; treat them as read-only. A library
   change reaches a service only if every repository between them is rebuilt in the environment, otherwise main's
   prebuilt packages bind to the new library at runtime (`MissingMethodException`).
