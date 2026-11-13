@@ -178,4 +178,11 @@ Describe 'Safety net: the build refuses a repository outside the lane root that 
         # A sibling whose name starts with the lane name is not inside it.
         Test-OctoPathInLane -path "$MainLane-other/mm-common" -laneRoot $MainLane | Should -BeFalse
     }
+
+    It 'Test-OctoPathInLane handles a lane at the filesystem root' {
+        $root = [IO.Path]::GetPathRoot($EnvLane)
+        Test-OctoPathInLane -path (Join-Path $root 'mm-common') -laneRoot $root | Should -BeTrue
+        Test-OctoPathInLane -path $root -laneRoot $root | Should -BeTrue
+        Test-OctoPathInLane -path $root -laneRoot $EnvLane | Should -BeFalse
+    }
 }

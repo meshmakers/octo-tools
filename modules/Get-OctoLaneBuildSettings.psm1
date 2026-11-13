@@ -191,8 +191,14 @@ function Test-OctoPathInLane {
         [string]$laneRoot
     )
 
-    $child = (Resolve-OctoLocationPath -path $path) + [IO.Path]::DirectorySeparatorChar
-    $parent = (Resolve-OctoLocationPath -path $laneRoot) + [IO.Path]::DirectorySeparatorChar
+    # A filesystem root keeps its separator (D:\, /): append one only where it is missing.
+    $withSeparator = {
+        param([string]$value)
+        if ([IO.Path]::EndsInDirectorySeparator($value)) { return $value }
+        return $value + [IO.Path]::DirectorySeparatorChar
+    }
+    $child = & $withSeparator (Resolve-OctoLocationPath -path $path)
+    $parent = & $withSeparator (Resolve-OctoLocationPath -path $laneRoot)
     return $child.StartsWith($parent, [StringComparison]::OrdinalIgnoreCase)
 }
 
