@@ -15,7 +15,9 @@
     prefix with a trailing separator). -branchRootPath is resolved against $PWD and must look like a
     lane (exist and hold Octo.User.props or an octo-*/mm-* folder), otherwise the call is refused. So a
     local daemon outside the lane (e.g. octo-devstack, `dotnet octo-devstack.dll` from
-    ~/dev/meshmakers/octo-devstack) and the processes of other lanes survive.
+    ~/dev/meshmakers/octo-devstack) and the processes of other lanes survive. Folders <lane>/wt-* are other
+    lanes (feature environments, lane worktrees; in the flat layout every feature environment lies there) and never
+    belong to the lane, unless they also lie under one of -additionalRoots (AB#9007).
       - Windows: the matched processes are stopped (Stop-Process -Force). `dotnet build-server shutdown`
         is NOT run: the compiler server is shared by every build of the user.
       - macOS/Linux: nothing is stopped (still no file locks there), the matched processes are only
@@ -236,26 +238,51 @@ function Select-OctoLaneProcesses {
     # Pure matching: a candidate { Pid, Name, Command, Cwd, Modules } belongs to the lane when its cwd, its
     # entry assembly (Get-OctoEntryAssemblyPath - not any argument: a daemon started with
     # `--events <lane>/x.jsonl` is not the lane's) or one of its module paths lies under the lane folder.
+    # A process whose working directory or entry assembly lies below <lane>/wt-* (feature environments, lane worktrees)
+    # belongs to another lane and never matches, whatever modules it loads (AB#9007).
     # $branchRootPath must be absolute (Invoke-KillDotnet resolves it against $PWD).
     param(
         [object[]]$candidates = @(),
         # One or more roots (lane folder plus e.g. in-place worktrees); a process under any of them matches.
-        [Parameter(Mandatory = $true)] [string[]]$branchRootPath
+        [Parameter(Mandatory = $true)] [string[]]$branchRootPath,
+        # Keep processes below <root>/wt-* (Get-OctoProcessesUnderFolder: every process under an arbitrary folder
+        # counts there, e.g. a shell in a worktree that is about to be moved). Lane selection leaves them out.
+        [switch]$includeNestedLanes
     )
-    $prefixes = @(foreach ($root in $branchRootPath) {
-            $laneFull = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($root))
-            "$laneFull/", "$laneFull\"
-        }) | Select-Object -Unique
-    $under = {
-        param([string]$path)
+    $toPrefixes = {
+        param([string[]]$roots)
+        @(foreach ($root in $roots) {
+                $laneFull = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($root))
+                "$laneFull/", "$laneFull\"
+            }) | Select-Object -Unique
+    }
+    $prefixes = & $toPrefixes $branchRootPath
+    # Other lanes inside the lane folder (AB#9007): <lane>/wt-* holds feature environments and lane worktrees - in the
+    # flat layout (repositories directly below rootPath) every feature environment lies there. They are never the
+    # lane's processes, unless they also lie under one of the further roots (-additionalRoots).
+    $laneFolder = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath[0]))
+    $nestedLanePrefix = "$laneFolder/wt-" -replace '\\', '/'
+    $extraPrefixes = if ($branchRootPath.Count -gt 1) { & $toPrefixes @($branchRootPath | Select-Object -Skip 1) } else { @() }
+    $underAny = {
+        param([string]$path, [string[]]$prefixList)
         # Only absolute paths: GetFullPath would resolve a relative one against the process start directory.
         if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { return $false }
         $full = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path)) + [IO.Path]::DirectorySeparatorChar
         $full = $full -replace '\\', '/'
-        foreach ($prefix in $prefixes) {
+        foreach ($prefix in $prefixList) {
             if ($full.StartsWith(($prefix -replace '\\', '/'), [StringComparison]::OrdinalIgnoreCase)) { return $true }
         }
         return $false
+    }
+    # A path below <lane>/wt-* is another lane's, unless it also lies under a further root (-additionalRoots).
+    $inNestedLane = {
+        param([string]$path)
+        (& $underAny $path @($nestedLanePrefix)) -and -not (& $underAny $path $extraPrefixes)
+    }
+    # A path of the lane: under a root and (lane selection) not in a nested lane - also for single modules.
+    $under = {
+        param([string]$path)
+        (& $underAny $path $prefixes) -and ($includeNestedLanes -or -not (& $inNestedLane $path))
     }
 
     $found = @()
@@ -264,9 +291,12 @@ function Select-OctoLaneProcesses {
         # lane (Invoke-BuildAll without -branch): it manages the stack and stops its services itself.
         $entry = Get-OctoEntryAssemblyPath -command ([string]$candidate.Command) -cwd ([string]$candidate.Cwd)
         if ($entry -and (($entry -split '[\\/]')[-1] -eq 'octo-devstack.dll')) { continue }
+        # A process whose home - working directory or entry assembly - lies in a nested lane belongs to that lane as a
+        # whole, also when it loads a module from the base lane (Windows: a native DLL).
+        if (-not $includeNestedLanes -and ((& $inNestedLane ([string]$candidate.Cwd)) -or (& $inNestedLane $entry))) { continue }
         $reason = $null
         if (& $under ([string]$candidate.Cwd)) { $reason = 'cwd' }
-        elseif (& $under (Get-OctoEntryAssemblyPath -command ([string]$candidate.Command) -cwd ([string]$candidate.Cwd))) { $reason = 'commandLine' }
+        elseif (& $under $entry) { $reason = 'commandLine' }
         if (-not $reason) {
             foreach ($module in @($candidate.Modules)) {
                 if (& $under ([string]$module)) { $reason = 'module'; break }
@@ -288,7 +318,8 @@ function Get-OctoProcessesUnderFolder {
         working directory (macOS/Linux, lsof), its entry assembly or (Windows, dotnet processes) one of its module paths
         lies under it - prefix with a trailing separator, case-insensitive; the octo-devstack daemon never counts. Unlike
         the lane mode it looks at EVERY process (a shell, an IDE or a Claude Code session in the folder counts, not only
-        dotnet), accepts any folder (no lane check) and never stops anything. Used before a worktree is moved
+        dotnet), accepts any folder (no lane check), keeps processes below <folder>/wt-* (lane mode leaves them out) and
+        never stops anything. Used before a worktree is moved
         (Add-OctoEnvironmentRepo -path). Returns { pid, name, reason }.
     #>
     param([Parameter(Mandatory = $true)] [string]$path)
@@ -313,7 +344,7 @@ function Get-OctoProcessesUnderFolder {
             }
         }
     }
-    return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder)
+    return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder -includeNestedLanes)
 }
 
 Export-ModuleMember -Function @('Invoke-KillDotnet', 'Get-OctoProcessesUnderFolder')

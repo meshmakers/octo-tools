@@ -59,6 +59,9 @@ foreach ($name in 'public-github-catalog-cache.json', 'private-github-catalog-ca
 $script:PreviousRootPath = Get-Variable -Name rootPath -Scope Global -ValueOnly -ErrorAction SilentlyContinue
 $script:PreviousNugetPackages = $env:NUGET_PACKAGES
 $env:NUGET_PACKAGES = $null
+# AB#9007: the developer's base lane setting must not reach the tests.
+$script:PreviousEnvironmentBase = $env:OCTO_ENVIRONMENT_BASE
+$env:OCTO_ENVIRONMENT_BASE = $null
 
 function Invoke-TestGit([string]$path) {
     $output = & git -C $path @args 2>&1
@@ -131,6 +134,26 @@ function New-FakeWorkspace {
     return [pscustomobject]@{ Root = $ws; Main = (Join-Path $ws 'branches/main') }
 }
 
+# Flat layout (AB#9007): the repositories, nuget/ and .octo/ directly below rootPath (e.g. ~/RiderProjects/meshmakers/main
+# with the profile loaded from main/octo-tools); environments in <root>/wt-<env>, next to the repositories. The base
+# lane of the template is moved to <TestDrive>/flat/main (the repositories have no worktrees yet, the origin URLs are
+# absolute), plus an octo-tools checkout as on a developer machine.
+function New-FakeFlatWorkspace {
+    $fake = New-FakeWorkspace
+    $flat = Join-Path $TestDrive 'flat/main'
+    if (Test-Path -LiteralPath (Split-Path -Parent $flat)) { Remove-Item -LiteralPath (Split-Path -Parent $flat) -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $flat) | Out-Null
+    Move-Item -LiteralPath $fake.Main -Destination $flat
+    $tools = Join-Path $flat 'octo-tools'
+    New-Item -ItemType Directory -Force -Path (Join-Path $tools 'modules') | Out-Null
+    Set-Content -Path (Join-Path $tools 'modules/profile.ps1') -Value '# fake'
+    Invoke-TestGit $tools init -q -b main | Out-Null
+    Invoke-TestGit $tools add -A | Out-Null
+    Invoke-TestGit $tools commit -q -m 'initial octo-tools' | Out-Null
+    $global:rootPath = $flat
+    return [pscustomobject]@{ Root = $flat; Main = $flat }
+}
+
 function Initialize-FakeWorkspaceTemplate {
     $ws = Join-Path $TestDrive 'ws'
     foreach ($folder in @($ws, (Join-Path $TestDrive 'origins'))) { if (Test-Path $folder) { Remove-Item $folder -Recurse -Force } }
@@ -175,6 +198,7 @@ function Restore-OctoEnvironmentTestState {
     else { $global:PSDefaultParameterValues.Remove('Invoke-BuildEnvironment:maxParallel') }
     $env:NUGET_PACKAGES = $script:PreviousNugetPackages
     $env:OCTO_CK_CACHE_DIRECTORY = $script:PreviousCkCacheDirectory
+    $env:OCTO_ENVIRONMENT_BASE = $script:PreviousEnvironmentBase
     if ($null -ne $script:PreviousRootPath) { $global:rootPath = $script:PreviousRootPath } else { Remove-Variable -Name rootPath -Scope Global -ErrorAction SilentlyContinue }
 }
 

@@ -428,13 +428,45 @@ Remove-OctoEnvironment -env ab8625-enum-null
   unregisters it (it belongs to its original owner).
 - **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/wt-<env> -additionalRoots <in-place
   worktrees>`, run by `Invoke-BuildEnvironment` before the build (`-skipKill` to opt out); a main build never touches
-  environment processes.
+  environment processes: a lane's scope leaves its own `<lane>/wt-*` folders out (AB#9007).
 - **Running** the environment's services is octo-devstack's job (own stack slot per environment, fallback to main's
   binaries for the services the environment does not build). `Start-Octo` stays for main.
-- Load the profile from the `octo-tools` checkout next to `branches/` (`$rootPath` = the workspace root). Environment
-  folders inside `branches/main` are refused, and so is a name whose `wt-<name>` already exists as an octo-claude-pm
-  lane folder or flat worktree. `Remove-OctoEnvironment` deletes only what the environment owns. Claims stay in
-  `branches/main/.octo/claims/<repo>.md` (with `Environment:` / `Worktree:` lines, format documented by octo-claude-pm), never in the environment folder.
+- **Two workspace layouts** (AB#9007). The base lane is the folder that holds the repositories, `nuget/` and `.octo/`:
+
+  | Layout | Folders | Profile loaded from | Base lane | Environments |
+  |--------|---------|---------------------|-----------|--------------|
+  | lanes | `<root>/branches/main/<repo>`, `<root>/octo-tools` | `<root>/octo-tools` | `branches/main` | `<root>/wt-<env>` |
+  | flat | `<root>/<repo>`, `<root>/octo-tools`, `<root>/.octo` (e.g. `~/RiderProjects/meshmakers/main`) | `<root>/octo-tools` | `.` (= `$rootPath`) | `<root>/wt-<env>`, next to the repositories |
+
+  Without `-base`, `New-OctoEnvironment` takes `$env:OCTO_ENVIRONMENT_BASE` when it is set (relative to `$rootPath`
+  or absolute), else `branches/main` when that folder holds a lane, else `$rootPath` itself when it holds one; a lane
+  is a folder with `.octo/`, `Octo.User.props` or a git checkout of an `mm-*`/`octo-*` repository (`octo-tools` and
+  `octo-devstack` do not count). The manifest records what was chosen (`base: "branches/main"` or `"."`); every other
+  environment cmdlet and octo-devstack resolve it against `$rootPath`. When no lane is found, or a recorded base lane
+  is gone, the error names both layouts, `-base` and `OCTO_ENVIRONMENT_BASE`. In the flat layout `wt-<env>` lies inside
+  the base lane: its kill scope leaves `wt-*` out, `Get-OctoBuildOrder` only takes `mm-*`/`octo-*` folders and its
+  package caches are `nuget/` and `.nuget-packages/` - but `Remove-BinAndObjFolders -path $rootPath` walks into every
+  `wt-*` too, so pass a repository folder there. A base lane above `$rootPath` is refused, and so is a name whose
+  `wt-<name>` already exists as an octo-claude-pm lane folder or flat worktree.
+- **Adopting a hand-made environment** (a `wt-<lane>` folder with worktrees but no `.octo/environment.json`, e.g. one
+  built while `New-OctoEnvironment` refused the flat layout). Its own name is refused (`wt-<name>` exists without a
+  manifest), so create an empty environment under a new name - without `-repos` it gets feed, cache, catalogs and
+  manifest but no worktree (`-branchName` and `-addAffected` need `-repos`) - and record the existing worktrees in place:
+
+  ```powershell
+  New-OctoEnvironment -env ab9006-adopt -workItem AB#9006
+  Add-OctoEnvironmentRepo -env ab9006-adopt -path $rootPath/wt-ab9006-csharp-optargs/octo-communication-sdk -inPlace
+  Invoke-BuildEnvironment -env ab9006-adopt -verifyTests
+  ```
+
+  From then on `Get-OctoEnvironment`, octo-devstack (`env_list`, its own stack slot) and the worktree sweep know the
+  worktree. `-inPlace` keeps it where it is (see the in-place caveat above: a plain `dotnet build` there still uses
+  the hand-made folder's `../nuget`); without `-inPlace` it is moved into `wt-<env>/<repo>` (refused while a process
+  runs from it). `Remove-OctoEnvironment` only unregisters an in-place worktree; the hand-made folder stays until its
+  owner removes it. Adopt only when no session works in the worktree any more, or with that session's agreement.
+- `Remove-OctoEnvironment` deletes only what the environment owns. Claims stay in the base lane,
+  `<base>/.octo/claims/<repo>.md` (`branches/main/.octo/claims` or `$rootPath/.octo/claims`; with `Environment:` /
+  `Worktree:` lines, format documented by octo-claude-pm), never in the environment folder.
 
 # Working on many tenants
 

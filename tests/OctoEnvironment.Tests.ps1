@@ -77,12 +77,14 @@ Describe 'New-OctoEnvironment' {
         $global:LASTEXITCODE | Should -Be 1
     }
 
-    It 'refuses an environment folder inside the base lane ($rootPath pointing into the lane)' {
-        $global:rootPath = $ws.Main
+    It 'refuses a base lane above $rootPath (the environment folder would lie inside it)' {
+        $inner = Join-Path $ws.Main 'octo-sdk'
+        $global:rootPath = $inner
         $doc = Get-Doc (New-OctoEnvironment -env 'inside' -repos octo-sdk -base $ws.Main -Json)
         $doc.data.success | Should -BeFalse
         $doc.data.error | Should -Match 'inside the base lane'
-        Test-Path (Join-Path $ws.Main 'wt-inside') | Should -BeFalse
+        $doc.data.error | Should -Match 'OCTO_ENVIRONMENT_BASE'
+        Test-Path (Join-Path $inner 'wt-inside') | Should -BeFalse
     }
 
     It '-WhatIf creates nothing' {
