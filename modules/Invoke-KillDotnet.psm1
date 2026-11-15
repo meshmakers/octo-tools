@@ -238,7 +238,8 @@ function Select-OctoLaneProcesses {
     # Pure matching: a candidate { Pid, Name, Command, Cwd, Modules } belongs to the lane when its cwd, its
     # entry assembly (Get-OctoEntryAssemblyPath - not any argument: a daemon started with
     # `--events <lane>/x.jsonl` is not the lane's) or one of its module paths lies under the lane folder.
-    # Paths below <lane>/wt-* (feature environments, lane worktrees) are other lanes and never match (AB#9007).
+    # A process whose working directory or entry assembly lies below <lane>/wt-* (feature environments, lane worktrees)
+    # belongs to another lane and never matches, whatever modules it loads (AB#9007).
     # $branchRootPath must be absolute (Invoke-KillDotnet resolves it against $PWD).
     param(
         [object[]]$candidates = @(),
@@ -273,11 +274,15 @@ function Select-OctoLaneProcesses {
         }
         return $false
     }
+    # A path below <lane>/wt-* is another lane's, unless it also lies under a further root (-additionalRoots).
+    $inNestedLane = {
+        param([string]$path)
+        (& $underAny $path @($nestedLanePrefix)) -and -not (& $underAny $path $extraPrefixes)
+    }
+    # A path of the lane: under a root and (lane selection) not in a nested lane - also for single modules.
     $under = {
         param([string]$path)
-        if (-not (& $underAny $path $prefixes)) { return $false }
-        if (-not $includeNestedLanes -and (& $underAny $path @($nestedLanePrefix)) -and -not (& $underAny $path $extraPrefixes)) { return $false }
-        return $true
+        (& $underAny $path $prefixes) -and ($includeNestedLanes -or -not (& $inNestedLane $path))
     }
 
     $found = @()
@@ -286,9 +291,12 @@ function Select-OctoLaneProcesses {
         # lane (Invoke-BuildAll without -branch): it manages the stack and stops its services itself.
         $entry = Get-OctoEntryAssemblyPath -command ([string]$candidate.Command) -cwd ([string]$candidate.Cwd)
         if ($entry -and (($entry -split '[\\/]')[-1] -eq 'octo-devstack.dll')) { continue }
+        # A process whose home - working directory or entry assembly - lies in a nested lane belongs to that lane as a
+        # whole, also when it loads a module from the base lane (Windows: a native DLL).
+        if (-not $includeNestedLanes -and ((& $inNestedLane ([string]$candidate.Cwd)) -or (& $inNestedLane $entry))) { continue }
         $reason = $null
         if (& $under ([string]$candidate.Cwd)) { $reason = 'cwd' }
-        elseif (& $under (Get-OctoEntryAssemblyPath -command ([string]$candidate.Command) -cwd ([string]$candidate.Cwd))) { $reason = 'commandLine' }
+        elseif (& $under $entry) { $reason = 'commandLine' }
         if (-not $reason) {
             foreach ($module in @($candidate.Modules)) {
                 if (& $under ([string]$module)) { $reason = 'module'; break }

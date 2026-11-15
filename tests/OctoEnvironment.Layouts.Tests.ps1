@@ -256,3 +256,24 @@ Describe 'Review round 1 (AB#9007)' {
         }
     }
 }
+
+Describe 'Review round 2 (AB#9007)' {
+    BeforeEach { $script:ws = New-FakeFlatWorkspace }
+
+    It 'a process of a nested lane is excluded as a whole, also when it loads a module from the base lane' {
+        $envRepo = Join-Path $ws.Root 'wt-ab9007-flat/octo-sdk/bin'
+        $baseDll = Join-Path $ws.Main 'octo-sdk/runtimes/win-x64/native/sqlite.dll'
+        $mainRepo = Join-Path $ws.Main 'octo-sdk/bin'
+        InModuleScope Invoke-KillDotnet -Parameters @{ ws = $ws; envRepo = $envRepo; baseDll = $baseDll; mainRepo = $mainRepo } {
+            $candidates = @(
+                [pscustomobject]@{ Pid = 1; Name = 'dotnet'; Command = "dotnet $(Join-Path $envRepo 'Sdk.dll')"; Cwd = $null; Modules = @($baseDll) },
+                [pscustomobject]@{ Pid = 2; Name = 'dotnet'; Command = 'dotnet Sdk.dll'; Cwd = $envRepo; Modules = @($baseDll) },
+                [pscustomobject]@{ Pid = 3; Name = 'dotnet'; Command = 'dotnet x.dll'; Cwd = $null; Modules = @($baseDll) },
+                [pscustomobject]@{ Pid = 4; Name = 'dotnet'; Command = 'dotnet Sdk.dll'; Cwd = $mainRepo; Modules = @() }
+            )
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $ws.Main).pid | Should -Be @(3, 4)
+            # an in-place worktree below wt-* passed as a further root still counts
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath @($ws.Main, (Split-Path -Parent $envRepo))).pid | Should -Be @(1, 2, 3, 4)
+        }
+    }
+}
