@@ -243,7 +243,10 @@ function Select-OctoLaneProcesses {
     param(
         [object[]]$candidates = @(),
         # One or more roots (lane folder plus e.g. in-place worktrees); a process under any of them matches.
-        [Parameter(Mandatory = $true)] [string[]]$branchRootPath
+        [Parameter(Mandatory = $true)] [string[]]$branchRootPath,
+        # Keep processes below <root>/wt-* (Get-OctoProcessesUnderFolder: every process under an arbitrary folder
+        # counts there, e.g. a shell in a worktree that is about to be moved). Lane selection leaves them out.
+        [switch]$includeNestedLanes
     )
     $toPrefixes = {
         param([string[]]$roots)
@@ -273,7 +276,7 @@ function Select-OctoLaneProcesses {
     $under = {
         param([string]$path)
         if (-not (& $underAny $path $prefixes)) { return $false }
-        if ((& $underAny $path @($nestedLanePrefix)) -and -not (& $underAny $path $extraPrefixes)) { return $false }
+        if (-not $includeNestedLanes -and (& $underAny $path @($nestedLanePrefix)) -and -not (& $underAny $path $extraPrefixes)) { return $false }
         return $true
     }
 
@@ -307,7 +310,8 @@ function Get-OctoProcessesUnderFolder {
         working directory (macOS/Linux, lsof), its entry assembly or (Windows, dotnet processes) one of its module paths
         lies under it - prefix with a trailing separator, case-insensitive; the octo-devstack daemon never counts. Unlike
         the lane mode it looks at EVERY process (a shell, an IDE or a Claude Code session in the folder counts, not only
-        dotnet), accepts any folder (no lane check) and never stops anything. Used before a worktree is moved
+        dotnet), accepts any folder (no lane check), keeps processes below <folder>/wt-* (lane mode leaves them out) and
+        never stops anything. Used before a worktree is moved
         (Add-OctoEnvironmentRepo -path). Returns { pid, name, reason }.
     #>
     param([Parameter(Mandatory = $true)] [string]$path)
@@ -332,7 +336,7 @@ function Get-OctoProcessesUnderFolder {
             }
         }
     }
-    return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder)
+    return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder -includeNestedLanes)
 }
 
 Export-ModuleMember -Function @('Invoke-KillDotnet', 'Get-OctoProcessesUnderFolder')

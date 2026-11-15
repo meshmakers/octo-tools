@@ -1766,6 +1766,9 @@ function New-OctoEnvironment {
     try { $repoNames = @($repos | ForEach-Object { $_ -split ',' } | Where-Object { $_ } | ForEach-Object { Resolve-OctoEnvironmentRepoName -repo $_.Trim() -basePath $basePath } | Select-Object -Unique) }
     catch { & $fail $_.Exception.Message; return }
     if ($repoNames.Count -eq 0 -and $addAffected) { & $fail "-addAffected needs -repos (the feature repositories whose consumers are added)."; return }
+    # The manifest records no branch of its own (schemaVersion 1): without a feature worktree -branchName would be lost,
+    # and a later Add-OctoEnvironmentRepo -repo would use the default branch name.
+    if ($repoNames.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($branchName)) { & $fail "-branchName needs -repos: an empty environment records no branch. Pass the repository that gets the branch with -repos, or create the environment without -branchName and adopt a worktree that is already on the branch (Add-OctoEnvironmentRepo -path)."; return }
     if ([string]::IsNullOrWhiteSpace($branchName)) { $branchName = Get-OctoEnvironmentDefaultBranchName -env $env -workItem $normalizedWorkItem }
     $relativeBase = if ([IO.Path]::IsPathRooted($base)) { [IO.Path]::GetRelativePath((Get-OctoEnvironmentRootPath), $basePath) -replace '\\', '/' } else { $base -replace '\\', '/' }
 

@@ -451,7 +451,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
 - **Adopting a hand-made environment** (a `wt-<lane>` folder with worktrees but no `.octo/environment.json`, e.g. one
   built while `New-OctoEnvironment` refused the flat layout). Its own name is refused (`wt-<name>` exists without a
   manifest), so create an empty environment under a new name - without `-repos` it gets feed, cache, catalogs and
-  manifest but no worktree - and record the existing worktrees in place:
+  manifest but no worktree (`-branchName` and `-addAffected` need `-repos`) - and record the existing worktrees in place:
 
   ```powershell
   New-OctoEnvironment -env ab9006-adopt -workItem AB#9006

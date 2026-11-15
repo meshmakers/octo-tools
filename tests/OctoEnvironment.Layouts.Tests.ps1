@@ -231,3 +231,28 @@ Describe 'Adopting a hand-made environment (flat layout)' {
         Test-Path (Join-Path $ws.Root 'wt-empty-affected') | Should -BeFalse
     }
 }
+
+Describe 'Review round 1 (AB#9007)' {
+    BeforeEach { $script:ws = New-FakeFlatWorkspace }
+
+    It 'New-OctoEnvironment refuses -branchName without -repos (an empty environment records no branch)' {
+        $doc = Get-Doc (New-OctoEnvironment -env deferred-env -branchName 'feature/custom' -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match '-branchName needs -repos'
+        Test-Path (Join-Path $ws.Root 'wt-deferred-env') | Should -BeFalse
+    }
+
+    It 'Get-OctoProcessesUnderFolder keeps processes below <folder>/wt-* (only lane selection leaves them out)' {
+        $folder = Join-Path $ws.Root 'octo-sdk'
+        $nested = Join-Path $folder 'wt-fixture'
+        InModuleScope Invoke-KillDotnet -Parameters @{ folder = $folder; nested = $nested } {
+            $candidates = @([pscustomobject]@{ Pid = 7; Name = 'zsh'; Command = 'zsh'; Cwd = $nested; Modules = @() })
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder -includeNestedLanes).pid | Should -Be @(7)
+            @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $folder).pid | Should -BeNullOrEmpty
+            Mock Get-Process { [pscustomobject]@{ Id = 7; Name = 'zsh'; CommandLine = 'zsh' } }
+            Mock Test-OctoKillDotnetWindows { $false }
+            Mock Get-OctoProcessCwdRecords { @('p7', "n$nested") }
+            @(Get-OctoProcessesUnderFolder -path $folder).pid | Should -Be @(7)
+        }
+    }
+}
