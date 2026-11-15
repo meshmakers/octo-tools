@@ -15,7 +15,9 @@
     prefix with a trailing separator). -branchRootPath is resolved against $PWD and must look like a
     lane (exist and hold Octo.User.props or an octo-*/mm-* folder), otherwise the call is refused. So a
     local daemon outside the lane (e.g. octo-devstack, `dotnet octo-devstack.dll` from
-    ~/dev/meshmakers/octo-devstack) and the processes of other lanes survive.
+    ~/dev/meshmakers/octo-devstack) and the processes of other lanes survive. Folders <lane>/wt-* are other
+    lanes (feature environments, lane worktrees; in the flat layout every feature environment lies there) and never
+    belong to the lane, unless they also lie under one of -additionalRoots (AB#9007).
       - Windows: the matched processes are stopped (Stop-Process -Force). `dotnet build-server shutdown`
         is NOT run: the compiler server is shared by every build of the user.
       - macOS/Linux: nothing is stopped (still no file locks there), the matched processes are only
@@ -236,26 +238,43 @@ function Select-OctoLaneProcesses {
     # Pure matching: a candidate { Pid, Name, Command, Cwd, Modules } belongs to the lane when its cwd, its
     # entry assembly (Get-OctoEntryAssemblyPath - not any argument: a daemon started with
     # `--events <lane>/x.jsonl` is not the lane's) or one of its module paths lies under the lane folder.
+    # Paths below <lane>/wt-* (feature environments, lane worktrees) are other lanes and never match (AB#9007).
     # $branchRootPath must be absolute (Invoke-KillDotnet resolves it against $PWD).
     param(
         [object[]]$candidates = @(),
         # One or more roots (lane folder plus e.g. in-place worktrees); a process under any of them matches.
         [Parameter(Mandatory = $true)] [string[]]$branchRootPath
     )
-    $prefixes = @(foreach ($root in $branchRootPath) {
-            $laneFull = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($root))
-            "$laneFull/", "$laneFull\"
-        }) | Select-Object -Unique
-    $under = {
-        param([string]$path)
+    $toPrefixes = {
+        param([string[]]$roots)
+        @(foreach ($root in $roots) {
+                $laneFull = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($root))
+                "$laneFull/", "$laneFull\"
+            }) | Select-Object -Unique
+    }
+    $prefixes = & $toPrefixes $branchRootPath
+    # Other lanes inside the lane folder (AB#9007): <lane>/wt-* holds feature environments and lane worktrees - in the
+    # flat layout (repositories directly below rootPath) every feature environment lies there. They are never the
+    # lane's processes, unless they also lie under one of the further roots (-additionalRoots).
+    $laneFolder = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath[0]))
+    $nestedLanePrefix = "$laneFolder/wt-" -replace '\\', '/'
+    $extraPrefixes = if ($branchRootPath.Count -gt 1) { & $toPrefixes @($branchRootPath | Select-Object -Skip 1) } else { @() }
+    $underAny = {
+        param([string]$path, [string[]]$prefixList)
         # Only absolute paths: GetFullPath would resolve a relative one against the process start directory.
         if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) { return $false }
         $full = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($path)) + [IO.Path]::DirectorySeparatorChar
         $full = $full -replace '\\', '/'
-        foreach ($prefix in $prefixes) {
+        foreach ($prefix in $prefixList) {
             if ($full.StartsWith(($prefix -replace '\\', '/'), [StringComparison]::OrdinalIgnoreCase)) { return $true }
         }
         return $false
+    }
+    $under = {
+        param([string]$path)
+        if (-not (& $underAny $path $prefixes)) { return $false }
+        if ((& $underAny $path @($nestedLanePrefix)) -and -not (& $underAny $path $extraPrefixes)) { return $false }
+        return $true
     }
 
     $found = @()

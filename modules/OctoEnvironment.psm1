@@ -16,7 +16,11 @@
 #>
 
 $script:ManifestSchemaVersion = 1
-$script:DefaultBase = 'branches/main'
+# Base lane of the lanes layout (<rootPath>/branches/main). Without -base the base lane is detected
+# (Resolve-OctoEnvironmentDefaultBase, AB#9007): this folder, else rootPath itself (flat layout).
+$script:LanesLayoutBase = 'branches/main'
+# Setting that overrides the detection (relative to rootPath or absolute), e.g. for a lane named differently.
+$script:BaseSettingName = 'OCTO_ENVIRONMENT_BASE'
 $script:CatalogFolders = @('local-catalog', 'local-blueprint-catalog')
 $script:IgnoredSyncFiles = @('.catalog-index.lock', '.DS_Store')
 # Developer tools that live next to the lanes (<rootPath>/<repo>), not in the base lane; never built here.
@@ -53,6 +57,57 @@ function Get-OctoEnvironmentBasePath {
     param([Parameter(Mandatory = $true)] [string]$base)
     if ([IO.Path]::IsPathRooted($base)) { return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($base)) }
     return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Join-Path (Get-OctoEnvironmentRootPath) $base)))
+}
+
+function Test-OctoEnvironmentLaneFolder {
+    # $true when $path holds a lane checkout: .octo/ (claims, local catalogs), an Octo.User.props, or a git checkout
+    # of an mm-* / octo-* repository (the developer tools octo-tools and octo-devstack do not count - they live next
+    # to the lanes in the lanes layout).
+    param([string]$path)
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) { return $false }
+    if (Test-Path -LiteralPath (Join-Path $path '.octo') -PathType Container) { return $true }
+    if (Test-Path -LiteralPath (Join-Path $path 'Octo.User.props') -PathType Leaf) { return $true }
+    foreach ($folder in @(Get-ChildItem -LiteralPath $path -Directory -ErrorAction SilentlyContinue | Where-Object { ($_.Name -like 'octo-*' -or $_.Name -like 'mm-*') -and $script:ToolRepos -notcontains $_.Name })) {
+        if (Test-Path -LiteralPath (Join-Path $folder.FullName '.git')) { return $true }
+    }
+    return $false
+}
+
+function Get-OctoEnvironmentBaseSetupHint {
+    # How to point the environment cmdlets at the base lane; part of every "base lane not found" message.
+    $root = Get-OctoEnvironmentRootPath
+    return "Supported layouts: lanes ($root/$script:LanesLayoutBase holds the repositories, the profile is loaded from the octo-tools next to the lanes) and flat ($root itself holds the repositories and .octo/, the profile is loaded from $root/octo-tools). Pass -base <lane> (relative to $root or absolute), or set `$env:$script:BaseSettingName to the lane that holds the repositories."
+}
+
+function Resolve-OctoEnvironmentDefaultBase {
+    <#
+        The base lane of a new environment when New-OctoEnvironment gets no -base (AB#9007), as the value the
+        manifest records (relative to rootPath, or absolute when the setting is absolute):
+          1. $env:OCTO_ENVIRONMENT_BASE, when set (relative to rootPath or absolute);
+          2. branches/main, when <rootPath>/branches/main holds a lane (lanes layout);
+          3. '.', when rootPath itself holds a lane (flat layout: the repositories directly below rootPath, e.g.
+             ~/RiderProjects/meshmakers/main with the profile loaded from main/octo-tools).
+        Throws with a setup hint when none of them holds a lane.
+    #>
+    $root = Get-OctoEnvironmentRootPath
+    $setting = [Environment]::GetEnvironmentVariable($script:BaseSettingName)
+    if (-not [string]::IsNullOrWhiteSpace($setting)) {
+        $settingPath = Get-OctoEnvironmentBasePath -base $setting
+        if (-not (Test-OctoEnvironmentLaneFolder -path $settingPath)) {
+            throw "`$env:$script:BaseSettingName = '$setting' resolves to $settingPath, which holds no lane (no .octo/, Octo.User.props or mm-*/octo-* checkout). $(Get-OctoEnvironmentBaseSetupHint)"
+        }
+        return $setting
+    }
+    if (Test-OctoEnvironmentLaneFolder -path (Join-Path $root $script:LanesLayoutBase)) { return $script:LanesLayoutBase }
+    if (Test-OctoEnvironmentLaneFolder -path $root) { return '.' }
+    throw "No base lane found: neither $root/$script:LanesLayoutBase nor $root holds a lane (no .octo/, Octo.User.props or mm-*/octo-* checkout). $(Get-OctoEnvironmentBaseSetupHint)"
+}
+
+function Get-OctoEnvironmentMissingBaseMessage {
+    # "Base lane ... does not exist" plus the manifest value and the setup hint (environment cmdlets after creation).
+    param([Parameter(Mandatory = $true)] [string]$basePath, [string]$base = '')
+    $recorded = if ($base) { " (manifest base '$base')" } else { '' }
+    return "Base lane $basePath$recorded does not exist. $(Get-OctoEnvironmentBaseSetupHint)"
 }
 
 function Test-OctoPathInside {
@@ -1606,6 +1661,12 @@ function Invoke-OctoEnvironmentPackageCacheSeed {
     snapshot of the base lane's feed and catalogs.
 
 .DESCRIPTION
+    Base lane (AB#9007): -base (relative to rootPath or absolute); without it $env:OCTO_ENVIRONMENT_BASE, else
+    branches/main when <rootPath>/branches/main holds a lane (lanes layout), else rootPath itself when it holds a lane
+    (flat layout: repositories, .octo/ or Octo.User.props directly below rootPath - the manifest records base '.').
+    A lane is a folder with .octo/, Octo.User.props or an mm-*/octo-* git checkout. Neither: the call fails with a
+    setup hint. In the flat layout wt-<env> lies directly below the base lane; its kill scope leaves wt-* out.
+
     For every repository in -repos a git worktree <env>/<repo> is added from <base>/<repo> on the feature branch
     (-branchName, default <user>/AB#<id>_<desc>; an existing local or origin branch is checked out instead of
     created). The developer tools octo-tools and octo-devstack live next to the lanes (<rootPath>/<repo>) and can be
@@ -1638,9 +1699,13 @@ function Invoke-OctoEnvironmentPackageCacheSeed {
     Octo.User.props is imported for its other settings), and .octo/environment.json (schemaVersion 1).
 
     Refuses an existing environment, an invalid name, a name whose wt-<name> already exists without a manifest (an
-    octo-claude-pm lane folder or a flat worktree wt-<lane>-<repo>), a base lane that does not exist, and an
-    environment folder inside the base lane (the kill scope and cache logic of the base would match it). Existing
-    worktrees are adopted with Add-OctoEnvironmentRepo -path. -addAffected adds every
+    octo-claude-pm lane folder or a flat worktree wt-<lane>-<repo>), a base lane that does not exist, and a base
+    lane above rootPath (wt-<env> would lie inside it). Existing
+    worktrees are adopted with Add-OctoEnvironmentRepo -path; without -repos the environment starts empty, so a
+    hand-made environment can be adopted without a new worktree (AB#9007):
+        New-OctoEnvironment -env <new name> -workItem AB#<id>
+        Add-OctoEnvironmentRepo -env <new name> -path <rootPath>/wt-<lane>/<repo> -inPlace
+    -addAffected (needs -repos) adds every
     transitive consumer of the feature repositories as a consumer worktree (Get-OctoAffectedRepos); for a single
     service use Add-OctoEnvironmentRepo -role consumer -addAffected instead.
 
@@ -1651,11 +1716,14 @@ function New-OctoEnvironment {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)] [string]$env,
-        [Parameter(Mandatory = $true)] [string[]]$repos,
+        # Repositories to add as feature worktrees. Empty: an environment without worktrees (AB#9007), filled
+        # afterwards with Add-OctoEnvironmentRepo - e.g. -path <existing worktree> -inPlace to adopt one.
+        [string[]]$repos = @(),
         [string]$workItem = '',
         [string]$branchName = '',
         [string]$owner = '',
-        [string]$base = $script:DefaultBase,
+        # Base lane (relative to rootPath or absolute). Empty: detected, see Resolve-OctoEnvironmentDefaultBase.
+        [string]$base = '',
         [switch]$addAffected,
         [switch]$localBase,
         [switch]$skipPackageCacheSeed,
@@ -1673,12 +1741,20 @@ function New-OctoEnvironment {
     try {
         $environmentPath = Get-OctoEnvironmentPath -env $env
         $normalizedWorkItem = ConvertTo-OctoWorkItem -workItem $workItem
+        $baseDetected = [string]::IsNullOrWhiteSpace($base)
+        if ($baseDetected) { $base = Resolve-OctoEnvironmentDefaultBase }
         $basePath = Get-OctoEnvironmentBasePath -base $base
+        $rootFull = Get-OctoEnvironmentRootPath
     }
     catch { & $fail $_.Exception.Message; return }
-    if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { & $fail "Base lane $basePath does not exist."; return }
-    if (Test-OctoPathInside -path $environmentPath -parent $basePath) {
-        & $fail "Environment folder $environmentPath lies inside the base lane $basePath (`$rootPath points into the lane - load the profile from the octo-tools next to the lanes). Refused: the base lane's kill scope and package caches would include it."
+    if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { & $fail "Base lane $basePath does not exist. $(Get-OctoEnvironmentBaseSetupHint)"; return }
+    # Flat layout (base lane = rootPath): wt-<env> lies directly below the base lane, next to its repositories. That
+    # is allowed - the base lane's kill scope leaves <lane>/wt-* out (Invoke-KillDotnet), its package caches are
+    # <lane>/nuget and <lane>/.nuget-packages, and Get-OctoBuildOrder only takes mm-*/octo-* folders. A base lane
+    # ABOVE rootPath still is refused: wt-<env> would land somewhere inside one of its repositories or lanes.
+    $flatLayout = [string]::Equals(($basePath -replace '\\', '/'), ($rootFull -replace '\\', '/'), [StringComparison]::OrdinalIgnoreCase)
+    if (-not $flatLayout -and (Test-OctoPathInside -path $environmentPath -parent $basePath)) {
+        & $fail "Environment folder $environmentPath lies inside the base lane $basePath, which is above `$rootPath ($rootFull). Refused: the base lane's kill scope and package caches would include it. $(Get-OctoEnvironmentBaseSetupHint)"
         return
     }
     if (Test-Path -LiteralPath (Get-OctoEnvironmentManifestPath -environmentPath $environmentPath) -PathType Leaf) { & $fail "Environment $env already exists ($environmentPath). Use Add-OctoEnvironmentRepo, or Remove-OctoEnvironment first."; return }
@@ -1689,7 +1765,7 @@ function New-OctoEnvironment {
     }
     try { $repoNames = @($repos | ForEach-Object { $_ -split ',' } | Where-Object { $_ } | ForEach-Object { Resolve-OctoEnvironmentRepoName -repo $_.Trim() -basePath $basePath } | Select-Object -Unique) }
     catch { & $fail $_.Exception.Message; return }
-    if ($repoNames.Count -eq 0) { & $fail "-repos names no repository."; return }
+    if ($repoNames.Count -eq 0 -and $addAffected) { & $fail "-addAffected needs -repos (the feature repositories whose consumers are added)."; return }
     if ([string]::IsNullOrWhiteSpace($branchName)) { $branchName = Get-OctoEnvironmentDefaultBranchName -env $env -workItem $normalizedWorkItem }
     $relativeBase = if ([IO.Path]::IsPathRooted($base)) { [IO.Path]::GetRelativePath((Get-OctoEnvironmentRootPath), $basePath) -replace '\\', '/' } else { $base -replace '\\', '/' }
 
@@ -1703,7 +1779,8 @@ function New-OctoEnvironment {
         slot     = $env
     }
 
-    if (-not $PSCmdlet.ShouldProcess($environmentPath, "Create environment with feature worktree(s) $($repoNames -join ', ') on $branchName")) {
+    $action = if ($repoNames.Count -gt 0) { "Create environment with feature worktree(s) $($repoNames -join ', ') on $branchName" } else { 'Create environment without worktrees (add them with Add-OctoEnvironmentRepo)' }
+    if (-not $PSCmdlet.ShouldProcess($environmentPath, $action)) {
         $plan = [ordered]@{ success = $true; exitCode = 0; dryRun = $true; environment = $env; path = $environmentPath; base = $basePath; branch = $branchName; repos = $repoNames; localBase = [bool]$localBase }
         if ($Json) { Write-OctoJson -Command 'New-OctoEnvironment' -Data $plan }
         return
@@ -1802,7 +1879,8 @@ function New-OctoEnvironment {
     foreach ($message in $warnings) { Write-Warning $message }
     foreach ($message in $feedSnapshot.hints) { Write-Warning $message }
     if ($toolRepos.Count -gt 0) { Write-Host "  $($toolRepos -join ', '): developer tool(s), not built by Invoke-BuildEnvironment" -ForegroundColor DarkGray }
-    Write-Host "Next: Invoke-BuildEnvironment -env $env -verifyTests" -ForegroundColor Cyan
+    if (@($manifest['repos']).Count -eq 0) { Write-Host "Next: Add-OctoEnvironmentRepo -env $env -repo <name>, or -path <existing worktree> [-inPlace] to adopt one" -ForegroundColor Cyan }
+    else { Write-Host "Next: Invoke-BuildEnvironment -env $env -verifyTests" -ForegroundColor Cyan }
 }
 
 function Undo-OctoEnvironmentCreation {
@@ -2190,7 +2268,7 @@ function Sync-OctoEnvironment {
         if ($null -eq $manifest) { throw "Environment $env does not exist." }
         $environmentPath = Get-OctoEnvironmentPath -env $env
         $basePath = Get-OctoEnvironmentBasePath -base ([string]$manifest['base'])
-        if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { throw "Base lane $basePath does not exist." }
+        if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { throw (Get-OctoEnvironmentMissingBaseMessage -basePath $basePath -base ([string]$manifest['base'])) }
     }
     catch {
         $global:LASTEXITCODE = 1
@@ -2564,7 +2642,7 @@ function Invoke-BuildEnvironment {
 
     $sync = $null
     if ($syncMain -and -not $DryRun) {
-        if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { & $fail "Base lane $basePath does not exist."; return }
+        if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { & $fail (Get-OctoEnvironmentMissingBaseMessage -basePath $basePath -base ([string]$manifest['base'])); return }
         $sync = Invoke-OctoEnvironmentSync -environmentPath $environmentPath -basePath $basePath
         if (-not $Json) { Write-Host "Synced $env from $basePath" -ForegroundColor Green; Write-OctoEnvironmentSyncSummary -sync $sync }
     }
