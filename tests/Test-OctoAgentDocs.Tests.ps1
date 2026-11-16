@@ -445,6 +445,87 @@ Describe 'reference-to-shim' {
     }
 }
 
+Describe 'sibling CLAUDE.md mentions in prose' {
+    BeforeAll {
+        # A workspace: octo-self under test, octo-done migrated, octo-legacy not yet.
+        function Initialize-Workspace {
+            $root = New-TempDir
+            Write-File (Join-Path $root 'octo-done/AGENTS.md') '# D'
+            Write-File (Join-Path $root 'octo-done/CLAUDE.md') $script:Shim
+            Write-File (Join-Path $root 'octo-legacy/CLAUDE.md') '# L'
+            $self = Join-Path $root 'octo-self'
+            Move-Item -LiteralPath (New-Fixture) -Destination $self
+            return $self
+        }
+        function Get-WorkspaceResult {
+            param([string]$Self)
+            $saved = $Global:ROOTPATH
+            try { $Global:ROOTPATH = Split-Path -Parent $Self; return Get-Result $Self }
+            finally { $Global:ROOTPATH = $saved }
+        }
+    }
+    It 'reports a migrated sibling written as <case>' -ForEach @(
+        @{ case = 'a backticked path'; text = 'See `octo-done/CLAUDE.md`.' }
+        @{ case = 'a backticked path and a section'; text = "See ``octo-done/CLAUDE.md`` $([char]0x2192) 'Runtime-State'." }
+        @{ case = 'plain prose and a section'; text = "Full rationale in octo-done CLAUDE.md $([char]0xA7) 'Tenant Authorization'." }
+        @{ case = 'a backticked name'; text = "It exists (``octo-done`` CLAUDE.md $([char]0x2192) 'Race-safe')." }
+        @{ case = 'a backticked file name'; text = 'the checklist (octo-done `CLAUDE.md`, Touch points)' }
+        @{ case = 'a path with an anchor'; text = 'See octo-done/CLAUDE.md#rules.' }
+    ) {
+        $self = Initialize-Workspace
+        Add-Line $self 'docs/one.md' $text
+        $res = Get-WorkspaceResult $self
+        $f = Get-RuleFinding $res 'reference-to-shim'
+        $f.Count | Should -Be 1
+        $f[0].file | Should -Be 'docs/one.md:8'
+        $f[0].severity | Should -Be 'warn'
+        $f[0].message | Should -Match "'octo-done/AGENTS.md' or the octo-done/docs/ file"
+        (Get-RuleFinding $res 'reference-resolves').Count | Should -Be 0
+    }
+    It 'warns on a sibling that has not migrated, also when reference-to-shim is raised to error' {
+        $self = Initialize-Workspace
+        Set-Override $self '{ "rules": { "reference-to-shim": "error" } }'
+        Add-Line $self 'AGENTS.md' "See octo-legacy CLAUDE.md $([char]0xA7) 'Pool member'."
+        $f = Get-RuleFinding (Get-WorkspaceResult $self) 'reference-to-shim'
+        $f.Count | Should -Be 1
+        $f[0].severity | Should -Be 'warn'
+        $f[0].message | Should -Match 'octo-legacy has not migrated yet'
+    }
+    It 'reports a sibling name that is not a repository in the workspace' {
+        $self = Initialize-Workspace
+        Add-Line $self 'AGENTS.md' 'LCARS rules: `octo-mesh-refinery-studio/CLAUDE.md`.'
+        $f = Get-RuleFinding (Get-WorkspaceResult $self) 'reference-resolves'
+        $f.Count | Should -Be 1
+        $f[0].severity | Should -Be 'warn'
+        $f[0].message | Should -Match "no repository 'octo-mesh-refinery-studio'"
+    }
+    It 'stays quiet about an unknown sibling outside a workspace, as in a CI checkout' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' 'See octo-nowhere CLAUDE.md.'
+        $saved = $Global:ROOTPATH
+        try { $Global:ROOTPATH = New-TempDir; $res = Get-Result $r }
+        finally { $Global:ROOTPATH = $saved }
+        @($res.data.findings | Where-Object { $_.rule -like 'reference-*' }).Count | Should -Be 0
+    }
+    It 'ignores <case>' -ForEach @(
+        @{ case = "the repository's own shim by name"; text = 'This is `octo-self/CLAUDE.md`, see octo-self CLAUDE.md.' }
+        @{ case = 'a name inside a longer word'; text = 'M2-octo-done CLAUDE.md mentions it.' }
+        @{ case = 'a nested path'; text = 'See projects/octo-done/CLAUDE.md.' }
+        @{ case = 'a name that ends a sentence'; text = 'Built by octo-done. CLAUDE.md files are shims.' }
+        @{ case = 'a CLAUDE.md that is not a sibling'; text = 'Update its CLAUDE.md and the CLAUDE.md files.' }
+        @{ case = 'a mention inside a fenced block'; text = "``````text`nocto-done CLAUDE.md`n``````" }
+    ) {
+        $self = Initialize-Workspace
+        Add-Line $self 'docs/one.md' $text
+        @((Get-WorkspaceResult $self).data.findings | Where-Object { $_.rule -like 'reference-*' }).Count | Should -Be 0
+    }
+    It 'counts lines in the file, fenced blocks included' {
+        $self = Initialize-Workspace
+        Add-Line $self 'docs/one.md' @('```', 'x', '```', 'See octo-done CLAUDE.md.')
+        (Get-RuleFinding (Get-WorkspaceResult $self) 'reference-to-shim')[0].file | Should -Be 'docs/one.md:11'
+    }
+}
+
 Describe 'invisible characters' {
     It 'catches <kind>' -ForEach @(
         @{ kind = 'a Unicode Tag character'; text = "a$([char]0xDB40)$([char]0xDC41)b"; expect = 'Unicode Tag character' }
