@@ -1,0 +1,42 @@
+name: Pester
+
+# The octo-tools test suite on every pull request and every push to main, so a change to a
+# module (e.g. the agent-docs checker that pipeline templates pin by commit) is tested before
+# anything uses it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pester-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pester:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout octo-tools
+        uses: actions/checkout@v4
+
+      - name: Install Pester 5
+        shell: pwsh
+        run: |
+          # The runner image may already carry a Pester 5.
+          if (-not (Get-Module Pester -ListAvailable | Where-Object { $_.Version -ge [version]'5.5' -and $_.Version.Major -eq 5 })) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser -Force
+          }
+          Get-Module Pester -ListAvailable | Format-Table Name, Version, ModuleBase -AutoSize
+
+      - name: Run the tests
+        shell: pwsh
+        run: |
+          # Loaded first, so the parallel runner starts every file with this Pester.
+          Import-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99
+          ./tests/Invoke-ParallelPester.ps1

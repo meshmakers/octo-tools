@@ -747,6 +747,49 @@ Rules are `[severity, options]` with `off | warn | error` and cascade: the org d
 A repository may raise a rule listed in `nonRelaxable` but not lower it, because its file
 lives in the branch under review. `Get-Help Test-OctoAgentDocs -Full` has the rest.
 
+## In a pipeline
+
+`-Ci` writes Azure DevOps logging commands instead of the coloured report: one
+`##vso[task.logissue]` line per finding, `type=error` or `type=warning` after the finding's
+severity, with `sourcepath` (relative to the repository), `linenumber` when the finding has one,
+`code=<rule id>`, and a message made of the rule id, the finding, and the rule's why and fix. The
+name is `-Ci` because the output is Azure DevOps only for now.
+
+```powershell
+Test-OctoAgentDocs -Path $(Build.SourcesDirectory) -Ci -Mode enforce -RepositoryName octo-common-services
+```
+
+```text
+Agent docs check: octo-common-services (entry point: AGENTS.md, mode: enforce)
+##vso[task.logissue type=warning;sourcepath=AGENTS.md;code=docs-count]docs-count: 13 routed docs (limit 12) - ... Why: ... Fix: ...
+##vso[task.logissue type=error;sourcepath=docs/build.md;linenumber=3;code=globs-match]globs-match: applies_to glob ... Why: ... Fix: ...
+Sibling rules skipped: no sibling repository beside this checkout, so references into other repositories are checked only in a local workspace.
+1 error(s), 1 warning(s) - mode enforce: the step fails
+```
+
+- **Gate.** Unlike `-Explain`, `-Ci` keeps the gate: in mode `enforce` an error-severity
+  finding throws and sets exit code 1. Warnings never change the exit code, in either mode, and
+  `-Ci` sets no task result itself (no `task.complete`), so a step with warnings only succeeds.
+  In mode `logOnly` the same issues are written and the exit code is 0.
+- **`-RepositoryName`.** A pipeline checks out into a folder named `s`; pass the real name so the
+  report, the JSON and the exception name the repository, and a mention of its own name in prose
+  is not taken for a sibling. Without it the folder name is used, as before.
+- **Siblings.** A single-repository checkout has no sibling repositories beside it, so the
+  rules that look into them (`reference-to-shim` and `reference-resolves` for a sibling, also a
+  link such as `../octo-x/AGENTS.md`) cannot run there. `-Ci` then writes the one
+  `Sibling rules skipped` line instead of a finding per reference; they run in a local
+  workspace, where the siblings are checked out.
+- `-Ci` and `-Json` are two output formats and cannot be combined.
+
+The pipeline template downloads exactly four files from this repository at a pinned commit and
+imports them without `profile.ps1`: `modules/Test-OctoAgentDocs.psm1`,
+`modules/OctoAgentDocs.Common.psm1`, `modules/OctoJsonOutput.psm1` and
+`modules/agent-docs.rules.json`. Keep them self-sufficient: a new module dependency of the
+checker must be added to the template's file list in the same change (a test imports the four
+files from an otherwise empty folder in a fresh `pwsh -NoProfile`). The Pester suite runs on
+every pull request and push to `main` (`.github/workflows/pester.yml`), so a checker change is
+tested before a template pins it.
+
 ## Starting a repository
 
 ```powershell

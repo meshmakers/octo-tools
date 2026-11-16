@@ -1,0 +1,197 @@
+#Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
+# Test-OctoAgentDocs -Ci (Azure DevOps logging commands, the gate) and -RepositoryName.
+# Fixtures are built under TestDrive by the helpers; ROOTPATH is cleared so the sibling
+# root is the folder above each fixture, as in a pipeline checkout.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH and $global:LASTEXITCODE are the profile contract under test')]
+param()
+
+BeforeAll {
+    . (Join-Path $PSScriptRoot 'AgentDocs.TestHelpers.ps1')
+    $script:SavedRoot = $Global:ROOTPATH
+    $Global:ROOTPATH = $null
+    $script:SiblingNote = '^Sibling rules skipped: '
+    function Get-CiOutput {
+        # The -Ci lines and the error the call threw, if any; the exit code is in $global:LASTEXITCODE.
+        param([string]$Root, [hashtable]$Extra = @{})
+        $result = [pscustomobject]@{ Lines = @(); Issues = @(); Error = $null }
+        $lines = Get-Output { try { Test-OctoAgentDocs -Path $Root -Ci @Extra } catch { $result.Error = $_ } }
+        $result.Lines = @($lines | Where-Object { $_ })
+        $result.Issues = @($lines | Where-Object { $_ -like '##vso*' })
+        return $result
+    }
+    function New-WarningFixture {
+        # Clean but for one warning-severity finding.
+        $r = New-Fixture
+        Set-Override $r '{"schemaVersion":1,"rules":{"entry-point-lines":["warn",{"max":1}]}}'
+        return $r
+    }
+}
+AfterAll {
+    $Global:ROOTPATH = $script:SavedRoot
+    Remove-Fixture
+}
+
+Describe 'Test-OctoAgentDocs -Ci output' {
+    It 'writes one logissue line per finding with type, file, line, rule id, why and fix' {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'docs/two.md') "---`ndescription: Two.`napplies_to: nowhere/**`n---`n"
+        Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
+        $findings = @((Get-Result $r).data.findings)
+        $out = Get-CiOutput $r
+        $out.Issues.Count | Should -Be $findings.Count
+        $glob = @($out.Issues | Where-Object { $_ -like '*code=globs-match*' })
+        $glob.Count | Should -Be 1
+        $glob[0] | Should -Match '^##vso\[task\.logissue type=error;sourcepath=docs/two\.md;linenumber=3;code=globs-match\]globs-match: applies_to glob ''nowhere/\*\*'' matches no file'
+        $glob[0] | Should -Match ' Why: \S.* Fix: \S'
+        $out.Lines[0] | Should -Match '^Agent docs check: .* \(entry point: AGENTS\.md, mode: logOnly\)$'
+        $out.Lines[-1] | Should -Be '1 error(s), 0 warning(s) - mode logOnly: the step does not fail'
+    }
+    It 'leaves out the line number when the finding has none, and the file when it has none' {
+        $r = New-Fixture -Empty
+        $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=required-sections*' })
+        $issue[0] | Should -Match '^##vso\[task\.logissue type=error;code=required-sections\]'
+        $r = New-Fixture -NoFix
+        (Get-CiOutput $r).Issues[0] | Should -Match '^##vso\[task\.logissue type=error;sourcepath=AGENTS\.md;code=routing-current\]'
+    }
+    It 'reports a warning as type=warning' {
+        $out = Get-CiOutput (New-WarningFixture)
+        $out.Issues.Count | Should -Be 1
+        $out.Issues[0] | Should -Match '^##vso\[task\.logissue type=warning;sourcepath=AGENTS\.md;code=entry-point-lines\]'
+        $out.Lines[-1] | Should -Be '0 error(s), 1 warning(s)'
+    }
+    It 'escapes the logging command syntax in file names and messages' {
+        $r = New-Fixture
+        Write-File (Join-Path $r 'docs/a;b].md') "---`nbackground: true`n---`n"
+        $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=frontmatter-present*' })
+        $issue.Count | Should -Be 1
+        $issue[0] | Should -Match '^##vso\[task\.logissue type=error;sourcepath=docs/a%3Bb%5D\.md;code=frontmatter-present\]'
+        InModuleScope Test-OctoAgentDocs { ConvertTo-AdoLogValue "50% a;b]`r`nc" } | Should -Be '50%AZP25 a;b]%0D%0Ac'
+    }
+    It 'writes no colour codes, so every logging command starts its line' {
+        $out = Get-CiOutput (New-Fixture -NoFix)
+        ($out.Lines -join "`n") | Should -Not -Match "$([char]27)"
+    }
+    It 'refuses -Json together with -Ci' {
+        { Test-OctoAgentDocs -Path (New-Fixture) -Ci -Json 6>$null } | Should -Throw '*-Ci and -Json*'
+    }
+    It 'leaves the output without -Ci as it was' {
+        $r = New-Fixture -NoFix
+        $plain = Get-Output { Test-OctoAgentDocs -Path $r }
+        @($plain | Where-Object { $_ -like '##vso*' -or $_ -match $script:SiblingNote }).Count | Should -Be 0
+        $plain[-2] | Should -Match 'add -Explain for why and how to fix'
+    }
+}
+
+Describe 'Test-OctoAgentDocs -Ci gate' {
+    It 'fails with exit code 1 in mode enforce on an error, also with -Explain' -ForEach @(
+        @{ extra = @{ Mode = 'enforce' } }
+        @{ extra = @{ Mode = 'enforce'; Explain = $true } }
+    ) {
+        $global:LASTEXITCODE = 0
+        $out = Get-CiOutput (New-Fixture -NoFix) $extra
+        $out.Error | Should -Not -BeNullOrEmpty
+        $global:LASTEXITCODE | Should -Be 1
+        "$($out.Error)" | Should -Match '1 error-severity finding\(s\)'
+        $out.Lines[-1] | Should -Be '1 error(s), 0 warning(s) - mode enforce: the step fails'
+    }
+    It 'passes with exit code 0 in mode enforce when there are only warnings' {
+        $global:LASTEXITCODE = 7
+        $out = Get-CiOutput (New-WarningFixture) @{ Mode = 'enforce' }
+        $out.Error | Should -BeNullOrEmpty
+        $global:LASTEXITCODE | Should -Be 0
+        $out.Issues | Should -Match 'type=warning'
+    }
+    It 'passes with exit code 0 in mode logOnly with errors, and emits the same issues as enforce' {
+        $r = New-Fixture -NoFix
+        $global:LASTEXITCODE = 7
+        $logOnly = Get-CiOutput $r @{ Mode = 'logOnly' }
+        $logOnly.Error | Should -BeNullOrEmpty
+        $global:LASTEXITCODE | Should -Be 0
+        $enforce = Get-CiOutput $r @{ Mode = 'enforce' }
+        $logOnly.Issues | Should -Be $enforce.Issues
+    }
+    It 'never sets a task result itself' {
+        $out = Get-CiOutput (New-Fixture -NoFix) @{ Mode = 'enforce' }
+        @($out.Lines | Where-Object { $_ -match '##vso\[task\.(complete|setresult)' }).Count | Should -Be 0
+    }
+}
+
+Describe 'Test-OctoAgentDocs -RepositoryName' {
+    BeforeAll {
+        # A pipeline checkout: the repository in a folder named 's', nothing beside it.
+        function New-CiCheckout {
+            $s = Join-Path (New-TempDir) 's'
+            Move-Item -LiteralPath (New-Fixture) -Destination $s
+            return $s
+        }
+    }
+    It 'names the repository in findings and messages instead of the folder' {
+        $s = New-CiCheckout
+        (Get-Result $s @{ RepositoryName = 'octo-common-services' }).data.repository | Should -Be 'octo-common-services'
+        (Get-CiOutput $s @{ RepositoryName = 'octo-common-services' }).Lines[0] | Should -Match '^Agent docs check: octo-common-services '
+        Set-Override $s '{"schemaVersion":1,"rules":{"entry-point-lines":["error",{"max":1}]}}'
+        { Test-OctoAgentDocs -Path $s -Mode enforce -RepositoryName octo-common-services 6>$null } | Should -Throw '*finding(s) in octo-common-services'
+        ((Test-OctoAgentDocs -Path $s -Explain -All -Json -RepositoryName octo-common-services 6>$null) | ConvertFrom-Json).data.repository | Should -Be 'octo-common-services'
+    }
+    It 'keeps the folder name without it' {
+        (Get-Result (New-CiCheckout)).data.repository | Should -Be 's'
+    }
+    It 'treats a mention of its own name as itself, not as a sibling' {
+        $root = New-TempDir
+        Write-File (Join-Path $root 'octo-done/AGENTS.md') '# D'
+        $s = Join-Path $root 's'
+        Move-Item -LiteralPath (New-Fixture) -Destination $s
+        Add-Line $s 'AGENTS.md' 'See octo-named CLAUDE.md.'
+        @((Get-Result $s).data.findings | Where-Object { $_.rule -eq 'reference-resolves' }).Count | Should -Be 1
+        @((Get-Result $s @{ RepositoryName = 'octo-named' }).data.findings | Where-Object { $_.rule -like 'reference-*' }).Count | Should -Be 0
+    }
+    It 'rejects a name with a path in it' {
+        { Test-OctoAgentDocs -Path (New-Fixture) -RepositoryName '../x' 6>$null } | Should -Throw '*RepositoryName*'
+    }
+}
+
+Describe 'Test-OctoAgentDocs -Ci without sibling repositories' {
+    It 'says once that the sibling rules were skipped, and reports nothing about siblings' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' @('See octo-other CLAUDE.md and `octo-other/docs/x.md`.', '[link](../octo-other/AGENTS.md)')
+        $out = Get-CiOutput $r
+        @($out.Lines | Where-Object { $_ -match $script:SiblingNote }).Count | Should -Be 1
+        $out.Issues.Count | Should -Be 0
+        @($out.Lines | Where-Object { $_ -cmatch '^WARNING:' }).Count | Should -Be 0
+    }
+    It 'still reports a missing link inside the repository' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' '[link](octo-sub/missing.md)'
+        $issue = @((Get-CiOutput $r).Issues)
+        $issue.Count | Should -Be 1
+        $issue[0] | Should -Match 'Link target not found: octo-sub/missing\.md'
+    }
+    It 'checks the siblings and says nothing about skipping when one is beside the checkout' {
+        $root = New-TempDir
+        Write-File (Join-Path $root 'octo-done/AGENTS.md') '# D'
+        $self = Join-Path $root 'octo-self'
+        Move-Item -LiteralPath (New-Fixture) -Destination $self
+        Add-Line $self 'AGENTS.md' '[link](../octo-other/AGENTS.md)'
+        $out = Get-CiOutput $self
+        @($out.Lines | Where-Object { $_ -match $script:SiblingNote }).Count | Should -Be 0
+        $out.Issues | Should -Match 'Link target not found: \.\./octo-other/AGENTS\.md'
+    }
+}
+
+Describe 'the four files the pipeline template downloads' {
+    It 'load on their own, without the profile, and gate in a fresh process' {
+        $tools = New-TempDir
+        foreach ($f in 'Test-OctoAgentDocs.psm1', 'OctoAgentDocs.Common.psm1', 'OctoJsonOutput.psm1', 'agent-docs.rules.json') {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../modules/$f") -Destination $tools
+        }
+        $r = New-Fixture -NoFix
+        $pwsh = [System.Environment]::ProcessPath
+        $script = "Import-Module (Join-Path '$tools' 'Test-OctoAgentDocs.psm1'); Test-OctoAgentDocs -Path '$r' -Ci -Mode {0} -RepositoryName octo-standalone"
+        $out = & $pwsh -NoProfile -NonInteractive -Command ($script -f 'enforce') 2>&1
+        $LASTEXITCODE | Should -Be 1
+        ($out -join "`n") | Should -Match '##vso\[task\.logissue type=error;sourcepath=AGENTS\.md;code=routing-current\]'
+        ($out -join "`n") | Should -Match 'Agent docs check: octo-standalone '
+        & $pwsh -NoProfile -NonInteractive -Command ($script -f 'logOnly') *> $null
+        $LASTEXITCODE | Should -Be 0
+    }
+}
