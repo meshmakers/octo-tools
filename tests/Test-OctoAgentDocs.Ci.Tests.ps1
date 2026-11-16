@@ -40,19 +40,42 @@ AfterAll {
 }
 
 Describe 'Test-OctoAgentDocs -Ci output' {
-    It 'writes one logissue line per finding with type, file, line, rule id, why and fix' {
+    It 'writes one logissue line per finding with type, file, line, rule id and the finding only' {
         $r = New-Fixture
         Write-File (Join-Path $r 'docs/two.md') "---`ndescription: Two.`napplies_to: nowhere/**`n---`n"
+        Write-File (Join-Path $r 'docs/three.md') "---`ndescription: Three.`napplies_to: gone/**`n---`n"
         Test-OctoAgentDocs -Path $r -Fix 6>$null | Out-Null
         $findings = @((Get-Result $r).data.findings)
         $out = Get-CiOutput $r
         $out.Issues.Count | Should -Be $findings.Count
-        $glob = @($out.Issues | Where-Object { $_ -like '*code=globs-match*' })
-        $glob.Count | Should -Be 1
-        $glob[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/two.md');linenumber=3;code=globs-match\]globs-match: applies_to glob 'nowhere/\*\*' matches no file"
-        $glob[0] | Should -Match ' Why: \S.* Fix: \S'
+        @($out.Issues | Where-Object { $_ -like '*code=globs-match*' }).Count | Should -Be 2
+        $two = @($out.Issues | Where-Object { $_ -like '*two.md;*' })
+        $two.Count | Should -Be 1
+        $two[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/two.md');linenumber=3;code=globs-match\]globs-match: applies_to glob 'nowhere/\*\*' matches no file"
+        @($out.Issues | Where-Object { $_ -match 'Why:|Fix:|why:|fix:' }).Count | Should -Be 0
         $out.Lines[0] | Should -Match '^Agent docs check: .* \(entry point: AGENTS\.md, mode: logOnly\)$'
-        $out.Lines[-1] | Should -Be '1 error(s), 0 warning(s) - mode logOnly: the step does not fail'
+        $out.Lines[-1] | Should -Be '2 error(s), 0 warning(s) - mode logOnly: the step does not fail'
+    }
+    It 'explains each fired rule once, after the issues and before the totals' {
+        $r = New-Fixture -NoFix
+        Write-File (Join-Path $r 'docs/two.md') "---`ndescription: Two.`napplies_to: nowhere/**`n---`n"
+        Write-File (Join-Path $r 'docs/three.md') "---`ndescription: Three.`napplies_to: gone/**`n---`n"
+        $out = Get-CiOutput $r
+        $start = [array]::IndexOf($out.Lines, 'Why and how to fix, per rule:')
+        $start | Should -BeGreaterThan ([array]::IndexOf($out.Lines, $out.Issues[-1]))
+        # The rule lines follow the heading, indented; the sibling note and the totals come after.
+        $block = @($out.Lines[($start + 1)..($out.Lines.Count - 1)] | Where-Object { $_ -like '  *' })
+        $codes = @($out.Issues | ForEach-Object { if ($_ -match ';code=([a-z-]+)\]') { $Matches[1] } } | Select-Object -Unique)
+        $codes.Count | Should -BeGreaterThan 1
+        @($block | ForEach-Object { ($_.Trim() -split ' ')[0] }) | Should -Be $codes
+        $out.Lines[$start + $block.Count + 1] | Should -Not -BeLike '  *'
+        $block | ForEach-Object { $_ | Should -Match '^  [a-z-]+ - why: \S.* fix: \S' }
+        $block | ForEach-Object { $_ | Should -Not -BeLike '##*' }
+    }
+    It 'writes no rule block for a clean repository' {
+        $out = Get-CiOutput (New-Fixture)
+        $out.Lines | Should -Not -Contain 'Why and how to fix, per rule:'
+        $out.Lines[-1] | Should -Be '0 error(s), 0 warning(s)'
     }
     It 'leaves out the line number when the finding has none, and the file when it has none' {
         $r = New-Fixture -Empty

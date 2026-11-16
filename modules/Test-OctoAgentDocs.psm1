@@ -870,23 +870,31 @@ function Write-FindingReport {
 }
 
 function Write-CiReport {
-    # Azure DevOps logging commands, one issue per finding in report order, with an absolute
-    # sourcepath as the agent expects it. A warning is only
-    # ever type=warning, and nothing here sets a task result (no task.complete): the step
-    # fails through the exit code alone, which only the enforce gate sets. No colours, so
-    # every logging command starts its line.
+    # Azure DevOps logging commands, one issue per finding in report order (absolute sourcepath,
+    # as the agent expects it, and the finding's own message), then why and fix once per fired
+    # rule as plain text. A warning is only ever type=warning, and nothing here sets a task
+    # result (no task.complete): the step fails through the exit code alone, which only the
+    # enforce gate sets. No colours, so every logging command starts its line.
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The agent writes the host output into the pipeline log, where ##vso commands are read')]
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     Write-Host "Agent docs check: $($Repo.Name) (entry point: $(if ($Repo.EntryName) { $Repo.EntryName } else { 'none' }), mode: $($Rules.Mode()))"
-    foreach ($x in @($Findings.Items | Sort-Object -Stable { $_.tier }, { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })) {
-        $row = Get-RuleRow -Rules $Rules -Id $x.rule
+    $items = @($Findings.Items | Sort-Object -Stable { $_.tier }, { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })
+    foreach ($x in $items) {
         $path, $line = if ($x.file -match '^(.*):(\d+)$') { $Matches[1], $Matches[2] } else { $x.file, $null }
         $properties = @("type=$(if ($x.severity -eq 'error') { 'error' } else { 'warning' })"
             if ($path) { "sourcepath=$(ConvertTo-AdoLogValue ([System.IO.Path]::GetFullPath((Join-Path $Repo.Root $path))) -Property)" }
             if ($line) { "linenumber=$line" }
             "code=$($x.rule)")
-        $message = "$($x.rule): $($x.message)$(if ($row.why) { " Why: $($row.why)" })$(if ($row.fix) { " Fix: $($row.fix)" })"
-        Write-Host "##vso[task.logissue $($properties -join ';')]$(ConvertTo-AdoLogValue $message)"
+        Write-Host "##vso[task.logissue $($properties -join ';')]$(ConvertTo-AdoLogValue "$($x.rule): $($x.message)")"
+    }
+    # Why and how to fix once per fired rule, as plain log text, in the order of the issues.
+    $fired = @($items.rule | Select-Object -Unique)
+    if ($fired) { Write-Host 'Why and how to fix, per rule:' }
+    foreach ($id in $fired) {
+        $row = Get-RuleRow -Rules $Rules -Id $id
+        # Whitespace collapsed: one line per rule, so no continuation line can start like a
+        # logging command.
+        Write-Host "  $id - why: $($row.why -replace '\s+', ' ') fix: $($row.fix -replace '\s+', ' ')"
     }
     if ($Repo.SiblingsAbsent()) { Write-Host 'Sibling rules skipped: no sibling repository beside this checkout, so references into other repositories are checked only in a local workspace.' }
     $errorCount = $Findings.WithSeverity('error').Count
