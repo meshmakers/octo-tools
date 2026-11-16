@@ -749,6 +749,9 @@ Describe 'Running-process detection on Windows command lines (AB#8912, AB#9108)'
             Get-OctoProcessDisplayName -command '/usr/libexec/dotnet Meshmakers.Octo.Y.dll' | Should -Be 'Meshmakers.Octo.Y.dll'
             Get-OctoProcessDisplayName -command '/r/bin/DebugL/Meshmakers.Octo.Z --token abc' | Should -Be 'Meshmakers.Octo.Z'
             Get-OctoProcessDisplayName -command '' | Should -Be ''
+            # only the entry-assembly position counts: an application argument ending in .dll never becomes the name
+            Get-OctoProcessDisplayName -command 'dotnet run --project C:\r\App.csproj -- --output C:\r\bin\out --token=SYNTHETIC-SECRET.dll' | Should -Be 'dotnet'
+            Get-OctoProcessDisplayName -command 'dotnet exec --depsfile x.json SYNTHETIC-SECRET.dll' | Should -Be 'dotnet'
         }
     }
 
@@ -759,10 +762,12 @@ Describe 'Running-process detection on Windows command lines (AB#8912, AB#9108)'
             $candidates = @(
                 [pscustomobject]@{ Pid = 7; Command = 'dotnet Meshmakers.Octo.Fake.dll --password=SYNTHETIC-SECRET'; Cwd = "$sdk/bin/DebugL/net10.0" }
                 [pscustomobject]@{ Pid = 8; Command = "dotnet $sdk/bin/DebugL/net10.0/octo-ckc.dll --token SYNTHETIC-SECRET"; Cwd = $null }
+                [pscustomobject]@{ Pid = 9; Command = "dotnet run --project C:\r\App.csproj -- --output $sdk/bin/out --token=SYNTHETIC-SECRET.dll"; Cwd = $null }
             )
             $found = @(Select-OctoRepoProcesses -candidates $candidates -repos $repos)
-            $found | ForEach-Object { "$($_.Repo):$($_.Pid):$($_.Name):$($_.Match)" } | Should -Be @('octo-sdk:7:Meshmakers.Octo.Fake.dll:cwd', 'octo-sdk:8:octo-ckc.dll:bin-path')
+            $found | ForEach-Object { "$($_.Repo):$($_.Pid):$($_.Name):$($_.Match)" } | Should -Be @('octo-sdk:7:Meshmakers.Octo.Fake.dll:cwd', 'octo-sdk:8:octo-ckc.dll:bin-path', 'octo-sdk:9:dotnet:bin-path')
             foreach ($process in $found) { $process.PSObject.Properties.Name | Should -Not -Contain 'Command' }
+            ($found | ConvertTo-Json -Depth 3) | Should -Not -Match 'SYNTHETIC-SECRET'
         }
     }
 

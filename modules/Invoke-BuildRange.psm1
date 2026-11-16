@@ -237,17 +237,16 @@ function Get-OctoCommandExecutableName {
 }
 
 function Get-OctoProcessDisplayName {
-    # The name a running process is reported with (AB#9108): the entry assembly of a dotnet host
-    # (`dotnet Meshmakers.X.dll ...` -> Meshmakers.X.dll), else the executable's file name. Never a path or an
-    # argument - command lines can carry secrets and are used for matching only, never reported.
+    # The name a running process is reported with (AB#9108): the entry assembly of a dotnet host - only at its
+    # position, the first argument after the host (`dotnet Meshmakers.X.dll ...` -> Meshmakers.X.dll) - else the
+    # executable's file name. Never a path or any other argument: command lines can carry secrets (an application
+    # argument after `dotnet run ... --` may end in .dll) and are used for matching only, never reported.
     param([string]$command)
     $tokens = @(Get-OctoCommandLineTokens -command $command)
     if ($tokens.Count -eq 0) { return '' }
     $executable = Get-OctoCommandLeaf -token $tokens[0]
-    if ($executable -match '^dotnet(\.exe)?$') {
-        foreach ($token in @($tokens | Select-Object -Skip 1)) {
-            if ($token -match '\.(dll|exe)$') { return Get-OctoCommandLeaf -token $token }
-        }
+    if ($executable -match '^dotnet(\.exe)?$' -and $tokens.Count -gt 1 -and $tokens[1] -notlike '-*' -and $tokens[1] -match '\.(dll|exe)$') {
+        return Get-OctoCommandLeaf -token $tokens[1]
     }
     return $executable
 }

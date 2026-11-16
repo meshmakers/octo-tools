@@ -124,6 +124,11 @@ Describe 'Network git calls are bounded and non-interactive (AB#8955)' {
             Get-OctoNonInteractiveSshCommand -path $repo | Should -Be '"C:/Program Files/TortoiseGit/bin/TortoisePlink.exe" -ssh -batch'
             $env:GIT_SSH_COMMAND = 'C:/Windows/System32/OpenSSH/ssh.exe'
             Get-OctoNonInteractiveSshCommand -path $repo -connectTimeoutSeconds 7 | Should -Be 'C:/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes -o ConnectTimeout=7'
+            # the enforced options come first: OpenSSH takes the first value, a configured BatchMode=no cannot win
+            $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=no -o ConnectTimeout=300 -p 2222'
+            Get-OctoNonInteractiveSshCommand -path $repo -connectTimeoutSeconds 7 | Should -Be 'ssh -o BatchMode=yes -o ConnectTimeout=7 -o BatchMode=no -o ConnectTimeout=300 -p 2222'
+            $env:GIT_SSH_COMMAND = '"C:/Program Files/OpenSSH/ssh.exe" -i key'
+            Get-OctoNonInteractiveSshCommand -path $repo -connectTimeoutSeconds 7 | Should -Be '"C:/Program Files/OpenSSH/ssh.exe" -o BatchMode=yes -o ConnectTimeout=7 -i key'
             $env:GIT_SSH_COMMAND = $null
             & git -C $repo config --unset core.sshCommand
             $previous = $env:GIT_SSH

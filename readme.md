@@ -465,8 +465,9 @@ Remove-OctoEnvironment -env ab8625-enum-null
   - The network git calls of the environment cmdlets (`ls-remote`, `fetch` in `New-OctoEnvironment`,
     `Add-OctoEnvironmentRepo`, `Remove-OctoEnvironment` and the feed snapshot) never wait for input: git runs with
     `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never`, and ssh with `-o BatchMode=yes -o ConnectTimeout=<n>`
-    appended to the configured ssh command (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `ssh`; plink /
-    TortoisePlink get `-batch` instead; a program named by `GIT_SSH` is left as it is). Each call is stopped after
+    added to the configured ssh command (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `ssh`): right after an `ssh`
+    program, so a configured `-o BatchMode=no` cannot win, at the end of a wrapper script; plink / TortoisePlink get
+    `-batch` instead, and a program named by `GIT_SSH` is left as it is. Each call is stopped after
     `$env:OCTO_GIT_NETWORK_TIMEOUT_SECONDS` (default 60, at most 3600). Then the environment starts from the ref as
     last fetched, with a warning (`-Json` `warnings`); after a timed-out `ls-remote` the fetch is not tried again,
     and a host that did not answer is skipped by every further call of the same pwsh session for 10 minutes, so an

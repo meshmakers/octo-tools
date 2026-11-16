@@ -226,7 +226,7 @@ function Get-OctoNonInteractiveSshCommand {
     <#
         The ssh command git uses for a network call, made non-interactive (AB#8955): the configured one
         ($env:GIT_SSH_COMMAND, else core.sshCommand of the repository, else 'ssh') with
-        -o BatchMode=yes -o ConnectTimeout=<n> appended - ssh then fails instead of waiting for a host-key
+        -o BatchMode=yes -o ConnectTimeout=<n> added (right after an ssh program, else at the end) - ssh then fails instead of waiting for a host-key
         confirmation or a key passphrase on a console that an agent's pwsh does not have. PuTTY's plink /
         TortoisePlink take no -o options: they get -batch instead. $null when $env:GIT_SSH names the program (its
         variant is not known): it is left as it is, the process timeout still applies.
@@ -242,9 +242,18 @@ function Get-OctoNonInteractiveSshCommand {
         $command = 'ssh'
     }
     $command = $command.Trim()
-    $program = if ($command -match '^"([^"]*)"') { $Matches[1] } elseif ($command -match "^'([^']*)'") { $Matches[1] } else { ($command -split '\s+', 2)[0] }
-    if ((($program -split '[\\/]')[-1]) -match '(?i)plink') { return "$command -batch" }
-    return "$command -o BatchMode=yes -o ConnectTimeout=$connectTimeoutSeconds"
+    # program (quoted or not) and the rest of the configured command
+    [void]($command -match '^("[^"]*"|''[^'']*''|\S+)(.*)$')
+    $programToken = $Matches[1]
+    $rest = $Matches[2]
+    $programName = (($programToken.Trim('"', "'") -split '[\\/]')[-1])
+    if ($programName -match '(?i)plink') { return "$command -batch" }
+    $options = "-o BatchMode=yes -o ConnectTimeout=$connectTimeoutSeconds"
+    # OpenSSH itself: right after the program - ssh takes the first value of an option, so a configured
+    # -o BatchMode=no or ConnectTimeout cannot override these. Any other program (a wrapper script that passes its
+    # arguments on to ssh) gets them at the end, where they reach ssh.
+    if ($programName -match '(?i)^ssh(\.exe)?$') { return "$programToken $options$rest" }
+    return "$command $options"
 }
 
 function Get-OctoGitRemoteHost {
@@ -286,8 +295,10 @@ function Invoke-OctoGitProcess {
     foreach ($key in $environment.Keys) { $info.Environment[$key] = [string]$environment[$key] }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $info
+    $readers = @()
     try {
         [void]$process.Start()
+        $readers = @($process.StandardOutput, $process.StandardError)
         $process.StandardInput.Close()
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
@@ -304,7 +315,14 @@ function Invoke-OctoGitProcess {
         $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
         return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; Output = $lines }
     }
-    finally { $process.Dispose() }
+    finally {
+        # Process.Dispose does not close redirected readers that were accessed: close them, so a read still pending
+        # on a pipe a lingering helper holds open releases its handle and buffer.
+        foreach ($reader in $readers) {
+            try { $reader.Dispose() } catch { Write-Verbose "git output reader: $($_.Exception.Message)" }
+        }
+        $process.Dispose()
+    }
 }
 
 function Invoke-OctoEnvironmentGit {
