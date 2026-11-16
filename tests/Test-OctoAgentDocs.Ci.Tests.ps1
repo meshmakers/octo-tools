@@ -74,7 +74,7 @@ Describe 'Test-OctoAgentDocs -Ci output' {
         $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=frontmatter-present*' })
         $issue.Count | Should -Be 1
         $issue[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/a;b].md');code=frontmatter-present\]"
-        $issue[0] | Should -Match 'sourcepath=[^;\]]*/docs/a%3Bb%5D\.md;'
+        $issue[0] | Should -Match 'sourcepath=[^;\]]*[\\/]docs[\\/]a%3Bb%5D\.md;'
         InModuleScope Test-OctoAgentDocs { ConvertTo-AdoLogValue "50% a;b]`r`nc" } | Should -Be '50%AZP25 a;b]%0D%0Ac'
     }
     It 'writes no colour codes, so every logging command starts its line' {
