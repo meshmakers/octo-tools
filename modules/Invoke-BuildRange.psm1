@@ -211,11 +211,54 @@ function Get-OctoRepoBinPrefixes {
         })
 }
 
+function Get-OctoCommandLineTokens {
+    # Splits a process command line into tokens: a double-quoted token ("C:\Program Files\x.exe") is one token
+    # without its quotes (an empty quoted token "" stays an empty token); leading and repeated whitespace yield no
+    # tokens. Never throws (AB#8912).
+    param([string]$command)
+    if ([string]::IsNullOrWhiteSpace($command)) { return @() }
+    return @([regex]::Matches($command, '"([^"]*)"|(\S+)') | ForEach-Object { if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value } })
+}
+
+function Get-OctoCommandLeaf {
+    # File name of a path token (either separator); '' for an empty token. Unlike Split-Path it never throws.
+    param([string]$token)
+    if ([string]::IsNullOrWhiteSpace($token)) { return '' }
+    return ($token.TrimEnd('/', '\') -split '[\\/]')[-1]
+}
+
+function Get-OctoCommandExecutableName {
+    # File name of the executable of a command line ('' when there is none). AB#8912: a command line with leading
+    # whitespace or an empty first token used to reach Split-Path -Leaf with '' and threw on Windows.
+    param([string]$command)
+    $tokens = @(Get-OctoCommandLineTokens -command $command)
+    if ($tokens.Count -eq 0) { return '' }
+    return Get-OctoCommandLeaf -token $tokens[0]
+}
+
+function Get-OctoProcessDisplayName {
+    # The name a running process is reported with (AB#9108): the entry assembly of a dotnet host
+    # (`dotnet Meshmakers.X.dll ...` -> Meshmakers.X.dll), else the executable's file name. Never a path or an
+    # argument - command lines can carry secrets and are used for matching only, never reported.
+    param([string]$command)
+    $tokens = @(Get-OctoCommandLineTokens -command $command)
+    if ($tokens.Count -eq 0) { return '' }
+    $executable = Get-OctoCommandLeaf -token $tokens[0]
+    if ($executable -match '^dotnet(\.exe)?$') {
+        foreach ($token in @($tokens | Select-Object -Skip 1)) {
+            if ($token -match '\.(dll|exe)$') { return Get-OctoCommandLeaf -token $token }
+        }
+    }
+    return $executable
+}
+
 function Select-OctoRepoProcessCandidates {
     # Pre-filter on the command line only: dotnet-hosted Meshmakers services (`dotnet Meshmakers.X.dll`,
     # started by Start-Octo with a relative dll and cwd <repo>/bin/<config>/<tfm>/) and anything that
     # executes from <repo>/bin/. Shells (e.g. Start-Octo's pwsh job workers started with -wd <repo>),
     # MSBuild nodes and compiler servers are not services and never lock the outputs we replace.
+    # Never throws for any command line (AB#8912): leading whitespace, an empty first token or a quoted executable
+    # with spaces ("C:\Program Files\...\x.exe" args) are parsed by Get-OctoCommandExecutableName.
     param(
         [object[]]$candidates = @(),
         [object[]]$repos = @(),
@@ -224,18 +267,20 @@ function Select-OctoRepoProcessCandidates {
     $binPrefixes = @(Get-OctoRepoBinPrefixes -repos $repos)
     return @($candidates | Where-Object {
             $command = [string]$_.Command
-            $executable = ($command -split '\s+', 2)[0]
             $_.Pid -ne $ownPid -and
+            -not [string]::IsNullOrWhiteSpace($command) -and
             $command -notmatch '(MSBuild\.dll|VBCSCompiler|Roslyn|build-server)' -and
-            (Split-Path -Leaf $executable) -notmatch '^(pwsh|powershell|zsh|bash|sh|fish|cmd)(\.exe)?$' -and
             ($command -match 'Meshmakers\.[^\s"]*\.(dll|exe)' -or
-                @($binPrefixes | Where-Object { foreach ($prefix in $_.Prefixes) { if ($command.IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $true; break } } }).Count -gt 0)
+                @($binPrefixes | Where-Object { foreach ($prefix in $_.Prefixes) { if ($command.IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $true; break } } }).Count -gt 0) -and
+            # tokenized last: only the few processes that point at a service or a bin/ folder
+            (Get-OctoCommandExecutableName -command $command) -notmatch '^(pwsh|powershell|zsh|bash|sh|fish|cmd)(\.exe)?$'
         })
 }
 
 function Select-OctoRepoProcesses {
     # Assigns pre-filtered candidates (with Cwd resolved where possible) to repositories: a process
     # belongs to a repository when its working directory or its command line points into <repo>/bin/.
+    # The result carries Repo, Pid, Name and Match (cwd | bin-path) - never the command line (AB#9108).
     param(
         [object[]]$candidates = @(),
         [object[]]$repos = @()
@@ -245,13 +290,13 @@ function Select-OctoRepoProcesses {
     foreach ($candidate in $candidates) {
         $cwd = if ($candidate.Cwd) { [IO.Path]::GetFullPath([string]$candidate.Cwd).TrimEnd('/', '\') + [IO.Path]::DirectorySeparatorChar } else { $null }
         foreach ($entry in $binPrefixes) {
-            $hit = $false
+            $match = $null
             foreach ($prefix in $entry.Prefixes) {
-                if (($cwd -and $cwd.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) -or
-                    ([string]$candidate.Command).IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true; break }
+                if ($cwd -and $cwd.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $match = 'cwd'; break }
+                if (([string]$candidate.Command).IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $match = 'bin-path'; break }
             }
-            if ($hit) {
-                $found += [pscustomobject]@{ Repo = $entry.Repo; Pid = $candidate.Pid; Command = $candidate.Command }
+            if ($match) {
+                $found += [pscustomobject]@{ Repo = $entry.Repo; Pid = $candidate.Pid; Name = (Get-OctoProcessDisplayName -command ([string]$candidate.Command)); Match = $match }
                 break
             }
         }
@@ -771,8 +816,8 @@ function Write-OctoBuildRangePlan {
         Write-Host ""
         Write-Host "Running processes out of repositories in the range (a real run refuses unless -stopServices / -ignoreRunningServices):" -ForegroundColor Yellow
         foreach ($process in $runningProcesses) {
-            $command = if ($process.Command.Length -gt 160) { $process.Command.Substring(0, 157) + '...' } else { $process.Command }
-            Write-Host ("  - {0}: pid {1} {2}" -f $process.Repo, $process.Pid, $command) -ForegroundColor Yellow
+            # Repo, PID and name only - never the command line (AB#9108).
+            Write-Host ("  - {0}: pid {1} {2}" -f $process.Repo, $process.Pid, $process.Name) -ForegroundColor Yellow
         }
     }
 }
@@ -1055,6 +1100,16 @@ function Invoke-BuildRange {
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         Invoke-OctoBuildRangeCore @forward -events $events
+    }
+    catch {
+        # AB#8912: with -Json a caller (Invoke-BuildEnvironment, octo-devstack) always gets a document, also when the
+        # run throws - written before the exception goes on to the caller as before. Completed: the run wrote its
+        # document already (a failure's Write-Error under -ErrorAction Stop) - no second one.
+        if ($Json -and -not $events.Completed) {
+            $global:LASTEXITCODE = 1
+            Write-OctoJson -Command 'Invoke-BuildRange' -Data ([ordered]@{ success = $false; error = "Invoke-BuildRange failed: $($_.Exception.Message)"; repositories = @() })
+        }
+        throw
     }
     finally {
         # Also after a throw: repoDone(success=false) of the running repository, then done. Best-effort on Ctrl+C.
@@ -1432,7 +1487,7 @@ function Invoke-OctoBuildRangeCore {
                     repositories     = @($plan | ForEach-Object {
                             [ordered]@{ repo = $_.Name; group = $_.Group; mode = $_.Mode; target = $_.Target; path = $_.Path; solution = $_.Solution; projects = @($_.Projects); purge = @(if ($purgeCaches) { $_.PurgePaths }); olderThanLastBuild = @($_.OlderPaths); msbuildProperties = @($_.PropertyArgs); restoreSources = $_.RestoreSources; testProjects = if ($verify) { @($_.TestProjects) } else { @() }; notes = @($_.Notes); action = $_.Decision.Action; reason = $_.Decision.Reason; detail = $_.Decision.Detail; dependsOn = @($_.DependsOn); exclusive = [bool]($_.Exclusive -or $_.CkWriter); usesCk = [bool]$_.UsesCk }
                         })
-                    runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; command = $_.Command } })
+                    runningProcesses = @($runningProcesses | ForEach-Object { [ordered]@{ repo = $_.Repo; pid = $_.Pid; name = $_.Name; match = $_.Match } })
                     msbuildProperties = @($propertyArgs | ForEach-Object { Hide-OctoUrlCredentials $_ })
                     staleGlobalCache = @($staleCache | ForEach-Object { [ordered]@{ packageId = $_.PackageId; cachePath = $_.CachePath; reason = $_.Reason } })
                     purgeStaleCache  = [bool]$purgeStaleCache

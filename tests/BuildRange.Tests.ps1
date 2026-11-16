@@ -713,6 +713,111 @@ Describe 'Running-process detection' {
     }
 }
 
+Describe 'Running-process detection on Windows command lines (AB#8912, AB#9108)' {
+    BeforeEach { $script:fake = New-FakeCheckout }
+
+    It 'never throws for any command line and parses a quoted executable with spaces' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $sdk = Join-Path $fake.Checkout 'octo-sdk'
+            $repos = @([pscustomobject]@{ Name = 'octo-sdk'; Path = $sdk })
+            # Synthetic command lines only - never real ones (they can carry secrets).
+            $all = @(
+                [pscustomobject]@{ Pid = 1; Command = '   leading.exe --flag'; Cwd = $null }
+                [pscustomobject]@{ Pid = 2; Command = ''; Cwd = $null }
+                [pscustomobject]@{ Pid = 3; Command = ' '; Cwd = $null }
+                [pscustomobject]@{ Pid = 4; Command = "`t`t"; Cwd = $null }
+                [pscustomobject]@{ Pid = 5; Command = $null; Cwd = $null }
+                [pscustomobject]@{ Pid = 6; Command = """C:\Program Files\PowerShell\7\pwsh.exe"" -NoProfile -wd $sdk\bin\DebugL"; Cwd = $null }
+                [pscustomobject]@{ Pid = 7; Command = '"C:\Program Files\dotnet\dotnet.exe" Meshmakers.Octo.Fake.dll --urls=x'; Cwd = $null }
+                [pscustomobject]@{ Pid = 8; Command = "  dotnet $sdk\bin\DebugL\net10.0\octo-ckc.dll -c x"; Cwd = $null }
+                [pscustomobject]@{ Pid = 9; Command = '""'; Cwd = $null }
+                # an empty quoted first token is the (empty) executable, not "pwsh": not taken for a shell
+                [pscustomobject]@{ Pid = 10; Command = """"" pwsh -wd $sdk\bin\DebugL"; Cwd = $null }
+            )
+            { Select-OctoRepoProcessCandidates -candidates $all -repos $repos -ownPid 99 } | Should -Not -Throw
+            @(Select-OctoRepoProcessCandidates -candidates $all -repos $repos -ownPid 99).Pid | Should -Be @(7, 8, 10)
+        }
+    }
+
+    It 'names the executable or the entry assembly without a path or arguments' {
+        InModuleScope Invoke-BuildRange {
+            Get-OctoCommandExecutableName -command '' | Should -Be ''
+            Get-OctoCommandExecutableName -command '   ' | Should -Be ''
+            Get-OctoCommandExecutableName -command '  C:\x\pwsh.exe -c y' | Should -Be 'pwsh.exe'
+            Get-OctoCommandExecutableName -command '"C:\Program Files\PowerShell\7\pwsh.exe" -wd y' | Should -Be 'pwsh.exe'
+            Get-OctoProcessDisplayName -command '"C:\Program Files\dotnet\dotnet.exe" C:\r\bin\Meshmakers.Octo.X.dll --secret=abc' | Should -Be 'Meshmakers.Octo.X.dll'
+            Get-OctoProcessDisplayName -command '/usr/libexec/dotnet Meshmakers.Octo.Y.dll' | Should -Be 'Meshmakers.Octo.Y.dll'
+            Get-OctoProcessDisplayName -command '/r/bin/DebugL/Meshmakers.Octo.Z --token abc' | Should -Be 'Meshmakers.Octo.Z'
+            Get-OctoProcessDisplayName -command '' | Should -Be ''
+        }
+    }
+
+    It 'reports repo, pid, name and match - never the command line' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $sdk = Join-Path $fake.Checkout 'octo-sdk'
+            $repos = @([pscustomobject]@{ Name = 'octo-sdk'; Path = $sdk })
+            $candidates = @(
+                [pscustomobject]@{ Pid = 7; Command = 'dotnet Meshmakers.Octo.Fake.dll --password=SYNTHETIC-SECRET'; Cwd = "$sdk/bin/DebugL/net10.0" }
+                [pscustomobject]@{ Pid = 8; Command = "dotnet $sdk/bin/DebugL/net10.0/octo-ckc.dll --token SYNTHETIC-SECRET"; Cwd = $null }
+            )
+            $found = @(Select-OctoRepoProcesses -candidates $candidates -repos $repos)
+            $found | ForEach-Object { "$($_.Repo):$($_.Pid):$($_.Name):$($_.Match)" } | Should -Be @('octo-sdk:7:Meshmakers.Octo.Fake.dll:cwd', 'octo-sdk:8:octo-ckc.dll:bin-path')
+            foreach ($process in $found) { $process.PSObject.Properties.Name | Should -Not -Contain 'Command' }
+        }
+    }
+
+    It 'a real process scan on this machine does not throw' {
+        InModuleScope Invoke-BuildRange -Parameters @{ fake = $fake } {
+            $repos = @([pscustomobject]@{ Name = 'octo-sdk'; Path = (Join-Path $fake.Checkout 'octo-sdk') })
+            # Only whether it throws - the result is never printed (command lines stay internal).
+            { Get-OctoRunningRepoProcesses -repos $repos | Out-Null } | Should -Not -Throw
+        }
+    }
+
+    It 'the -WhatIf plan (JSON and text) carries no command line' {
+        # A scan result that still holds a command line (as an older caller might pass it): it must reach no output.
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses {
+            @([pscustomobject]@{ Repo = 'octo-sdk'; Pid = 4711; Name = 'Meshmakers.Octo.Fake.dll'; Match = 'cwd'; Command = 'dotnet Meshmakers.Octo.Fake.dll --password=SYNTHETIC-SECRET' })
+        }
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeRepo { throw 'no build under -WhatIf' }
+
+        $raw = (Invoke-BuildRange -branch main -from octo-sdk -WhatIf -Json) -join "`n"
+        $raw | Should -Not -Match 'SYNTHETIC-SECRET'
+        $json = $raw | ConvertFrom-Json
+        @($json.data.runningProcesses[0].PSObject.Properties.Name) | Should -Be @('repo', 'pid', 'name', 'match')
+        $json.data.runningProcesses[0].name | Should -Be 'Meshmakers.Octo.Fake.dll'
+
+        $text = (Invoke-BuildRange -branch main -from octo-sdk -WhatIf 6>&1 | Out-String)
+        $text | Should -Match 'octo-sdk: pid 4711 Meshmakers\.Octo\.Fake\.dll'
+        $text | Should -Not -Match 'SYNTHETIC-SECRET'
+    }
+
+    It 'a refused run names repo and pid only' {
+        Mock -ModuleName Invoke-BuildRange Get-OctoRunningRepoProcesses {
+            @([pscustomobject]@{ Repo = 'octo-sdk'; Pid = 4711; Name = 'Meshmakers.Octo.Fake.dll'; Match = 'cwd'; Command = 'dotnet Meshmakers.Octo.Fake.dll --password=SYNTHETIC-SECRET' })
+        }
+        $raw = (Invoke-BuildRange -branch main -from octo-sdk -Json -ErrorAction SilentlyContinue -ErrorVariable buildErrors) -join "`n"
+        $raw | Should -Not -Match 'SYNTHETIC-SECRET'
+        "$buildErrors" | Should -Not -Match 'SYNTHETIC-SECRET'
+        "$buildErrors" | Should -Match 'octo-sdk \(pid 4711\)'
+    }
+
+    It '-Json writes a document with the error when the run throws, then the exception reaches the caller' {
+        Mock -ModuleName Invoke-BuildRange Invoke-OctoBuildRangeCore { throw 'Path of octo-sdk is missing: C:\nowhere' }
+        $global:LASTEXITCODE = 0
+        $raw = [System.Collections.Generic.List[object]]::new()
+        { Invoke-BuildRange -branch main -from octo-sdk -Json | ForEach-Object { $raw.Add($_) } } | Should -Throw '*octo-sdk is missing*'
+        $json = ($raw -join "`n") | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -Match 'Invoke-BuildRange failed: Path of octo-sdk is missing: C:\\nowhere'
+        $global:LASTEXITCODE | Should -Be 1
+        # without -Json: no document, the exception as before
+        $raw.Clear()
+        { Invoke-BuildRange -branch main -from octo-sdk | ForEach-Object { $raw.Add($_) } } | Should -Throw '*octo-sdk is missing*'
+        $raw.Count | Should -Be 0
+    }
+}
+
 Describe 'Stale-cache check with empty hash files (N10)' {
     BeforeEach { $script:fake = New-FakeCheckout }
 
