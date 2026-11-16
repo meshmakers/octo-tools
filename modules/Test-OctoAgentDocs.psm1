@@ -92,6 +92,8 @@ class AgentDocsRepository {
     # Where sibling repositories are looked up; set by SetSiblingScope.
     [string]$SiblingRoot
     [string]$SiblingPattern
+    # -Ci: a missing link into an absent sibling is skipped, not reported.
+    [bool]$SkipAbsentSiblingLinks
     hidden [object]$SiblingsPresent = $null
 
     # Name: the repository's name when the folder is not named after it (a CI checkout is 's').
@@ -160,7 +162,8 @@ class AgentDocsRepository {
     [bool] InAbsentSibling([string]$FullPath) {
         # A path outside this repository, in a sibling that cannot be checked because none is
         # checked out.
-        if (-not [System.IO.Path]::GetRelativePath($this.Root, $FullPath).StartsWith('..')) { return $false }
+        $rel = [System.IO.Path]::GetRelativePath($this.Root, $FullPath)
+        if ($rel -ne '..' -and -not $rel.StartsWith('..' + [System.IO.Path]::DirectorySeparatorChar)) { return $false }
         return [System.IO.Path]::GetRelativePath($this.SiblingRoot, $FullPath).Replace('\', '/') -match $this.SiblingPattern -and $this.SiblingsAbsent()
     }
 
@@ -273,6 +276,7 @@ function Test-OctoAgentDocs {
     if ($reference -and $Fix) { Write-Warning '-Fix is ignored with -Explain -All or -Rule: nothing is scanned' }
     $root = Resolve-OctoAgentDocsRepository -Path $Path
     $repo = [AgentDocsRepository]::new($root, $RepositoryName)
+    $repo.SkipAbsentSiblingLinks = $Ci
     $rules = Resolve-RuleSet -Root $root -ConfigPath $ConfigPath -Mode $Mode
 
     $global:LASTEXITCODE = 0
@@ -635,12 +639,13 @@ function Test-SiblingClaudeMention {
 
 function Test-ReferenceTarget {
     # One resolver for links and backtick paths: exists, exact case, shim, anchor.
-    # A missing target in a sibling repository is not reported when no sibling is checked out.
+    # Under -Ci a missing target in a sibling repository is not reported when no sibling is
+    # checked out.
     param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [hashtable]$Anchors, [string]$Rel, [string]$From, [string]$Target, [string]$Kind)
     $filePart, $anchor = $Target -split '#', 2
     $resolved = if (-not $filePart) { $From } elseif ($filePart.StartsWith('/')) { Join-Path $Repo.Root $filePart.TrimStart('/') } else { Join-Path (Split-Path -Parent $From) $filePart }
     if (-not (Test-Path -LiteralPath $resolved)) {
-        if (-not $Repo.InAbsentSibling([System.IO.Path]::GetFullPath($resolved))) { $Findings.Add('reference-resolves', $Rel, "$Kind not found: $Target") }
+        if (-not ($Repo.SkipAbsentSiblingLinks -and $Repo.InAbsentSibling([System.IO.Path]::GetFullPath($resolved)))) { $Findings.Add('reference-resolves', $Rel, "$Kind not found: $Target") }
         return
     }
     $relToRepo = [System.IO.Path]::GetRelativePath($Repo.Root, [System.IO.Path]::GetFullPath($resolved))
@@ -871,7 +876,7 @@ function Write-CiReport {
     # every logging command starts its line.
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The agent writes the host output into the pipeline log, where ##vso commands are read')]
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
-    Write-Host "Agent docs check: $($Repo.Name) (entry point: $($Repo.EntryName), mode: $($Rules.Mode()))"
+    Write-Host "Agent docs check: $($Repo.Name) (entry point: $(if ($Repo.EntryName) { $Repo.EntryName } else { 'none' }), mode: $($Rules.Mode()))"
     foreach ($x in @($Findings.Items | Sort-Object -Stable { $_.tier }, { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })) {
         $row = Get-RuleRow -Rules $Rules -Id $x.rule
         $path, $line = if ($x.file -match '^(.*):(\d+)$') { $Matches[1], $Matches[2] } else { $x.file, $null }

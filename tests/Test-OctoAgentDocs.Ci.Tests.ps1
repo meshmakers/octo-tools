@@ -80,6 +80,14 @@ Describe 'Test-OctoAgentDocs -Ci output' {
         @($plain | Where-Object { $_ -like '##vso*' -or $_ -match $script:SiblingNote }).Count | Should -Be 0
         $plain[-2] | Should -Match 'add -Explain for why and how to fix'
     }
+    It 'still reports a missing link into a sibling without -Ci, also when no sibling is checked out' {
+        $r = New-Fixture
+        Add-Line $r 'AGENTS.md' '[link](../octo-other/AGENTS.md)'
+        (Get-RuleFinding (Get-Result $r) 'reference-resolves').message | Should -Be 'Link target not found: ../octo-other/AGENTS.md'
+    }
+    It 'names a missing entry point as none in the header' {
+        (Get-CiOutput (New-Fixture -Empty)).Lines[0] | Should -Match '\(entry point: none, mode: logOnly\)$'
+    }
 }
 
 Describe 'Test-OctoAgentDocs -Ci gate' {
@@ -159,12 +167,13 @@ Describe 'Test-OctoAgentDocs -Ci without sibling repositories' {
         $out.Issues.Count | Should -Be 0
         @($out.Lines | Where-Object { $_ -cmatch '^WARNING:' }).Count | Should -Be 0
     }
-    It 'still reports a missing link inside the repository' {
+    It 'still reports a missing link inside the repository, also in a folder whose name starts with two dots' {
         $r = New-Fixture
-        Add-Line $r 'AGENTS.md' '[link](octo-sub/missing.md)'
+        Add-Line $r 'AGENTS.md' @('[link](octo-sub/missing.md)', '[dots](..octo-x/missing.md)')
         $issue = @((Get-CiOutput $r).Issues)
-        $issue.Count | Should -Be 1
+        $issue.Count | Should -Be 2
         $issue[0] | Should -Match 'Link target not found: octo-sub/missing\.md'
+        $issue[1] | Should -Match 'Link target not found: \.\.octo-x/missing\.md'
     }
     It 'checks the siblings and says nothing about skipping when one is beside the checkout' {
         $root = New-TempDir

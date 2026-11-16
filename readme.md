@@ -778,7 +778,10 @@ Sibling rules skipped: no sibling repository beside this checkout, so references
   rules that look into them (`reference-to-shim` and `reference-resolves` for a sibling, also a
   link such as `../octo-x/AGENTS.md`) cannot run there. `-Ci` then writes the one
   `Sibling rules skipped` line instead of a finding per reference; they run in a local
-  workspace, where the siblings are checked out.
+  workspace, where the siblings are checked out. Siblings count as absent when no folder beside
+  the checkout matches `siblingRepoPattern`; a pipeline that checks out several `octo-*`
+  repositories side by side gets the full sibling checks. Without `-Ci` a missing link into a
+  sibling is still reported.
 - `-Ci` and `-Json` are two output formats and cannot be combined.
 
 The pipeline template downloads exactly four files from this repository at a pinned commit and
