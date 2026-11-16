@@ -3,6 +3,8 @@
 # Fixtures are built under TestDrive by the helpers; ROOTPATH is cleared so the sibling
 # root is the folder above each fixture, as in a pipeline checkout.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = '$Global:ROOTPATH and $global:LASTEXITCODE are the profile contract under test')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test fixtures under TestDrive; -WhatIf has no meaning here')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Get-CiOutput uses its parameters inside the script block Get-Output runs, which the rule does not follow')]
 param()
 
 BeforeAll {
