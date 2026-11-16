@@ -218,7 +218,7 @@ Describe 'Invoke-BuildEnvironment -Json when Invoke-BuildRange throws (AB#8912)'
         $doc.data.error | Should -Match 'no JSON document \(no output\)'
     }
 
-    It 'a running-process scan that cannot read a command line does not fail -DryRun' {
+    It 'a running-process scan that cannot read a command line does not fail -DryRun' -Skip:(-not $IsWindows) {
         # Synthetic candidates as the Windows scan delivers them: leading whitespace, empty first token.
         Mock -ModuleName Invoke-BuildRange Get-CimInstance {
             @([pscustomobject]@{ ProcessId = 1; CommandLine = '   x.exe' }, [pscustomobject]@{ ProcessId = 2; CommandLine = ' ' })

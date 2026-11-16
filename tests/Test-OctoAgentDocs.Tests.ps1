@@ -372,12 +372,14 @@ Describe 'references' {
     It 'reports <case>' -ForEach @(
         @{ case = 'a link to a missing file'; text = '[x](docs/missing.md)'; expect = 'Link target not found: docs/missing.md' }
         @{ case = 'a link to a missing anchor'; text = '[x](docs/one.md#nowhere)'; expect = 'Anchor not found: docs/one.md#nowhere' }
-        @{ case = 'a link whose case differs from the file on disk'; text = '[x](docs/One.md)'; expect = 'differs in case from the file on disk: docs/One.md' }
+        @{ case = 'a link whose case differs from the file on disk'; text = '[x](docs/One.md)'; expect = 'differs in case from the file on disk: docs/One.md'; caseSensitive = 'Link target not found: docs/One.md' }
         @{ case = 'a backticked path to a missing file'; text = 'See `docs/nope.md`.'; expect = 'Referenced file not found: docs/nope.md' }
-        @{ case = 'a backticked path whose case differs'; text = 'See `docs/One.md`.'; expect = 'differs in case from the file on disk: docs/One.md' }
+        @{ case = 'a backticked path whose case differs'; text = 'See `docs/One.md`.'; expect = 'differs in case from the file on disk: docs/One.md'; caseSensitive = 'Referenced file not found: docs/One.md' }
     ) {
         $r = New-Fixture
         Add-Line $r 'AGENTS.md' $text
+        # On a case-sensitive file system (Linux) the other case is simply a missing file.
+        if ($caseSensitive -and -not (Test-Path -LiteralPath (Join-Path $r 'docs/One.md'))) { $expect = $caseSensitive }
         $f = Get-RuleFinding (Get-Result $r) 'reference-resolves'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match ([regex]::Escape($expect))

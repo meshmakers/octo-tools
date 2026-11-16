@@ -89,10 +89,17 @@ class AgentDocsRepository {
     [System.Collections.Generic.List[string]]$Written = [System.Collections.Generic.List[string]]::new()
     hidden [hashtable]$TextCache = @{}
     hidden [hashtable]$DirCache = @{}
+    # Where sibling repositories are looked up; set by SetSiblingScope.
+    [string]$SiblingRoot
+    [string]$SiblingPattern
+    # -Ci: a missing link into an absent sibling is skipped, not reported.
+    [bool]$SkipAbsentSiblingLinks
+    hidden [object]$SiblingsPresent = $null
 
-    AgentDocsRepository([string]$Root) {
+    # Name: the repository's name when the folder is not named after it (a CI checkout is 's').
+    AgentDocsRepository([string]$Root, [string]$Name) {
         $this.Root = $Root
-        $this.Name = Split-Path -Leaf $Root
+        $this.Name = if ($Name) { $Name } else { Split-Path -Leaf $Root }
         # By exact name: a case-insensitive file system would accept agents.md, Linux CI would not.
         $this.RootNames = @(Get-ChildItem -LiteralPath $Root -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
         $this.HasAgents = $this.RootNames -ccontains 'AGENTS.md'
@@ -133,6 +140,31 @@ class AgentDocsRepository {
             $current = Join-Path $current $segment
         }
         return $true
+    }
+
+    [void] SetSiblingScope([string]$SiblingRoot, [string]$Pattern) {
+        $this.SiblingRoot = $SiblingRoot
+        $this.SiblingPattern = $Pattern
+    }
+
+    [bool] SiblingsAbsent() {
+        # True when sibling rules apply but no sibling is checked out beside this repository,
+        # as in a CI checkout. Listed once, on first use.
+        if (-not $this.SiblingPattern) { return $false }
+        if ($null -eq $this.SiblingsPresent) {
+            $own = Split-Path -Leaf $this.Root
+            $pattern = $this.SiblingPattern
+            $this.SiblingsPresent = [bool](Get-ChildItem -LiteralPath $this.SiblingRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $own -and "$($_.Name)/" -match $pattern } | Select-Object -First 1)
+        }
+        return -not $this.SiblingsPresent
+    }
+
+    [bool] InAbsentSibling([string]$FullPath) {
+        # A path outside this repository, in a sibling that cannot be checked because none is
+        # checked out.
+        $rel = [System.IO.Path]::GetRelativePath($this.Root, $FullPath)
+        if ($rel -ne '..' -and -not $rel.StartsWith('..' + [System.IO.Path]::DirectorySeparatorChar)) { return $false }
+        return [System.IO.Path]::GetRelativePath($this.SiblingRoot, $FullPath).Replace('\', '/') -match $this.SiblingPattern -and $this.SiblingsAbsent()
     }
 
     [bool] PointsAtShim([string]$Path) {
@@ -185,11 +217,26 @@ function Test-OctoAgentDocs {
     .PARAMETER Json
     Emit the standard octo-tools JSON envelope instead of human output.
 
+    .PARAMETER Ci
+    Azure DevOps output for a pipeline step: one '##vso[task.logissue]' line per finding
+    (error or warning, with file, line, rule id, why and fix), then the totals. Unlike
+    -Explain the gate stays: in mode enforce an error-severity finding throws and sets exit
+    code 1; warnings never change the exit code. When no sibling repository lies beside the
+    checkout, one line says the sibling rules were skipped. Cannot be combined with -Json.
+
+    .PARAMETER RepositoryName
+    The repository's name, for a checkout whose folder is not named after it (an Azure
+    DevOps checkout is 's'). Used in findings, messages and to recognise the repository's own
+    name in prose. Default: the folder name.
+
     .EXAMPLE
     Test-OctoAgentDocs -Path octo-communication-operator -Fix -WhatIf
 
     .EXAMPLE
     Test-OctoAgentDocs -Explain doc-size,line-length
+
+    .EXAMPLE
+    Test-OctoAgentDocs -Path $(Build.SourcesDirectory) -Ci -Mode enforce -RepositoryName octo-common-services
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low', DefaultParameterSetName = 'Check')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Human report on the host, -Json on the pipeline: the octo-tools convention')]
@@ -205,6 +252,10 @@ function Test-OctoAgentDocs {
         [string]$Mode,
         [string]$ConfigPath,
         [switch]$Json,
+        [Parameter(ParameterSetName = 'Check')]
+        [switch]$Ci,
+        [ValidatePattern('^[A-Za-z0-9][\w.-]*$')]
+        [string]$RepositoryName,
         [switch]$Explain,
         [switch]$All,
         [Parameter(Position = 0, ParameterSetName = 'Reference')]
@@ -219,20 +270,22 @@ function Test-OctoAgentDocs {
             throw "'$Path' is neither a repository path nor a rule id. Rules: $($script:RuleIds -join ', ')"
         }
     }
+    if ($Ci -and $Json) { throw '-Ci and -Json are two output formats - pick one' }
     if (($Rule -or $All) -and -not $Explain) { Write-Warning '-Rule and -All only shape -Explain output; ignored without -Explain' }
     $reference = $Explain -and ($All -or $Rule)
     if ($reference -and $Fix) { Write-Warning '-Fix is ignored with -Explain -All or -Rule: nothing is scanned' }
     $root = Resolve-OctoAgentDocsRepository -Path $Path
+    $repo = [AgentDocsRepository]::new($root, $RepositoryName)
+    $repo.SkipAbsentSiblingLinks = $Ci
     $rules = Resolve-RuleSet -Root $root -ConfigPath $ConfigPath -Mode $Mode
 
     $global:LASTEXITCODE = 0
     if ($reference) {
         $ids = if ($Rule) { @($Rule) } else { @($script:RuleIds) }
-        Write-RuleReference -Rules $rules -Id $ids -RepositoryName (Split-Path -Leaf $root) -Json:$Json
+        Write-RuleReference -Rules $rules -Id $ids -RepositoryName $repo.Name -Json:$Json
         return
     }
 
-    $repo = [AgentDocsRepository]::new($root)
     $findings = [AgentDocsFindings]::new($rules)
     if (-not $repo.EntryPath) { $findings.Add('required-sections', '', 'Neither AGENTS.md nor CLAUDE.md exists - the repository has no entry point') }
     $shim = Test-ClaudeShim -Rules $rules -Repo $repo -Findings $findings -Fix:$Fix -Force:$Force
@@ -270,12 +323,14 @@ function Test-OctoAgentDocs {
             summary      = [ordered]@{ errors = $errorCount; warnings = $findings.WithSeverity('warn').Count; success = ($errorCount -eq 0) }
         })
     }
+    elseif ($Ci) { Write-CiReport -Rules $rules -Repo $repo -Findings $findings }
     else {
         Write-FindingReport -Rules $rules -Repo $repo -Findings $findings -RouteCount @($routes).Count -StartHere $startHere -Explain:$Explain -Fix:$Fix
     }
 
-    # -Explain is a person asking why; the gate is for pipelines.
-    if ($rules.Mode() -eq 'enforce' -and $errorCount -gt 0 -and -not $Explain) {
+    # Only error-severity findings fail, never warnings. -Explain alone is a person asking
+    # why; -Ci explains too, but is a pipeline, so the gate stays.
+    if ($rules.Mode() -eq 'enforce' -and $errorCount -gt 0 -and ($Ci -or -not $Explain)) {
         $global:LASTEXITCODE = 1
         throw "Test-OctoAgentDocs: $errorCount error-severity finding(s) in $($repo.Name)"
     }
@@ -516,6 +571,7 @@ function Test-ReferenceSet {
     $files = @($Repo.EntryPath, $(if ($readme) { Join-Path $Repo.Root $readme })) + @($Repo.Docs.FullName) | Where-Object { $_ }
     $siblingPattern = $Rules.Option('reference-resolves', 'siblingRepoPattern')
     $siblingRoot = if ($Global:ROOTPATH) { $Global:ROOTPATH } else { Split-Path -Parent $Repo.Root }
+    $Repo.SetSiblingScope($siblingRoot, $siblingPattern)
     $startMarker = Get-OctoAgentDocsConstant RoutingStart
     $endMarker = Get-OctoAgentDocsConstant RoutingEnd
     $anchors = @{}
@@ -566,7 +622,6 @@ function Test-SiblingClaudeMention {
     # reference-resolves warning, and only in a workspace - a CI checkout has no siblings, and a
     # sibling that is not checked out locally may still exist.
     param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [string]$Rel, [string]$Text, [string]$SiblingRoot, [string]$Pattern)
-    $workspace = $null
     foreach ($m in [regex]::Matches($Text, "$script:ProseRepoName(?:/|[ \t]+)``?CLAUDE\.md\b")) {
         $name = $m.Groups[1].Value
         if ($name -eq $Repo.Name -or "$name/" -notmatch $Pattern) { continue }
@@ -578,19 +633,21 @@ function Test-SiblingClaudeMention {
         elseif (Test-Path -LiteralPath $sibling -PathType Container) {
             if ($Findings.Rules.IsOn('reference-to-shim')) { $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md - $name has not migrated yet; point this at its AGENTS.md or a docs/ file when it does", 'warn') }
         }
-        else {
-            if ($null -eq $workspace) { $workspace = [bool](Get-ChildItem -LiteralPath $SiblingRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $Repo.Name -and "$($_.Name)/" -match $Pattern } | Select-Object -First 1) }
-            if ($workspace -and $Findings.Rules.IsOn('reference-resolves')) { $Findings.Add('reference-resolves', $at, "``$name`` CLAUDE.md - no repository '$name' beside this one; check the name", 'warn') }
-        }
+        elseif ($Findings.Rules.IsOn('reference-resolves') -and -not $Repo.SiblingsAbsent()) { $Findings.Add('reference-resolves', $at, "``$name`` CLAUDE.md - no repository '$name' beside this one; check the name", 'warn') }
     }
 }
 
 function Test-ReferenceTarget {
     # One resolver for links and backtick paths: exists, exact case, shim, anchor.
+    # Under -Ci a missing target in a sibling repository is not reported when no sibling is
+    # checked out.
     param([AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings, [hashtable]$Anchors, [string]$Rel, [string]$From, [string]$Target, [string]$Kind)
     $filePart, $anchor = $Target -split '#', 2
     $resolved = if (-not $filePart) { $From } elseif ($filePart.StartsWith('/')) { Join-Path $Repo.Root $filePart.TrimStart('/') } else { Join-Path (Split-Path -Parent $From) $filePart }
-    if (-not (Test-Path -LiteralPath $resolved)) { $Findings.Add('reference-resolves', $Rel, "$Kind not found: $Target"); return }
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        if (-not ($Repo.SkipAbsentSiblingLinks -and $Repo.InAbsentSibling([System.IO.Path]::GetFullPath($resolved)))) { $Findings.Add('reference-resolves', $Rel, "$Kind not found: $Target") }
+        return
+    }
     $relToRepo = [System.IO.Path]::GetRelativePath($Repo.Root, [System.IO.Path]::GetFullPath($resolved))
     if ($filePart -and -not $relToRepo.StartsWith('..') -and -not $Repo.ExistsExactCase($relToRepo)) { $Findings.Add('reference-resolves', $Rel, "$Kind differs in case from the file on disk: $Target"); return }
     if ($filePart -and $Repo.PointsAtShim($resolved)) { $Findings.Add('reference-to-shim', $Rel, "$Kind $(Get-ShimAdvice -Reference $filePart)") }
@@ -810,6 +867,48 @@ function Write-FindingReport {
         if ($Explain) { Write-Host '  nothing to explain - full rule reference: Test-OctoAgentDocs -Explain -All' -ForegroundColor Gray }
     }
     elseif (-not $Explain) { Write-Host '  add -Explain for why and how to fix, or -Explain <rule> for one rule' -ForegroundColor Gray }
+}
+
+function Write-CiReport {
+    # Azure DevOps logging commands, one issue per finding in report order (absolute sourcepath,
+    # as the agent expects it, and the finding's own message), then why and fix once per fired
+    # rule as plain text. A warning is only ever type=warning, and nothing here sets a task
+    # result (no task.complete): the step fails through the exit code alone, which only the
+    # enforce gate sets. No colours, so every logging command starts its line.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The agent writes the host output into the pipeline log, where ##vso commands are read')]
+    param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
+    Write-Host "Agent docs check: $($Repo.Name) (entry point: $(if ($Repo.EntryName) { $Repo.EntryName } else { 'none' }), mode: $($Rules.Mode()))"
+    $items = @($Findings.Items | Sort-Object -Stable { $_.tier }, { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })
+    foreach ($x in $items) {
+        $path, $line = if ($x.file -match '^(.*):(\d+)$') { $Matches[1], $Matches[2] } else { $x.file, $null }
+        $properties = @("type=$(if ($x.severity -eq 'error') { 'error' } else { 'warning' })"
+            if ($path) { "sourcepath=$(ConvertTo-AdoLogValue ([System.IO.Path]::GetFullPath((Join-Path $Repo.Root $path))) -Property)" }
+            if ($line) { "linenumber=$line" }
+            "code=$($x.rule)")
+        Write-Host "##vso[task.logissue $($properties -join ';')]$(ConvertTo-AdoLogValue "$($x.rule): $($x.message)")"
+    }
+    # Why and how to fix once per fired rule, as plain log text, in the order of the issues.
+    $fired = @($items.rule | Select-Object -Unique)
+    if ($fired) { Write-Host 'Why and how to fix, per rule:' }
+    foreach ($id in $fired) {
+        $row = Get-RuleRow -Rules $Rules -Id $id
+        # Whitespace collapsed: one line per rule, so no continuation line can start like a
+        # logging command.
+        Write-Host "  $id - why: $($row.why -replace '\s+', ' ') fix: $($row.fix -replace '\s+', ' ')"
+    }
+    if ($Repo.SiblingsAbsent()) { Write-Host 'Sibling rules skipped: no sibling repository beside this checkout, so references into other repositories are checked only in a local workspace.' }
+    $errorCount = $Findings.WithSeverity('error').Count
+    $outcome = if ($errorCount -eq 0) { '' } elseif ($Rules.Mode() -eq 'enforce') { ' - mode enforce: the step fails' } else { ' - mode logOnly: the step does not fail' }
+    Write-Host "$errorCount error(s), $($Findings.WithSeverity('warn').Count) warning(s)$outcome"
+}
+
+function ConvertTo-AdoLogValue {
+    # Escaping of the Azure DevOps agent: '%' first, line breaks always, and ';' and ']' in
+    # a property value, where they would end the value or the command.
+    param([string]$Value, [switch]$Property)
+    $escaped = $Value.Replace('%', '%AZP25').Replace("`r", '%0D').Replace("`n", '%0A')
+    if ($Property) { $escaped = $escaped.Replace(';', '%3B').Replace(']', '%5D') }
+    return $escaped
 }
 
 function Write-RuleReference {

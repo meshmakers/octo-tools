@@ -80,7 +80,15 @@ function Get-CiWastePercentile {
 function Get-CiWasteRound {
     param($Value, [int]$Digits = 1)
     if ($null -eq $Value) { return $null }
-    return [math]::Round([double]$Value, $Digits, [MidpointRounding]::AwayFromZero)
+    # Rounded as the decimal the double prints as: 9/60 is stored as 0.1499.. and would round
+    # down to 0.1; its shortest form '0.15' rounds away from zero to 0.2. NaN, infinity and
+    # values beyond decimal's range keep the double rounding.
+    $invariant = [cultureinfo]::InvariantCulture
+    $shortest = [decimal]0
+    if (-not [decimal]::TryParse(([double]$Value).ToString('R', $invariant), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$shortest)) {
+        return [math]::Round([double]$Value, $Digits, [MidpointRounding]::AwayFromZero)
+    }
+    return [double][math]::Round($shortest, $Digits, [MidpointRounding]::AwayFromZero)
 }
 
 function Get-CiWasteShare {
