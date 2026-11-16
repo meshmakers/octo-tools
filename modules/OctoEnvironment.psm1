@@ -204,26 +204,158 @@ function Get-OctoEnvironmentDefaultBranchName {
 # git
 # ---------------------------------------------------------------------------------------------------------------
 
-function Invoke-OctoEnvironmentGit {
-    # Runs git in a folder; returns { ExitCode; Output (string[]) }. Never throws on a non-zero exit.
+# Network git calls (ls-remote, fetch) are bounded (AB#8955): seconds before the git process tree is killed.
+$script:GitNetworkTimeoutSetting = 'OCTO_GIT_NETWORK_TIMEOUT_SECONDS'
+$script:GitNetworkTimeoutDefault = 60
+$script:GitNetworkTimeoutMaximum = 3600
+# A host that did not answer within the timeout is not asked again for this long (one module session): every repo of
+# an environment would otherwise wait the full timeout once more (fetch of each base, then the feed snapshot).
+$script:UnreachableGitHostSeconds = 600
+$script:UnreachableGitHosts = @{}
+
+function Get-OctoGitNetworkTimeoutSeconds {
+    # $env:OCTO_GIT_NETWORK_TIMEOUT_SECONDS (1..3600 seconds), else 60.
+    $value = [Environment]::GetEnvironmentVariable($script:GitNetworkTimeoutSetting)
+    $seconds = 0
+    if ($value -and [int]::TryParse($value, [ref]$seconds) -and $seconds -gt 0) { return [Math]::Min($seconds, $script:GitNetworkTimeoutMaximum) }
+    if ($value) { Write-Warning "$($script:GitNetworkTimeoutSetting)='$value' is not a positive number of seconds - using $($script:GitNetworkTimeoutDefault)." }
+    return $script:GitNetworkTimeoutDefault
+}
+
+function Get-OctoNonInteractiveSshCommand {
+    <#
+        The ssh command git uses for a network call, made non-interactive (AB#8955): the configured one
+        ($env:GIT_SSH_COMMAND, else core.sshCommand of the repository, else 'ssh') with
+        -o BatchMode=yes -o ConnectTimeout=<n> added (right after an ssh program, else at the end) - ssh then fails instead of waiting for a host-key
+        confirmation or a key passphrase on a console that an agent's pwsh does not have. PuTTY's plink /
+        TortoisePlink take no -o options: they get -batch instead. $null when $env:GIT_SSH names the program (its
+        variant is not known): it is left as it is, the process timeout still applies.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path, [int]$connectTimeoutSeconds = 30)
+    $command = $env:GIT_SSH_COMMAND
+    if ([string]::IsNullOrWhiteSpace($command)) {
+        $configured = @(& git -C $path config --get core.sshCommand 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $configured.Count -gt 0) { $command = [string]$configured[-1] }
+    }
+    if ([string]::IsNullOrWhiteSpace($command)) {
+        if (-not [string]::IsNullOrWhiteSpace($env:GIT_SSH)) { return $null }
+        $command = 'ssh'
+    }
+    $command = $command.Trim()
+    # program (quoted or not) and the rest of the configured command
+    [void]($command -match '^("[^"]*"|''[^'']*''|\S+)(.*)$')
+    $programToken = $Matches[1]
+    $rest = $Matches[2]
+    $programName = (($programToken.Trim('"', "'") -split '[\\/]')[-1])
+    if ($programName -match '(?i)plink') { return "$command -batch" }
+    $options = "-o BatchMode=yes -o ConnectTimeout=$connectTimeoutSeconds"
+    # OpenSSH itself: right after the program - ssh takes the first value of an option, so a configured
+    # -o BatchMode=no or ConnectTimeout cannot override these. Any other program (a wrapper script that passes its
+    # arguments on to ssh) gets them at the end, where they reach ssh.
+    if ($programName -match '(?i)^ssh(\.exe)?$') { return "$programToken $options$rest" }
+    return "$command $options"
+}
+
+function Get-OctoGitRemoteHost {
+    # Host of the remote a network git call talks to ('github.com'); $null for a local path or an unknown remote.
+    # The remote is the first argument after the subcommand that is no option (ls-remote origin, fetch origin).
+    param([Parameter(Mandatory = $true)] [string]$path, [string[]]$arguments = @())
+    $remote = @($arguments | Select-Object -Skip 1 | Where-Object { $_ -notlike '-*' } | Select-Object -First 1)
+    if ($remote.Count -eq 0) { return $null }
+    $url = @(& git -C $path remote get-url $remote[0] 2>$null)
+    $url = if ($LASTEXITCODE -eq 0 -and $url.Count -gt 0) { [string]$url[-1] } else { [string]$remote[0] }
+    if ($url -match '^file://') { return $null }
+    if ($url -match '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]+@)?([^/:]+)') { return $Matches[1].ToLowerInvariant() }
+    # scp-like git@host:path; a drive letter (C:/x) is no host
+    if ($url -match '^(?:[^@/\\]+@)?([^/:\\]{2,}):') { return $Matches[1].ToLowerInvariant() }
+    return $null
+}
+
+function Invoke-OctoGitProcess {
+    <#
+        Runs git as a child process with extra environment variables and a timeout; kills the whole process tree
+        (git, ssh) when the timeout passes. stdin is closed. Returns { ExitCode; Output (string[]); TimedOut }.
+    #>
     param(
         [Parameter(Mandatory = $true)] [string]$path,
         [Parameter(Mandatory = $true)] [string[]]$arguments,
-        # Network calls (ls-remote, fetch): git must fail instead of asking for credentials on the terminal - an
-        # agent or octo-devstack run would hang on the prompt. Configured credential helpers keep working.
+        [hashtable]$environment = @{},
+        [Parameter(Mandatory = $true)] [int]$timeoutSeconds
+    )
+    $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $info = [System.Diagnostics.ProcessStartInfo]::new($git)
+    $info.ArgumentList.Add('-C')
+    $info.ArgumentList.Add($path)
+    foreach ($argument in $arguments) { $info.ArgumentList.Add($argument) }
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($key in $environment.Keys) { $info.Environment[$key] = [string]$environment[$key] }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    $readers = @()
+    try {
+        [void]$process.Start()
+        $readers = @($process.StandardOutput, $process.StandardError)
+        $process.StandardInput.Close()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit([TimeSpan]::FromSeconds($timeoutSeconds))) {
+            try { $process.Kill($true) } catch { Write-Verbose "git process tree could not be killed: $($_.Exception.Message)" }
+            [void]$process.WaitForExit(5000)
+            return [pscustomobject]@{ ExitCode = 124; TimedOut = $true; Output = @("git $($arguments[0]) did not finish within $timeoutSeconds s ($($script:GitNetworkTimeoutSetting)) and was stopped.") }
+        }
+        $process.WaitForExit()
+        # A process git started may outlive it and keep the pipes open (ssh ControlPersist, a credential helper):
+        # the output is read for at most 5 more seconds, never until such a process ends.
+        [void][System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdout, $stderr), 5000)
+        $text = (@($stdout, $stderr) | ForEach-Object { if ($_.IsCompleted -and -not $_.IsFaulted) { $_.Result } }) -join ''
+        $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; Output = $lines }
+    }
+    finally {
+        # Process.Dispose does not close redirected readers that were accessed: close them, so a read still pending
+        # on a pipe a lingering helper holds open releases its handle and buffer.
+        foreach ($reader in $readers) {
+            try { $reader.Dispose() } catch { Write-Verbose "git output reader: $($_.Exception.Message)" }
+        }
+        $process.Dispose()
+    }
+}
+
+function Invoke-OctoEnvironmentGit {
+    # Runs git in a folder; returns { ExitCode; Output (string[]); TimedOut }. Never throws on a non-zero exit.
+    param(
+        [Parameter(Mandatory = $true)] [string]$path,
+        [Parameter(Mandatory = $true)] [string[]]$arguments,
+        # Network calls (ls-remote, fetch): git must fail instead of asking for anything - an agent or octo-devstack
+        # run has no console and would hang on the prompt (AB#8955). GIT_TERMINAL_PROMPT=0 stops git's credential
+        # prompt, GCM_INTERACTIVE=never the Git Credential Manager's dialogs, ssh runs with BatchMode=yes
+        # (Get-OctoNonInteractiveSshCommand), and the call is stopped after $env:OCTO_GIT_NETWORK_TIMEOUT_SECONDS
+        # (default 60); a host that timed out is skipped for 10 minutes. Stored credentials and ssh keys keep working.
         [switch]$noPrompt
     )
     if (-not $noPrompt) {
         $output = @(& git -C $path @arguments 2>&1 | ForEach-Object { "$_" })
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output; TimedOut = $false }
     }
-    $previous = $env:GIT_TERMINAL_PROMPT
-    $env:GIT_TERMINAL_PROMPT = '0'
-    try {
-        $output = @(& git -C $path @arguments 2>&1 | ForEach-Object { "$_" })
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    $timeout = Get-OctoGitNetworkTimeoutSeconds
+    $hostName = Get-OctoGitRemoteHost -path $path -arguments $arguments
+    if ($hostName -and $script:UnreachableGitHosts.ContainsKey($hostName)) {
+        $known = $script:UnreachableGitHosts[$hostName]
+        if (([DateTime]::UtcNow - $known.Since).TotalSeconds -lt $script:UnreachableGitHostSeconds) {
+            return [pscustomobject]@{ ExitCode = 124; TimedOut = $true; Output = @("git $($arguments[0]) skipped: $hostName did not answer within $($known.Seconds) s at $($known.Since.ToString('HH:mm:ss')) UTC ($($script:GitNetworkTimeoutSetting)).") }
+        }
+        $script:UnreachableGitHosts.Remove($hostName)
     }
-    finally { $env:GIT_TERMINAL_PROMPT = $previous }
+    $environment = @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never' }
+    $ssh = Get-OctoNonInteractiveSshCommand -path $path -connectTimeoutSeconds ([Math]::Min(30, $timeout))
+    if ($ssh) { $environment['GIT_SSH_COMMAND'] = $ssh }
+    $result = Invoke-OctoGitProcess -path $path -arguments $arguments -environment $environment -timeoutSeconds $timeout
+    if ($result.TimedOut -and $hostName) { $script:UnreachableGitHosts[$hostName] = @{ Since = [DateTime]::UtcNow; Seconds = $timeout } }
+    return $result
 }
 
 function Get-OctoEnvironmentRepoSource {
@@ -273,6 +405,8 @@ function Resolve-OctoEnvironmentBase {
 
     $repo = Split-Path -Leaf $source
     $remoteRef = $null
+    # AB#8955: once origin did not answer within the timeout, the fetch is not tried again (it would wait as long).
+    $unreachable = $null
     $upstream = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
     if ($upstream.ExitCode -eq 0) { $remoteRef = [string]($upstream.Output | Select-Object -Last 1) }
     if (-not $remoteRef -or $remoteRef -notmatch '^[^/]+/.+') {
@@ -280,6 +414,7 @@ function Resolve-OctoEnvironmentBase {
         # Ask origin for its default branch: the local origin/HEAD is set at clone time and goes stale when the
         # default branch is renamed. The tracking ref may not exist yet - the fetch below creates it.
         $symref = Invoke-OctoEnvironmentGit -path $source -arguments @('ls-remote', '--symref', 'origin', 'HEAD') -noPrompt
+        if ($symref.TimedOut) { $unreachable = [string]($symref.Output | Select-Object -Last 1) }
         $current = @($symref.Output | ForEach-Object { if ($_ -match '^ref:\s+refs/heads/(\S+)\s+HEAD$') { $Matches[1] } }) | Select-Object -First 1
         if ($symref.ExitCode -eq 0 -and $current) { $remoteRef = "origin/$current" }
         else {
@@ -300,9 +435,15 @@ function Resolve-OctoEnvironmentBase {
     $remote, $branch = $remoteRef -split '/', 2
     # Explicit destination: a single-branch clone has no fetch refspec for another branch, and a plain
     # `git fetch <remote> <branch>` would then leave no remote-tracking ref behind.
-    $fetch = Invoke-OctoEnvironmentGit -path $source -arguments @('fetch', '--quiet', $remote, "+refs/heads/${branch}:refs/remotes/$remote/$branch") -noPrompt
-    $result.Fetched = $fetch.ExitCode -eq 0
-    if (-not $result.Fetched) { $result.Warnings += "${repo}: git fetch $remote $branch failed - $remoteRef is used as last fetched." }
+    if ($unreachable) {
+        $result.Warnings += "${repo}: $remote did not answer ($unreachable) - $remoteRef is used as last fetched."
+    }
+    else {
+        $fetch = Invoke-OctoEnvironmentGit -path $source -arguments @('fetch', '--quiet', $remote, "+refs/heads/${branch}:refs/remotes/$remote/$branch") -noPrompt
+        $result.Fetched = $fetch.ExitCode -eq 0
+        if ($fetch.TimedOut) { $result.Warnings += "${repo}: git fetch $remote $branch timed out ($([string]($fetch.Output | Select-Object -Last 1))) - $remoteRef is used as last fetched." }
+        elseif (-not $result.Fetched) { $result.Warnings += "${repo}: git fetch $remote $branch failed - $remoteRef is used as last fetched." }
+    }
     $commit = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/$remoteRef^{commit}")
     if ($commit.ExitCode -ne 0) {
         $result.Warnings += "${repo}: $remoteRef does not exist - based on the local checkout's HEAD."
@@ -395,14 +536,15 @@ function Resolve-OctoEnvironmentDefaultBranch {
         }
     }
     if (-not $branch) { $result.Note = 'origin has no default branch'; return [pscustomobject]$result }
-    $fetch = Invoke-OctoEnvironmentGit -path $path -arguments @('fetch', '--quiet', 'origin', "+refs/heads/${branch}:refs/remotes/origin/$branch") -noPrompt
+    # AB#8955: origin did not answer the ls-remote within the timeout - the fetch would wait as long.
+    $fetch = if ($symref.TimedOut) { $symref } else { Invoke-OctoEnvironmentGit -path $path -arguments @('fetch', '--quiet', 'origin', "+refs/heads/${branch}:refs/remotes/origin/$branch") -noPrompt }
     $result.Fetched = $fetch.ExitCode -eq 0
     if ((Invoke-OctoEnvironmentGit -path $path -arguments @('rev-parse', '--verify', '--quiet', "refs/remotes/origin/$branch^{commit}")).ExitCode -ne 0) {
         $result.Note = "origin/$branch does not exist (fetch failed)"
         return [pscustomobject]$result
     }
     $result.Ref = "origin/$branch"
-    if (-not $result.Fetched) { $result.Note = "git fetch origin $branch failed - checked against origin/$branch as last fetched" }
+    if (-not $result.Fetched) { $result.Note = "git fetch origin $branch $(if ($fetch.TimedOut) { 'timed out' } else { 'failed' }) - checked against origin/$branch as last fetched" }
     return [pscustomobject]$result
 }
 
@@ -2722,20 +2864,36 @@ function Invoke-BuildEnvironment {
             Invoke-BuildRange @range
             return
         }
-        $output = @(Invoke-BuildRange @range -Json)
+        # AB#8912: the document is collected while it streams, so a throw after it (a failure's Write-Error under
+        # -ErrorAction Stop, a throwing build) keeps it, and a throw before it becomes the error of this document
+        # instead of "returned no JSON document". The exception still reaches the caller, after the document.
+        $output = [System.Collections.Generic.List[object]]::new()
+        $rangeError = $null
+        $rangeRecord = $null
+        try { Invoke-BuildRange @range -Json | ForEach-Object { $output.Add($_) } }
+        catch { $rangeRecord = $_; $rangeError = $_.Exception.Message }
         $exitCode = $global:LASTEXITCODE
     }
     finally {
         if ($restoreConfig -and -not $DryRun) { Remove-Item -LiteralPath (Split-Path -Parent $restoreConfig) -Recurse -Force -ErrorAction SilentlyContinue }
     }
     $data = [ordered]@{}
-    try {
-        $inner = ($output -join "`n") | ConvertFrom-Json -AsHashtable
-        foreach ($key in $inner['data'].Keys) { $data[$key] = $inner['data'][$key] }
+    $inner = $null
+    $parseError = $null
+    if ($output.Count -gt 0) {
+        try { $inner = ($output -join "`n") | ConvertFrom-Json -AsHashtable }
+        catch { $parseError = $_.Exception.Message }
     }
-    catch {
+    if ($inner -is [System.Collections.IDictionary] -and $inner['data'] -is [System.Collections.IDictionary]) {
+        foreach ($key in $inner['data'].Keys) { $data[$key] = $inner['data'][$key] }
+        if ($rangeError -and $data['success'] -ne $false) { $data['success'] = $false; $data['error'] = "Invoke-BuildRange failed: $rangeError" }
+        if ($rangeError) { $exitCode = 1 }
+    }
+    else {
         $data['success'] = $false
-        $data['error'] = "Invoke-BuildRange returned no JSON document: $($_.Exception.Message)"
+        $data['error'] = if ($rangeError) { "Invoke-BuildRange failed: $rangeError" }
+        elseif ($parseError) { "Invoke-BuildRange returned no valid JSON document: $parseError" }
+        else { 'Invoke-BuildRange returned no JSON document (no output).' }
         $exitCode = 1
     }
     $data['environment'] = [ordered]@{ name = $env; path = $environmentPath; base = $basePath; repos = @($order | ForEach-Object Name); inPlace = $external; toolRepos = $toolRepos }
@@ -2746,6 +2904,7 @@ function Invoke-BuildEnvironment {
     if ($null -ne $sync) { $data['sync'] = ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed }
     $global:LASTEXITCODE = $exitCode
     Write-OctoJson -Command 'Invoke-BuildEnvironment' -Data $data
+    if ($rangeRecord) { throw $rangeRecord }
 }
 
 Export-ModuleMember -Function @(

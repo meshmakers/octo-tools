@@ -448,6 +448,32 @@ Remove-OctoEnvironment -env ab8625-enum-null
   package caches are `nuget/` and `.nuget-packages/` - but `Remove-BinAndObjFolders -path $rootPath` walks into every
   `wt-*` too, so pass a repository folder there. A base lane above `$rootPath` is refused, and so is a name whose
   `wt-<name>` already exists as an octo-claude-pm lane folder or flat worktree.
+
+  Any other folder works as the base lane when it is passed with `-base` (relative to `$rootPath` or absolute) and
+  recorded in the manifest - e.g. on Windows `D:/source/Octo` with the base checkout `D:/source/Octo/main`:
+  `New-OctoEnvironment -env <env> -repos <repo> -base main` (manifest `base: "main"`, environment
+  `D:/source/Octo/wt-<env>`); every later cmdlet reads the base from the manifest. Windows is supported (AB#8912).
+- **Windows and agent sessions** (AB#8912, AB#8955).
+  - `Invoke-BuildEnvironment` / `Invoke-BuildRange` look for processes running out of `<repo>/bin/` before a build
+    (also under `-DryRun`). The scan never fails on a command line it cannot parse (leading whitespace, an empty
+    first token, a quoted `"C:\Program Files\...\x.exe"`). It reports a process only with repository, PID, name (the
+    executable or the entry assembly, e.g. `Meshmakers.Octo.X.dll`) and `match` (`cwd` | `bin-path`) - never its
+    command line, which can carry secrets (AB#9108); `-Json` `runningProcesses[{repo, pid, name, match}]`.
+  - With `-Json` both always write a JSON document: when `Invoke-BuildRange` throws, `error` carries its message
+    (`Invoke-BuildRange failed: ...`) instead of `returned no JSON document`; the exception still reaches the caller
+    after the document (read the output as a stream, e.g. `... -Json | ForEach-Object { .. }`, or from stdout).
+  - The network git calls of the environment cmdlets (`ls-remote`, `fetch` in `New-OctoEnvironment`,
+    `Add-OctoEnvironmentRepo`, `Remove-OctoEnvironment` and the feed snapshot) never wait for input: git runs with
+    `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never`, and ssh with `-o BatchMode=yes -o ConnectTimeout=<n>`
+    added to the configured ssh command (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `ssh`): right after an `ssh`
+    program, so a configured `-o BatchMode=no` cannot win, at the end of a wrapper script; plink / TortoisePlink get
+    `-batch` instead, and a program named by `GIT_SSH` is left as it is. Each call is stopped after
+    `$env:OCTO_GIT_NETWORK_TIMEOUT_SECONDS` (default 60, at most 3600). Then the environment starts from the ref as
+    last fetched, with a warning (`-Json` `warnings`); after a timed-out `ls-remote` the fetch is not tried again,
+    and a host that did not answer is skipped by every further call of the same pwsh session for 10 minutes, so an
+    environment with many repositories does not wait the full timeout once per repository. Why: a pwsh started by an agent tool has no console, and Windows OpenSSH (the
+    `core.sshCommand` `C:/Windows/System32/OpenSSH/ssh.exe` of the developer machines) then waits forever for a
+    host-key confirmation or a key passphrase; `-localBase` (no network call) stays the way around it.
 - **Adopting a hand-made environment** (a `wt-<lane>` folder with worktrees but no `.octo/environment.json`, e.g. one
   built while `New-OctoEnvironment` refused the flat layout). Its own name is refused (`wt-<name>` exists without a
   manifest), so create an empty environment under a new name - without `-repos` it gets feed, cache, catalogs and
