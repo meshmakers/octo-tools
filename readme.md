@@ -751,18 +751,25 @@ lives in the branch under review. `Get-Help Test-OctoAgentDocs -Full` has the re
 
 `-Ci` writes Azure DevOps logging commands instead of the coloured report: one
 `##vso[task.logissue]` line per finding, `type=error` or `type=warning` after the finding's
-severity, with `sourcepath` (relative to the repository), `linenumber` when the finding has one,
-`code=<rule id>`, and a message made of the rule id, the finding, and the rule's why and fix. The
-name is `-Ci` because the output is Azure DevOps only for now.
+severity, with `sourcepath` (absolute, as the agent expects it), `linenumber` when the finding
+has one, `code=<rule id>`, and a message made of the rule id, the finding, and the rule's why and
+fix. The name is `-Ci` because the output is Azure DevOps only for now.
+
+`-Path` is the repository folder. With a single checkout that is `$(Build.SourcesDirectory)`; a
+pipeline with several checkouts puts each repository in a folder below it, so pass that folder
+(otherwise the checker scans the parent, finds no entry point and fails in mode `enforce`):
 
 ```powershell
+# single checkout
 Test-OctoAgentDocs -Path $(Build.SourcesDirectory) -Ci -Mode enforce -RepositoryName octo-common-services
+# several checkouts
+Test-OctoAgentDocs -Path $(Build.SourcesDirectory)/octo-common-services -Ci -Mode enforce -RepositoryName octo-common-services
 ```
 
 ```text
 Agent docs check: octo-common-services (entry point: AGENTS.md, mode: enforce)
-##vso[task.logissue type=warning;sourcepath=AGENTS.md;code=docs-count]docs-count: 13 routed docs (limit 12) - ... Why: ... Fix: ...
-##vso[task.logissue type=error;sourcepath=docs/build.md;linenumber=3;code=globs-match]globs-match: applies_to glob ... Why: ... Fix: ...
+##vso[task.logissue type=warning;sourcepath=/home/vsts/work/1/s/docs/;code=docs-count]docs-count: 13 routed docs (limit 12) - ... Why: ... Fix: ...
+##vso[task.logissue type=error;sourcepath=/home/vsts/work/1/s/docs/build.md;linenumber=3;code=globs-match]globs-match: applies_to glob ... Why: ... Fix: ...
 Sibling rules skipped: no sibling repository beside this checkout, so references into other repositories are checked only in a local workspace.
 1 error(s), 1 warning(s) - mode enforce: the step fails
 ```

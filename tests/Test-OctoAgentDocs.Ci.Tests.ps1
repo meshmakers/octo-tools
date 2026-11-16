@@ -19,6 +19,12 @@ BeforeAll {
         $result.Issues = @($lines | Where-Object { $_ -like '##vso*' })
         return $result
     }
+    function Get-SourcePattern {
+        # The absolute, escaped sourcepath of a repository-relative file, as a regex.
+        param([string]$Root, [string]$Relative)
+        $full = [System.IO.Path]::GetFullPath((Join-Path $Root $Relative))
+        return [regex]::Escape($full.Replace('%', '%AZP25').Replace(';', '%3B').Replace(']', '%5D'))
+    }
     function New-WarningFixture {
         # Clean but for one warning-severity finding.
         $r = New-Fixture
@@ -41,7 +47,7 @@ Describe 'Test-OctoAgentDocs -Ci output' {
         $out.Issues.Count | Should -Be $findings.Count
         $glob = @($out.Issues | Where-Object { $_ -like '*code=globs-match*' })
         $glob.Count | Should -Be 1
-        $glob[0] | Should -Match '^##vso\[task\.logissue type=error;sourcepath=docs/two\.md;linenumber=3;code=globs-match\]globs-match: applies_to glob ''nowhere/\*\*'' matches no file'
+        $glob[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/two.md');linenumber=3;code=globs-match\]globs-match: applies_to glob 'nowhere/\*\*' matches no file"
         $glob[0] | Should -Match ' Why: \S.* Fix: \S'
         $out.Lines[0] | Should -Match '^Agent docs check: .* \(entry point: AGENTS\.md, mode: logOnly\)$'
         $out.Lines[-1] | Should -Be '1 error(s), 0 warning(s) - mode logOnly: the step does not fail'
@@ -51,12 +57,13 @@ Describe 'Test-OctoAgentDocs -Ci output' {
         $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=required-sections*' })
         $issue[0] | Should -Match '^##vso\[task\.logissue type=error;code=required-sections\]'
         $r = New-Fixture -NoFix
-        (Get-CiOutput $r).Issues[0] | Should -Match '^##vso\[task\.logissue type=error;sourcepath=AGENTS\.md;code=routing-current\]'
+        (Get-CiOutput $r).Issues[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=routing-current\]"
     }
     It 'reports a warning as type=warning' {
-        $out = Get-CiOutput (New-WarningFixture)
+        $r = New-WarningFixture
+        $out = Get-CiOutput $r
         $out.Issues.Count | Should -Be 1
-        $out.Issues[0] | Should -Match '^##vso\[task\.logissue type=warning;sourcepath=AGENTS\.md;code=entry-point-lines\]'
+        $out.Issues[0] | Should -Match "^##vso\[task\.logissue type=warning;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=entry-point-lines\]"
         $out.Lines[-1] | Should -Be '0 error(s), 1 warning(s)'
     }
     It 'escapes the logging command syntax in file names and messages' {
@@ -64,7 +71,8 @@ Describe 'Test-OctoAgentDocs -Ci output' {
         Write-File (Join-Path $r 'docs/a;b].md') "---`nbackground: true`n---`n"
         $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=frontmatter-present*' })
         $issue.Count | Should -Be 1
-        $issue[0] | Should -Match '^##vso\[task\.logissue type=error;sourcepath=docs/a%3Bb%5D\.md;code=frontmatter-present\]'
+        $issue[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/a;b].md');code=frontmatter-present\]"
+        $issue[0] | Should -Match 'sourcepath=[^;\]]*/docs/a%3Bb%5D\.md;'
         InModuleScope Test-OctoAgentDocs { ConvertTo-AdoLogValue "50% a;b]`r`nc" } | Should -Be '50%AZP25 a;b]%0D%0Ac'
     }
     It 'writes no colour codes, so every logging command starts its line' {
@@ -198,7 +206,7 @@ Describe 'the four files the pipeline template downloads' {
         $script = "Import-Module (Join-Path '$tools' 'Test-OctoAgentDocs.psm1'); Test-OctoAgentDocs -Path '$r' -Ci -Mode {0} -RepositoryName octo-standalone"
         $out = & $pwsh -NoProfile -NonInteractive -Command ($script -f 'enforce') 2>&1
         $LASTEXITCODE | Should -Be 1
-        ($out -join "`n") | Should -Match '##vso\[task\.logissue type=error;sourcepath=AGENTS\.md;code=routing-current\]'
+        ($out -join "`n") | Should -Match "##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=routing-current\]"
         ($out -join "`n") | Should -Match 'Agent docs check: octo-standalone '
         & $pwsh -NoProfile -NonInteractive -Command ($script -f 'logOnly') *> $null
         $LASTEXITCODE | Should -Be 0

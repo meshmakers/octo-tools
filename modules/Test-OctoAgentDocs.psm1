@@ -870,7 +870,8 @@ function Write-FindingReport {
 }
 
 function Write-CiReport {
-    # Azure DevOps logging commands, one issue per finding in report order. A warning is only
+    # Azure DevOps logging commands, one issue per finding in report order, with an absolute
+    # sourcepath as the agent expects it. A warning is only
     # ever type=warning, and nothing here sets a task result (no task.complete): the step
     # fails through the exit code alone, which only the enforce gate sets. No colours, so
     # every logging command starts its line.
@@ -881,7 +882,7 @@ function Write-CiReport {
         $row = Get-RuleRow -Rules $Rules -Id $x.rule
         $path, $line = if ($x.file -match '^(.*):(\d+)$') { $Matches[1], $Matches[2] } else { $x.file, $null }
         $properties = @("type=$(if ($x.severity -eq 'error') { 'error' } else { 'warning' })"
-            if ($path) { "sourcepath=$(ConvertTo-AdoLogValue $path -Property)" }
+            if ($path) { "sourcepath=$(ConvertTo-AdoLogValue ([System.IO.Path]::GetFullPath((Join-Path $Repo.Root $path))) -Property)" }
             if ($line) { "linenumber=$line" }
             "code=$($x.rule)")
         $message = "$($x.rule): $($x.message)$(if ($row.why) { " Why: $($row.why)" })$(if ($row.fix) { " Fix: $($row.fix)" })"
