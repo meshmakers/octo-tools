@@ -139,7 +139,9 @@ Describe 'New-TestBranch' {
     It 'reports a dirty repository instead of branching it and exits non-zero' {
         Set-Content -Path (Join-Path $script:Line 'octo-cli/file.txt') -Value 'local edit'
 
-        $json = New-TestBranch -MinorVersion 3 -Description 'demo' -NoPush -Json 2>$null | ConvertFrom-Json
+        $out = [System.Collections.Generic.List[object]]::new()
+        { New-TestBranch -MinorVersion 3 -Description 'demo' -NoPush -Json 2>$null | ForEach-Object { $out.Add($_) } } | Should -Throw '*not branched*'
+        $json = $out | ConvertFrom-Json
 
         $LASTEXITCODE | Should -Be 1
         $json.data.success | Should -BeFalse
@@ -152,6 +154,24 @@ Describe 'New-TestBranch' {
         $json.data.summary.created | Should -Be 2
         (Invoke-TestGit (Join-Path $script:Line 'octo-cli') @('branch', '--list', 'test/0.3-demo')) | Should -BeNullOrEmpty
         (Invoke-TestGit (Join-Path $script:Line 'octo-cli') @('branch', '--show-current')) | Should -Be 'main'
+    }
+
+    It 'ends a pwsh -Command run with exit code 1 when a repository is dirty' {
+        Set-Content -Path (Join-Path $script:Line 'octo-cli/file.txt') -Value 'local edit'
+        $modules = (Resolve-Path (Join-Path $PSScriptRoot '../modules')).Path
+        $cmd = "`$global:rootPath = '$($global:rootPath)'; " +
+            "foreach (`$m in 'OctoJsonOutput','OctoTestBranch','New-TestBranch') { Import-Module '$modules/'+`$m+'.psm1' }; " +
+            "New-TestBranch -MinorVersion 3 -Description demo -NoPush -Json"
+        & (Get-Command pwsh -CommandType Application | Select-Object -First 1) -NoProfile -Command $cmd *> $null
+        $LASTEXITCODE | Should -Be 1
+    }
+
+    It 'does not create or push anything under -WhatIf' {
+        New-TestBranch -MinorVersion 3 -Description 'demo' -NoPush | Out-Null
+        New-TestBranch -MinorVersion 3 -Description 'demo' -WhatIf | Out-Null
+        foreach ($name in $script:Repos) {
+            (Invoke-TestGit (Join-Path $script:Ws "remotes/$name.git") @('branch', '--list', 'test/0.3-demo')) | Should -BeNullOrEmpty
+        }
     }
 
     It 'switches to a branch that already exists instead of recreating it' {
