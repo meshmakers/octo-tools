@@ -51,10 +51,10 @@ Describe 'Test-OctoAgentDocs -Ci output' {
         @($out.Issues | Where-Object { $_ -like '*code=globs-match*' }).Count | Should -Be 2
         $two = @($out.Issues | Where-Object { $_ -like '*two.md;*' })
         $two.Count | Should -Be 1
-        $two[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/two.md');linenumber=3;code=globs-match\]globs-match: applies_to glob 'nowhere/\*\*' matches no file"
+        $two[0] | Should -Match "^##vso\[task\.logissue type=warning;sourcepath=$(Get-SourcePattern $r 'docs/two.md');linenumber=3;code=globs-match\]globs-match: applies_to glob 'nowhere/\*\*' matches no file \(error in enforce\)$"
         @($out.Issues | Where-Object { $_ -match 'Why:|Fix:|why:|fix:' }).Count | Should -Be 0
         $out.Lines[0] | Should -Match '^Agent docs check: .* \(entry point: AGENTS\.md, mode: logOnly\)$'
-        $out.Lines[-1] | Should -Be '2 error(s), 0 warning(s) - mode logOnly: the step does not fail'
+        $out.Lines[-1] | Should -Be '2 error(s) (shown as warnings in logOnly), 0 warning(s) - mode logOnly: the step does not fail'
     }
     It 'explains each fired rule once, after the issues and before the totals' {
         $r = New-Fixture -NoFix
@@ -79,22 +79,22 @@ Describe 'Test-OctoAgentDocs -Ci output' {
     }
     It 'leaves out the line number when the finding has none, and the file when it has none' {
         $r = New-Fixture -Empty
-        $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=required-sections*' })
+        $issue = @((Get-CiOutput $r @{ Mode = 'enforce' }).Issues | Where-Object { $_ -like '*code=required-sections*' })
         $issue[0] | Should -Match '^##vso\[task\.logissue type=error;code=required-sections\]'
         $r = New-Fixture -NoFix
-        (Get-CiOutput $r).Issues[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=routing-current\]"
+        (Get-CiOutput $r @{ Mode = 'enforce' }).Issues[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=routing-current\]"
     }
     It 'reports a warning as type=warning' {
         $r = New-WarningFixture
         $out = Get-CiOutput $r
         $out.Issues.Count | Should -Be 1
-        $out.Issues[0] | Should -Match "^##vso\[task\.logissue type=warning;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=entry-point-lines\]"
+        $out.Issues[0] | Should -Match "^##vso\[task\.logissue type=warning;sourcepath=$(Get-SourcePattern $r 'AGENTS.md');code=entry-point-lines\]entry-point-lines: \d+ lines \(limit 1\)$"
         $out.Lines[-1] | Should -Be '0 error(s), 1 warning(s)'
     }
     It 'escapes the logging command syntax in file names and messages' {
         $r = New-Fixture
         Write-File (Join-Path $r 'docs/a;b].md') "---`nbackground: true`n---`n"
-        $issue = @((Get-CiOutput $r).Issues | Where-Object { $_ -like '*code=frontmatter-present*' })
+        $issue = @((Get-CiOutput $r @{ Mode = 'enforce' }).Issues | Where-Object { $_ -like '*code=frontmatter-present*' })
         $issue.Count | Should -Be 1
         $issue[0] | Should -Match "^##vso\[task\.logissue type=error;sourcepath=$(Get-SourcePattern $r 'docs/a;b].md');code=frontmatter-present\]"
         $issue[0] | Should -Match 'sourcepath=[^;\]]*[\\/]docs[\\/]a%3Bb%5D\.md;'
@@ -142,14 +142,21 @@ Describe 'Test-OctoAgentDocs -Ci gate' {
         $global:LASTEXITCODE | Should -Be 0
         $out.Issues | Should -Match 'type=warning'
     }
-    It 'passes with exit code 0 in mode logOnly with errors, and emits the same issues as enforce' {
+    It 'passes with exit code 0 in mode logOnly with errors, and writes them as marked warnings' {
         $r = New-Fixture -NoFix
         $global:LASTEXITCODE = 7
         $logOnly = Get-CiOutput $r @{ Mode = 'logOnly' }
         $logOnly.Error | Should -BeNullOrEmpty
         $global:LASTEXITCODE | Should -Be 0
         $enforce = Get-CiOutput $r @{ Mode = 'enforce' }
-        $logOnly.Issues | Should -Be $enforce.Issues
+        $enforce.Issues | Should -Match '^##vso\[task\.logissue type=error;'
+        # The same findings in the same order; only the type and the marker differ.
+        $logOnly.Issues | Should -Be @($enforce.Issues | ForEach-Object { $_.Replace('logissue type=error;', 'logissue type=warning;') + ' (error in enforce)' })
+        $logOnly.Lines[-1] | Should -Be '1 error(s) (shown as warnings in logOnly), 0 warning(s) - mode logOnly: the step does not fail'
+        # -Json keeps the severity: only the -Ci rendering changes.
+        $json = Get-Result $r @{ Mode = 'logOnly' }
+        @($json.data.findings.severity) | Should -Be @('error')
+        $json.data.summary.errors | Should -Be 1
     }
     It 'never sets a task result itself' {
         $out = Get-CiOutput (New-Fixture -NoFix) @{ Mode = 'enforce' }

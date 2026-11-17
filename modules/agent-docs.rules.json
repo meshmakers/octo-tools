@@ -184,7 +184,7 @@
     "routing-current": {
       "tier": 2,
       "why": "The routing table is derived from the docs' frontmatter; a stale table routes an agent to the wrong place or nowhere.",
-      "fix": "Run Test-OctoAgentDocs -Fix to regenerate the block between the routing markers."
+      "fix": "Run Test-OctoAgentDocs -Fix to regenerate the block between the routing markers; where the markers are missing, add them by hand first."
     },
     "docs-count": {
       "tier": 4,
@@ -194,7 +194,7 @@
     "shim-valid": {
       "tier": 2,
       "why": "Claude Code loads CLAUDE.md; once AGENTS.md is canonical the shim must import it and carry nothing else, or two files compete.",
-      "fix": "Run Test-OctoAgentDocs -Fix; add -Force only after moving any real content out of CLAUDE.md."
+      "fix": "Run Test-OctoAgentDocs -Fix; add -Force only after moving any real content out of CLAUDE.md. A claude.md whose name differs only in case must be renamed to CLAUDE.md first."
     },
     "required-sections": {
       "tier": 2,

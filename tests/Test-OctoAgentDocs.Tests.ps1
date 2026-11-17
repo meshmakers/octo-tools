@@ -74,7 +74,7 @@ Describe 'configuration cascade' {
         $f = Get-RuleFinding $res 'entry-point-lines'
         $f.Count | Should -Be 1
         $f[0].severity | Should -Be 'error'
-        $f[0].message | Should -Match 'budget of 3'
+        $f[0].message | Should -Match '\(limit 3\)'
         # Other rules keep every built-in option.
         $res.data.ruleSet.'line-length'[1].max | Should -Be 120
     }
@@ -183,10 +183,10 @@ Describe 'entry point' {
         $r = New-Fixture
         Set-Override $r '{"schemaVersion":1,"rules":{"entry-point-lines":["warn",{"max":5}],"entry-point-characters":["error",{"max":100000,"warnAt":50}]}}'
         $res = Get-Result $r
-        (Get-RuleFinding $res 'entry-point-lines')[0].message | Should -Match 'lines over the budget of 5'
+        (Get-RuleFinding $res 'entry-point-lines')[0].message | Should -Match '^\d+ lines \(limit 5\)$'
         $c = Get-RuleFinding $res 'entry-point-characters'
         $c[0].severity | Should -Be 'warn'
-        $c[0].message | Should -Match 'past the 50 target'
+        $c[0].message | Should -Match '^\d+ characters \(target 50, limit 100000\)$'
     }
     It 'counts lines as wc -l does: an empty file is zero lines, a trailing newline adds none' {
         $r = New-Fixture
@@ -205,8 +205,8 @@ Describe 'entry point' {
         )
         $f = Get-RuleFinding (Get-Result $r) 'line-length'
         $f.Count | Should -Be 3
-        $f[0].message | Should -Match '^line is 60 characters, limit 40'
-        $f[1].message | Should -Match '^table row is \d+ characters, limit 60 - shorten the globs'
+        $f[0].message | Should -Be 'line is 60 characters (limit 40)'
+        $f[1].message | Should -Match '^table row is \d+ characters \(limit 60\)$'
         $f[2].message | Should -Match '2 further over-length lines not listed'
     }
 }
@@ -214,7 +214,7 @@ Describe 'entry point' {
 Describe 'docs and frontmatter' {
     It 'reports <case>' -ForEach @(
         @{ case = 'a missing description'; doc = "---`napplies_to: src/**`n---`n"; rule = 'frontmatter-present'; expect = "No 'description'" }
-        @{ case = 'a description over the limit'; doc = "---`ndescription: $('d' * 200)`napplies_to: src/**`n---`n"; rule = 'frontmatter-present'; expect = 'description is 200 characters, limit 160' }
+        @{ case = 'a description over the limit'; doc = "---`ndescription: $('d' * 200)`napplies_to: src/**`n---`n"; rule = 'frontmatter-present'; expect = '^description is 200 characters \(limit 160\)$' }
         @{ case = 'a doc that is both routed and background'; doc = "---`ndescription: D.`napplies_to: src/**`nbackground: true`n---`n"; rule = 'doc-reachable'; expect = 'not both and not neither' }
         @{ case = 'a doc that is neither'; doc = "---`ndescription: D.`n---`n"; rule = 'doc-reachable'; expect = 'not both and not neither' }
         @{ case = 'a body without a closing fence as having no frontmatter'; doc = "---`ndescription: D.`napplies_to: src/**`n# Body"; rule = 'frontmatter-present'; expect = "No 'description'" }
@@ -270,7 +270,7 @@ Describe 'routing table and -Fix' {
     It 'reports missing markers instead of guessing where the table goes' {
         $r = New-Fixture -NoFix
         Write-File (Join-Path $r 'AGENTS.md') ($script:Entry -replace '<!--.*-->\n', '')
-        (Get-RuleFinding (Get-Result $r) 'routing-current')[0].message | Should -Match '^Add <!-- >>> generated'
+        (Get-RuleFinding (Get-Result $r) 'routing-current')[0].message | Should -Match '^Routing markers <!-- >>> generated: routing --> and <!-- <<< end generated: routing --> are missing'
     }
     It 'ignores a marker pair quoted in a fenced example' {
         $r = New-Fixture -NoFix
@@ -334,13 +334,13 @@ Describe 'CLAUDE.md shim' {
         (Get-Result $r @{ Fix = $true }).data.filesWritten | Should -Contain 'CLAUDE.md'
         Get-Content -LiteralPath $p -Raw | Should -Be $script:Shim
     }
-    It 'refuses to replace real content without -Force, and gives the same advice with and without -Fix' {
+    It 'refuses to replace real content without -Force, and reports the same finding with and without -Fix' {
         $r = New-Fixture
         $p = Join-Path $r 'CLAUDE.md'
         Write-File $p "# Real`n"
         $plain = (Get-RuleFinding (Get-Result $r) 'shim-valid')[0].message
         $fix = (Get-RuleFinding (Get-Result $r @{ Fix = $true }) 'shim-valid')[0].message
-        $plain | Should -Match 'migrate it by hand, or run -Fix -Force'
+        $plain | Should -Be 'Has real content while AGENTS.md is canonical'
         $fix | Should -Be $plain
         Get-Content -LiteralPath $p -Raw | Should -Be "# Real`n"
         Test-OctoAgentDocs -Path $r -Fix -Force 6>$null | Out-Null
@@ -352,7 +352,7 @@ Describe 'CLAUDE.md shim' {
         Write-File (Join-Path $r 'claude.md') "# Real`n"
         $f = Get-RuleFinding (Get-Result $r @{ Fix = $true }) 'shim-valid'
         $f[0].file | Should -Be 'claude.md'
-        $f[0].message | Should -Match 'rename it'
+        $f[0].message | Should -Be "Named 'claude.md', not CLAUDE.md"
         @(Get-ChildItem -LiteralPath $r -File).Name | Should -Contain 'claude.md'
         Get-Content -LiteralPath (Join-Path $r 'claude.md') -Raw | Should -Be "# Real`n"
     }
@@ -426,7 +426,7 @@ Describe 'reference-to-shim' {
         $f = Get-RuleFinding $res 'reference-to-shim'
         $f.Count | Should -Be 2
         $f.severity | Should -Be @('warn', 'warn')
-        $f[0].message | Should -Match "reference '../sub/AGENTS.md' instead"
+        $f[0].message | Should -Match "points at a shim \(use '\.\./sub/AGENTS\.md'\)$"
         { Test-OctoAgentDocs -Path $r -Mode enforce 6>$null } | Should -Not -Throw
     }
     It 'stays quiet while CLAUDE.md is still the real entry point' {
@@ -481,7 +481,7 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         $f.Count | Should -Be 1
         $f[0].file | Should -Be 'docs/one.md:8'
         $f[0].severity | Should -Be 'warn'
-        $f[0].message | Should -Match "'octo-done/AGENTS.md' or the octo-done/docs/ file"
+        $f[0].message | Should -Match "points at a shim \(use 'octo-done/AGENTS\.md'\)$"
         (Get-RuleFinding $res 'reference-resolves').Count | Should -Be 0
     }
     It 'warns on a sibling that has not migrated, also when reference-to-shim is raised to error' {
@@ -491,7 +491,7 @@ Describe 'sibling CLAUDE.md mentions in prose' {
         $f = Get-RuleFinding (Get-WorkspaceResult $self) 'reference-to-shim'
         $f.Count | Should -Be 1
         $f[0].severity | Should -Be 'warn'
-        $f[0].message | Should -Match 'octo-legacy has not migrated yet'
+        $f[0].message | Should -Match 'octo-legacy has not migrated to AGENTS\.md yet$'
     }
     It 'reports a sibling name that is not a repository in the workspace' {
         $self = Initialize-Workspace
@@ -790,14 +790,14 @@ Describe 'no-eager-import' {
 
 Describe 'globs-match' {
     BeforeAll {
-        function Set-Doc { param([string]$Root, [string]$Applies, [string]$Extra = '') Write-File (Join-Path $Root 'docs/one.md') "---`ndescription: One.`napplies_to: $Applies`n$Extra---`n# One`n" }
+        function Write-TestDoc { param([string]$Root, [string]$Applies, [string]$Extra = '') Write-File -Path (Join-Path $Root 'docs/one.md') -Text "---`ndescription: One.`napplies_to: $Applies`n$Extra---`n# One`n" }
     }
     It 'is silent when every glob matches a file' {
         (Get-RuleFinding (Get-Result (New-Fixture)) 'globs-match').Count | Should -Be 0
     }
     It 'reports a glob that matches nothing with doc, glob and line' {
         $r = New-Fixture
-        Set-Doc $r 'moved/**'
+        Write-TestDoc -Root $r -Applies 'moved/**'
         $f = Get-RuleFinding (Get-Result $r) 'globs-match'
         $f.Count | Should -Be 1
         $f[0].file | Should -Be 'docs/one.md:3'
@@ -807,10 +807,10 @@ Describe 'globs-match' {
     }
     It 'reports only the globs that do not match' {
         $r = New-Fixture
-        Set-Doc $r 'src/**, gone/**, {src,lib}/*.cs, old/{a,b}.cs'
+        Write-TestDoc -Root $r -Applies 'src/**, gone/**, {src,lib}/*.cs, old/{a,b}.cs'
         @((Get-RuleFinding (Get-Result $r) 'globs-match').message) | Should -Be @(
-            "applies_to glob 'gone/**' matches no file - the doc is routed to code that is not there"
-            "applies_to glob 'old/{a,b}.cs' matches no file - the doc is routed to code that is not there")
+            "applies_to glob 'gone/**' matches no file"
+            "applies_to glob 'old/{a,b}.cs' matches no file")
     }
     It 'reads <glob> as <expect>' -ForEach @(
         @{ glob = 'src/*.cs'; expect = 'matching src/app.cs'; hit = $true }
@@ -827,13 +827,13 @@ Describe 'globs-match' {
         $r = New-Fixture
         Write-File (Join-Path $r 'src/deep/x/y.cs') 'x'
         Write-File (Join-Path $r 'lib/deep/z.cs') 'x'
-        Set-Doc $r $glob
+        Write-TestDoc -Root $r -Applies $glob
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be $(if ($hit) { 0 } else { 1 })
     }
     It 'does not count files under scan.ignore folders' {
         $r = New-Fixture
         foreach ($f in 'out/bin/a.cs', 'web/node_modules/pkg/index.js') { Write-File (Join-Path $r $f) 'x' }
-        Set-Doc $r 'out/**, web/**, **/*.js'
+        Write-TestDoc -Root $r -Applies 'out/**, web/**, **/*.js'
         @((Get-RuleFinding (Get-Result $r) 'globs-match').message).Count | Should -Be 3
     }
     It 'does not check a background doc, with or without leftover globs' {
@@ -841,7 +841,7 @@ Describe 'globs-match' {
         Write-File (Join-Path $r 'docs/one.md') "---`ndescription: One.`nbackground: true`n---`n"
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
         $r = New-Fixture
-        Set-Doc $r 'moved/**' "background: true`n"
+        Write-TestDoc -Root $r -Applies 'moved/**' -Extra "background: true`n"
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
     }
     It 'asks git in a checkout: ignored files do not count, untracked ones do' {
@@ -851,7 +851,7 @@ Describe 'globs-match' {
         Write-File (Join-Path $r 'gen/out.cs') 'x'
         Write-File (Join-Path $r 'fresh/new.cs') 'x'
         git -C $r init -q 2>$null
-        Set-Doc $r 'gen/**, fresh/**'
+        Write-TestDoc -Root $r -Applies 'gen/**, fresh/**'
         $f = Get-RuleFinding (Get-Result $r) 'globs-match'
         $f.Count | Should -Be 1
         $f[0].message | Should -Match "'gen/\*\*'"
@@ -859,7 +859,7 @@ Describe 'globs-match' {
     It 'reads quoted globs in a flow list' {
         $r = New-Fixture
         Write-File (Join-Path $r 'tests/t.cs') 'x'
-        Set-Doc $r '[src/**, "tests/**", ''src/*.cs'']'
+        Write-TestDoc -Root $r -Applies '[src/**, "tests/**", ''src/*.cs'']'
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
     }
     It 'does not count a tracked file that was deleted from the working tree' {
@@ -869,14 +869,14 @@ Describe 'globs-match' {
         git -C $r init -q 2>$null
         git -C $r add -A 2>$null
         Remove-Item -LiteralPath (Join-Path $r 'old/gone.cs')
-        Set-Doc $r 'old/**'
+        Write-TestDoc -Root $r -Applies 'old/**'
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 1
     }
     It 'walks the folder in a checkout when git is not on PATH' {
         $r = New-Fixture
         New-Item -ItemType Directory -Path (Join-Path $r '.git') -Force | Out-Null
         Write-File (Join-Path $r 'src/a.cs') 'x'
-        Set-Doc $r 'src/**, moved/**'
+        Write-TestDoc -Root $r -Applies 'src/**, moved/**'
         $path = $env:PATH
         try { $env:PATH = '' ; $f = Get-RuleFinding (Get-Result $r) 'globs-match' } finally { $env:PATH = $path }
         $f.Count | Should -Be 1
@@ -884,17 +884,17 @@ Describe 'globs-match' {
     }
     It 'reports an unclosed brace instead of failing the run' {
         $r = New-Fixture
-        Set-Doc $r 'src/{a,b'
+        Write-TestDoc -Root $r -Applies 'src/{a,b'
         @((Get-RuleFinding (Get-Result $r) 'globs-match').message | Where-Object { $_ -match "unclosed '\{'" }).Count | Should -Be 1
     }
     It 'fails enforce mode on a stale glob' {
         $r = New-Fixture
-        Set-Doc $r 'moved/**'
+        Write-TestDoc -Root $r -Applies 'moved/**'
         { Test-OctoAgentDocs -Path $r -Mode enforce 6>$null 3>$null } | Should -Throw '*error-severity finding*'
     }
     It 'can be switched off by the repository and is explained' {
         $r = New-Fixture
-        Set-Doc $r 'moved/**'
+        Write-TestDoc -Root $r -Applies 'moved/**'
         Set-Override $r '{"schemaVersion":1,"rules":{"globs-match":["off"]}}'
         (Get-RuleFinding (Get-Result $r) 'globs-match').Count | Should -Be 0
         $row = ((Test-OctoAgentDocs -Explain globs-match -Json 6>$null) | ConvertFrom-Json).data.rules[0]
@@ -919,30 +919,30 @@ Describe 'the shipped ruleset' {
 
 Describe 'opening sentence and closed set of headings' {
     BeforeAll {
-        function Set-Entry { param([string]$Root, [string]$Text) Write-File (Join-Path $Root 'AGENTS.md') $Text }
+        function Write-TestEntry { param([string]$Root, [string]$Text) Write-File -Path (Join-Path $Root 'AGENTS.md') -Text $Text }
         function Get-Entry { param([string]$Root) Get-Content -LiteralPath (Join-Path $Root 'AGENTS.md') -Raw }
         function Get-SectionMessage { param([string]$Root) @((Get-RuleFinding (Get-Result $Root) 'required-sections') | ForEach-Object { "$($_.severity): $($_.message)" }) }
     }
-    It 'reports an extra level-2 heading as an error and says where its content goes' {
+    It 'reports an extra level-2 heading as an error' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("## Rules`n", "## Rules`n`n## Repository Overview`n`nText.`n"))
-        Get-SectionMessage $r | Should -Be @("error: Section '## Repository Overview' is not a required section - move this content to docs/ or under one of the required sections")
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("## Rules`n", "## Rules`n`n## Repository Overview`n`nText.`n"))
+        Get-SectionMessage $r | Should -Be @("error: Section '## Repository Overview' is not a required section")
     }
     It 'reports headings out of order as an error' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("## Before you commit`n`n## Rules`n", "## Rules`n`n## Before you commit`n"))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("## Before you commit`n`n## Rules`n", "## Rules`n`n## Before you commit`n"))
         $m = @(Get-SectionMessage $r)
         $m.Count | Should -Be 1
         $m[0] | Should -BeLike "error: Sections out of order or repeated: *'## Rules', '## Before you commit' - the order is '## What this repo is', *"
     }
     It 'reports a missing overview heading as an error' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("## What this repo is`n`n", ''))
-        Get-SectionMessage $r | Should -Be @("error: Missing section '## What this repo is' - every repo's entry point carries it")
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("## What this repo is`n`n", ''))
+        Get-SectionMessage $r | Should -Be @("error: Missing section '## What this repo is'")
     }
     It 'allows level-3 and lower headings inside a section' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace('Run the build.', "### Tests`n`nRun them.`n`n#### Fast loop`n`nText."))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace('Run the build.', "### Tests`n`nRun them.`n`n#### Fast loop`n`nText."))
         (Get-Result $r).data.findings.Count | Should -Be 0
     }
     It 'reports <case> as an error' -ForEach @(
@@ -950,25 +950,25 @@ Describe 'opening sentence and closed set of headings' {
         @{ case = 'a changed opening sentence'; replace = 'Design rationale lives in `docs/`; read the matching file before changing the code it covers.'; expect = 'First paragraph below the title is not the opening sentence (run with -Fix)' }
     ) {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", $(if ($replace) { "$replace`n`n" } else { '' })))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("$script:Opening`n`n", $(if ($replace) { "$replace`n`n" } else { '' })))
         Get-SectionMessage $r | Should -Be @("error: $expect")
     }
     It 'accepts the sentence wrapped at any point' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace($script:Opening, $script:Opening.Replace("`n", ' ').Replace('; read', ";`nread")))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace($script:Opening, $script:Opening.Replace("`n", ' ').Replace('; read', ";`nread")))
         (Get-Result $r).data.findings.Count | Should -Be 0
     }
     It 'reports an entry point that does not start with a title' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("# Entry`n`n", ''))
-        Get-SectionMessage $r | Should -Be @("error: Does not start with a '# ' title - add one; the opening sentence goes directly below it")
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("# Entry`n`n", ''))
+        Get-SectionMessage $r | Should -Be @("error: Does not start with a '# ' title")
     }
     It 'with -Fix <case>, and a second run is clean and writes nothing' -ForEach @(
         @{ case = 'inserts a missing sentence below the title'; replace = '' }
         @{ case = 'replaces a different first paragraph'; replace = "Design rationale lives in docs/.`nSecond line.`n`n" }
     ) {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", $replace))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("$script:Opening`n`n", $replace))
         (Get-Result $r @{ Fix = $true }).data.filesWritten | Should -Be @('AGENTS.md')
         Get-Entry $r | Should -Be $script:Entry.Replace("<!-- <<< end", "| When you change | Read first |`n|---|---|`n| ``src/**`` | ``docs/one.md`` |`n<!-- <<< end")
         $again = Get-Result $r @{ Fix = $true }
@@ -977,21 +977,21 @@ Describe 'opening sentence and closed set of headings' {
     }
     It 'with -Fix replaces the whole paragraph and stops at a heading that follows without a blank line' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace("$script:Opening`n`n", "Old opening, see`n#123 for why.`n  ## What this repo is`n").Replace("## What this repo is`n`n## Read", "## Read"))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace("$script:Opening`n`n", "Old opening, see`n#123 for why.`n  ## What this repo is`n").Replace("## What this repo is`n`n## Read", "## Read"))
         Test-OctoAgentDocs -Path $r -Fix 6>$null 3>$null | Out-Null
         (Get-Entry $r).StartsWith("# Entry`n`n$script:Opening`n`n  ## What this repo is`n## Read") | Should -BeTrue
     }
     It 'compares headings with exact case' {
         $r = New-Fixture
-        Set-Entry $r ((Get-Entry $r).Replace('## Build & test', '## Build & Test'))
+        Write-TestEntry -Root $r -Text ((Get-Entry $r).Replace('## Build & test', '## Build & Test'))
         $m = @(Get-SectionMessage $r)
-        $m | Should -Contain "error: Missing section '## Build & test' - every repo's entry point carries it"
-        $m | Should -Contain "error: Section '## Build & Test' is not a required section - move this content to docs/ or under one of the required sections"
+        $m | Should -Contain "error: Missing section '## Build & test'"
+        $m | Should -Contain "error: Section '## Build & Test' is not a required section"
     }
     It 'with -Fix -WhatIf names the write and changes nothing' {
         $r = New-Fixture
         $broken = (Get-Entry $r).Replace("$script:Opening`n`n", '')
-        Set-Entry $r $broken
+        Write-TestEntry -Root $r -Text $broken
         $res = Get-Result $r @{ Fix = $true; WhatIf = $true }
         (Get-RuleFinding $res 'required-sections')[0].message | Should -Match 'would be written \(run without -WhatIf\)'
         Get-Entry $r | Should -Be $broken
@@ -999,11 +999,11 @@ Describe 'opening sentence and closed set of headings' {
     It 'with -Fix keeps CRLF line endings and leaves the headings alone' {
         $r = New-Fixture
         $text = (Get-Entry $r).Replace("$script:Opening`n`n", '').Replace("## Rules`n", "## Rules`n`n## Extra`n")
-        Set-Entry $r $text.Replace("`n", "`r`n")
+        Write-TestEntry -Root $r -Text $text.Replace("`n", "`r`n")
         Test-OctoAgentDocs -Path $r -Fix 6>$null 3>$null | Out-Null
         $after = [System.IO.File]::ReadAllText((Join-Path $r 'AGENTS.md'))
         $after | Should -Be ("# Entry`n`n$script:Opening`n`n" + $text.Substring("# Entry`n`n".Length)).Replace("`n", "`r`n")
-        Get-SectionMessage $r | Should -Be @("error: Section '## Extra' is not a required section - move this content to docs/ or under one of the required sections")
+        Get-SectionMessage $r | Should -Be @("error: Section '## Extra' is not a required section")
     }
     It 'checks a CLAUDE.md entry point only for missing sections, and never writes into it' {
         $r = New-Fixture -Legacy

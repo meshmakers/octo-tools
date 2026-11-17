@@ -74,6 +74,7 @@ function ConvertTo-OctoAgentDocsProse {
     outside them. With -KeepLineNumbers each removed block becomes the same number of empty
     lines, so a line number in the result is a line number in the file.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'm', Justification = '[regex]::Replace passes the match to its evaluator; the evaluator that drops the block must declare it and does not need it')]
     param([AllowNull()][AllowEmptyString()][string]$Text, [switch]$KeepLineNumbers, [switch]$StripComments)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
     $blank = if ($KeepLineNumbers) { { param($m) "`n" * ([regex]::Matches($m.Value, "`n").Count) } } else { { param($m) '' } }
