@@ -144,6 +144,7 @@ An alternative to the docker-compose infrastructure: MongoDB/RabbitMQ/CrateDB, t
 - `Push-AllGitRepos` - Push all repositories
 - `Get-AllGitRepStatus` - Check status of all repositories
 - `Invoke-CleanAllGitRepos` - Clean all repositories (use `-force` to ignore pending changes)
+- `New-TestBranch` / `Sync-TestBranch` / `Remove-TestBranch -MinorVersion <n> -Description <word> [-branch <folder>]` - Pre-release line `test/0.<n>-<word>` in the repositories of `Invoke-CloneMainRepos` (one list, `Get-OctoMainRepoNames` in `modules/OctoTestBranch.psm1`; repos the folder lacks are skipped). Without `-branch` the folder is `<parent of rootPath>/0.<n>-<word>`; an explicit `-branch` (relative to `$rootPath`) overrides. `New-TestBranch` fetches and branches from `origin/main`, lists repos with uncommitted tracked changes (`status: Dirty`) instead of branching and exits non-zero (AB#9259, `tests/TestBranch.Tests.ps1`)
 - `Compare-CkVersions <otherBranch>` - Compare Construction Kit model versions (`ckModel.yaml`) between the current checkout and another branch, grouped System-first and color coded (green=equal, yellow=minor/patch, red=major, cyan=only in one). Resolves the path relative to `$Global:ROOTPATH`, e.g. `Compare-CkVersions ../main` or `Compare-CkVersions branches/test`
 
 ### octo-devstack (local stack daemon)

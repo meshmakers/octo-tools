@@ -519,6 +519,30 @@ Remove-OctoEnvironment -env ab8625-enum-null
   `<base>/.octo/claims/<repo>.md` (`branches/main/.octo/claims` or `$rootPath/.octo/claims`; with `Environment:` /
   `Worktree:` lines, format documented by octo-claude-pm), never in the environment folder.
 
+# Pre-release lines (test branches)
+
+`New-TestBranch`, `Sync-TestBranch` and `Remove-TestBranch` manage a pre-release line `test/0.<n>-<description>`
+(`-MinorVersion` 2-999, `-Description` one word, letters/digits/`_`) in all repositories of `Invoke-CloneMainRepos`
+(one shared list, `Get-OctoMainRepoNames` in `modules/OctoTestBranch.psm1`: `mm-common` and the other non-`octo-*`
+repositories included; a repository the directory does not hold is skipped).
+
+- **Directory.** Without `-branch` the checkouts live in `<parent of rootPath>/0.<n>-<description>`, e.g.
+  `meshmakers/0.3-demo` next to `meshmakers/main`. Create it with `Invoke-CloneMainRepos -branch ../0.3-demo`. An explicit
+  `-branch <folder>` (relative to `$rootPath`) is used as given, so existing lines such as `dev` or `demo` keep working.
+- **Fresh main as base.** `New-TestBranch` runs `git fetch origin` and branches explicitly from `origin/main`, never from
+  what the checkout has. A repository with uncommitted changes to tracked files is not branched: it is listed with its
+  reason (console and `-Json`, `status: Dirty`) and the cmdlet sets a non-zero exit code. A branch that already exists is
+  switched to. Pushes unless `-NoPush`.
+
+```powershell
+Invoke-CloneMainRepos -branch ../0.3-demo
+New-TestBranch -MinorVersion 3 -Description demo        # test/0.3-demo in meshmakers/0.3-demo
+Sync-TestBranch -MinorVersion 3 -Description demo       # merge origin/main into the line
+Remove-TestBranch -MinorVersion 3 -Description demo     # when merged or abandoned (-LocalOnly keeps origin)
+```
+
+Tests: `tests/TestBranch.Tests.ps1`.
+
 # Working on many tenants
 
 `Invoke-OctoTenantSweep` runs one octo-cli command against a list of tenants with per-tenant authentication
