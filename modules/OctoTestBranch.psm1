@@ -52,6 +52,7 @@ function Resolve-OctoTestBranchRoot {
     .PARAMETER Branch
         Explicit folder relative to RootPath. Empty: <parent of RootPath>/0.<n>-<description>.
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][int]$MinorVersion,
         [Parameter(Mandatory = $true)][string]$Description,
@@ -62,7 +63,7 @@ function Resolve-OctoTestBranchRoot {
     if ($Branch) {
         return Join-Path -Path $RootPath -ChildPath $Branch
     }
-    $parent = Split-Path -Parent ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($RootPath)))
+    $parent = Split-Path -Parent ([IO.Path]::TrimEndingDirectorySeparator($PSCmdlet.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RootPath)))
     return Join-Path -Path $parent -ChildPath "0.$MinorVersion-$Description"
 }
 

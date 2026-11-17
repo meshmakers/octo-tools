@@ -114,6 +114,12 @@ function New-TestBranch {
                 }
                 if ($LASTEXITCODE -ne 0) { throw "Failed to checkout branch $branchName" }
                 if (-not $Json) { Write-Host "  Switched to existing branch '$branchName'" -ForegroundColor Blue }
+                # A branch made earlier with -NoPush is published by a later run without it
+                if (-not $remoteBranchExists -and -not $NoPush) {
+                    git -C $path push -u origin $branchName 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw "Failed to push branch $branchName to origin" }
+                    if (-not $Json) { Write-Host "  Local branch pushed to origin" -ForegroundColor Green }
+                }
                 $status[$directoryName] = @{ Success = $true; Existed = $true; Status = 'Switched'; Reason = '' }
                 continue
             }
@@ -192,7 +198,7 @@ function New-TestBranch {
             }
         })
 
-        $data = [ordered]@{
+        $data = New-OctoActionResult -Success ($problems -eq 0) -ExitCode $global:LASTEXITCODE -Extra @{
             branchName   = $branchName
             root         = $branchRootPath
             repositories = $repositories
@@ -206,6 +212,9 @@ function New-TestBranch {
         }
 
         Write-OctoJson -Command 'New-TestBranch' -Data $data
+        if ($problems -gt 0) {
+            Write-Error "$problems repository(ies) were not branched; see data.repositories." -ErrorAction Continue
+        }
         return
     }
 
