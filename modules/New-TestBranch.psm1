@@ -9,7 +9,7 @@ Directory: without -branch the directory is <parent of rootPath>/0.<n>-<descript
 an explicit -branch (relative to rootPath) is used as given, so existing checkouts such as dev or demo keep working.
 Base: every repository runs 'git fetch origin' and the branch starts explicitly from origin/main, never from
 whatever is checked out. A repository with uncommitted changes to tracked files is not branched; it is listed
-with its reason (console and -Json) and the cmdlet sets a non-zero exit code. A branch that already exists
+with its reason (console and -Json) and the cmdlet ends with a terminating error (non-zero exit code of `pwsh -Command`). A branch that already exists
 (locally or on origin) is switched to, not recreated.
 Branch naming rules:
 - Prefix 'test/' is mandatory
@@ -93,6 +93,12 @@ function New-TestBranch {
             # Fresh remote state: the branch starts from origin/main, not from what is checked out
             git -C $path fetch origin 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Failed to fetch from origin" }
+            # 'fetch origin' follows remote.origin.fetch and may leave origin/main stale: fetch the base explicitly
+            git -C $path fetch origin '+refs/heads/main:refs/remotes/origin/main' 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                git -C $path fetch origin '+refs/heads/master:refs/remotes/origin/master' 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "Failed to fetch origin/main (or origin/master)" }
+            }
 
             # Tracked changes would be carried onto the new branch (or block the switch): report, do not branch
             $dirty = @(git -C $path status --porcelain --untracked-files=no 2>$null)
@@ -100,6 +106,11 @@ function New-TestBranch {
                 $current = git -C $path branch --show-current 2>$null
                 if (-not $Json) { Write-Host "  Uncommitted changes on '$current' - not branched" -ForegroundColor Red }
                 $status[$directoryName] = @{ Success = $false; Existed = $false; Status = 'Dirty'; Reason = "uncommitted changes ($($dirty.Count) file(s)) on branch '$current'" }
+                continue
+            }
+
+            if (-not $PSCmdlet.ShouldProcess("$directoryName", "Create or switch to branch '$branchName' from origin/main" + $(if ($NoPush) { '' } else { ' and push it' }))) {
+                $status[$directoryName] = @{ Success = $true; Existed = $false; Status = 'Skipped'; Reason = 'WhatIf' }
                 continue
             }
 
@@ -172,6 +183,9 @@ function New-TestBranch {
                 if (-not $Json) { Write-Host "  OK $key - Switched to existing branch '$branchName'" -ForegroundColor Yellow }
                 $switchedCount++
             }
+            'Skipped' {
+                if (-not $Json) { Write-Host "  -- $key - Skipped ($($repoStatus.Reason))" -ForegroundColor Gray }
+            }
             'Dirty' {
                 if (-not $Json) { Write-Host "  !! $key - Not branched: $($repoStatus.Reason)" -ForegroundColor Red }
                 $dirtyCount++
@@ -213,7 +227,7 @@ function New-TestBranch {
 
         Write-OctoJson -Command 'New-TestBranch' -Data $data
         if ($problems -gt 0) {
-            Write-Error "$problems repository(ies) were not branched; see data.repositories." -ErrorAction Continue
+            $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new([Exception]::new("$problems repository(ies) were not branched; see data.repositories."), 'TestBranchNotCreated', [System.Management.Automation.ErrorCategory]::InvalidResult, $branchName))
         }
         return
     }
@@ -221,7 +235,8 @@ function New-TestBranch {
     Write-Host ""
     Write-Host "Done. Branch '$branchName': $createdCount created, $switchedCount switched, $dirtyCount dirty (not branched), $failedCount failed" -ForegroundColor Cyan
     if ($problems -gt 0) {
-        Write-Error "$problems repository(ies) were not branched; see the summary above." -ErrorAction Continue
+        # A terminating error: pwsh -Command takes its exit code from $?, which Write-Error -ErrorAction Continue leaves true
+        $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new([Exception]::new("$problems repository(ies) were not branched; see the summary above."), 'TestBranchNotCreated', [System.Management.Automation.ErrorCategory]::InvalidResult, $branchName))
     }
 }
 
