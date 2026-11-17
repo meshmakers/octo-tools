@@ -144,12 +144,12 @@
     "entry-point-characters": {
       "tier": 4,
       "why": "A line budget can be beaten by a few very long lines; characters measure what the agent actually loads.",
-      "fix": "Move long passages and tables into docs/ and route them with applies_to."
+      "fix": "Move long passages and tables into docs/ and route them with applies_to, or shorten the longest lines."
     },
     "line-length": {
       "tier": 4,
       "why": "Lines wider than a screen are hard to review in a diff, and review is the only defence for instruction files.",
-      "fix": "Wrap prose at the limit; tables and lines without whitespace have their own allowance."
+      "fix": "Wrap prose at the limit; lines without whitespace are exempt. Table rows have their own allowance; a row of the generated routing table gets shorter through the globs or the description in the doc's frontmatter."
     },
     "doc-size": {
       "tier": 4,
@@ -179,12 +179,12 @@
     "reference-to-shim": {
       "tier": 3,
       "why": "A reference to a CLAUDE.md that has become the shim still resolves, but an agent that opens it gets only '@AGENTS.md' - the pointer degrades without breaking.",
-      "fix": "Point the reference at AGENTS.md instead; a sibling repository that has not migrated yet is left alone."
+      "fix": "Point the reference at AGENTS.md or at the docs/ file that holds the section. A sibling repository that has not migrated yet gets only a warning; repoint the reference once it has an AGENTS.md."
     },
     "routing-current": {
       "tier": 2,
       "why": "The routing table is derived from the docs' frontmatter; a stale table routes an agent to the wrong place or nowhere.",
-      "fix": "Run Test-OctoAgentDocs -Fix to regenerate the block between the routing markers."
+      "fix": "Run Test-OctoAgentDocs -Fix to regenerate the block between the routing markers; where the markers are missing, add them by hand first."
     },
     "docs-count": {
       "tier": 4,
@@ -194,12 +194,12 @@
     "shim-valid": {
       "tier": 2,
       "why": "Claude Code loads CLAUDE.md; once AGENTS.md is canonical the shim must import it and carry nothing else, or two files compete.",
-      "fix": "Run Test-OctoAgentDocs -Fix; add -Force only after moving any real content out of CLAUDE.md."
+      "fix": "Run Test-OctoAgentDocs -Fix; add -Force only after moving any real content out of CLAUDE.md. A claude.md whose name differs only in case must be renamed to CLAUDE.md first."
     },
     "required-sections": {
       "tier": 2,
       "why": "Every repository's AGENTS.md opens with the same sentence and carries exactly the same level-2 headings in the same order, so an agent finds build, commit and rules in the same place everywhere.",
-      "fix": "Run Test-OctoAgentDocs -Fix to write the opening sentence below the title. Add, rename or reorder '## ' headings by hand, and move any other level-2 section to docs/ or under one of the required sections; the checker never writes headings or section text."
+      "fix": "Start the file with a '# ' title. Run Test-OctoAgentDocs -Fix to write the opening sentence below the title. Add, rename or reorder '## ' headings by hand, and move any other level-2 section to docs/ or under one of the required sections; the checker never writes headings or section text."
     },
     "no-invisible-characters": {
       "tier": 1,

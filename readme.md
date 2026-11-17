@@ -750,10 +750,14 @@ lives in the branch under review. `Get-Help Test-OctoAgentDocs -Full` has the re
 ## In a pipeline
 
 `-Ci` writes Azure DevOps logging commands instead of the coloured report: one
-`##vso[task.logissue]` line per finding, `type=error` or `type=warning` after the finding's
-severity, with `sourcepath` (absolute, as the agent expects it), `linenumber` when the finding
-has one, `code=<rule id>`, and the rule id with the finding as the message. After the issues it
-explains each rule that fired once, as plain text (why and how to fix), then prints the totals.
+`##vso[task.logissue]` line per finding with `sourcepath` (absolute, as the agent expects it),
+`linenumber` when the finding has one, `code=<rule id>`, and the rule id with the finding as the
+message. The message names only what is wrong (`26053 characters (limit 25000)`); after the
+issues each rule that fired is explained once, as plain text (why and how to fix), then the
+totals. A warning is `type=warning`. An error is `type=error` in mode `enforce`; in mode
+`logOnly`, where the step does not fail, it is `type=warning` with `(error in enforce)` at the
+end of its message, so a green build shows no red error entries, and the totals say how many
+errors were shown as warnings. `-Json` and the report without `-Ci` keep the severity as it is.
 The name is `-Ci` because the output is Azure DevOps only for now.
 
 `-Path` is the repository folder. With a single checkout that is `$(Build.SourcesDirectory)`; a
@@ -769,8 +773,8 @@ Test-OctoAgentDocs -Path $(Build.SourcesDirectory)/octo-common-services -Ci -Mod
 
 ```text
 Agent docs check: octo-common-services (entry point: AGENTS.md, mode: enforce)
-##vso[task.logissue type=error;sourcepath=/home/vsts/work/1/s/docs/build.md;linenumber=3;code=globs-match]globs-match: applies_to glob 'src/Build/**' matches no file - the doc is routed to code that is not there
-##vso[task.logissue type=warning;sourcepath=/home/vsts/work/1/s/docs/;code=docs-count]docs-count: 13 routed docs (limit 12) - the routing table needs grouping
+##vso[task.logissue type=error;sourcepath=/home/vsts/work/1/s/docs/build.md;linenumber=3;code=globs-match]globs-match: applies_to glob 'src/Build/**' matches no file
+##vso[task.logissue type=warning;sourcepath=/home/vsts/work/1/s/docs/;code=docs-count]docs-count: 13 routed docs (limit 12)
 Why and how to fix, per rule:
   globs-match - why: A glob that matches no file routes an agent to a doc for code that was moved or renamed, ... fix: Update the glob to the new location, or remove it; ...
   docs-count - why: ... fix: ...
@@ -778,10 +782,21 @@ Sibling rules skipped: no sibling repository beside this checkout, so references
 1 error(s), 1 warning(s) - mode enforce: the step fails
 ```
 
+The same repository in mode `logOnly`:
+
+```text
+Agent docs check: octo-common-services (entry point: AGENTS.md, mode: logOnly)
+##vso[task.logissue type=warning;sourcepath=/home/vsts/work/1/s/docs/build.md;linenumber=3;code=globs-match]globs-match: applies_to glob 'src/Build/**' matches no file (error in enforce)
+##vso[task.logissue type=warning;sourcepath=/home/vsts/work/1/s/docs/;code=docs-count]docs-count: 13 routed docs (limit 12)
+...
+1 error(s) (shown as warnings in logOnly), 1 warning(s) - mode logOnly: the step does not fail
+```
+
 - **Gate.** Unlike `-Explain`, `-Ci` keeps the gate: in mode `enforce` an error-severity
   finding throws and sets exit code 1. Warnings never change the exit code, in either mode, and
   `-Ci` sets no task result itself (no `task.complete`), so a step with warnings only succeeds.
-  In mode `logOnly` the same issues are written and the exit code is 0.
+  In mode `logOnly` the same findings are written, errors as marked warnings, and the exit
+  code is 0.
 - **`-RepositoryName`.** A pipeline checks out into a folder named `s`; pass the real name so the
   report, the JSON and the exception name the repository, and a mention of its own name in prose
   is not taken for a sibling. Without it the folder name is used, as before.

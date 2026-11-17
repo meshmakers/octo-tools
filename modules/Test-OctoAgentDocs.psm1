@@ -219,7 +219,9 @@ function Test-OctoAgentDocs {
 
     .PARAMETER Ci
     Azure DevOps output for a pipeline step: one '##vso[task.logissue]' line per finding
-    (error or warning, with file, line, rule id, why and fix), then the totals. Unlike
+    (with file, line and rule id), why and fix once per rule that fired, then the totals. An
+    error-severity finding is type=error in mode enforce; in mode logOnly it is type=warning
+    with '(error in enforce)' in its message, so a step that passes shows no errors. Unlike
     -Explain the gate stays: in mode enforce an error-severity finding throws and sets exit
     code 1; warnings never change the exit code. When no sibling repository lies beside the
     checkout, one line says the sibling rules were skipped. Cannot be combined with -Json.
@@ -287,11 +289,11 @@ function Test-OctoAgentDocs {
     }
 
     $findings = [AgentDocsFindings]::new($rules)
-    if (-not $repo.EntryPath) { $findings.Add('required-sections', '', 'Neither AGENTS.md nor CLAUDE.md exists - the repository has no entry point') }
+    if (-not $repo.EntryPath) { $findings.Add('required-sections', '', 'Neither AGENTS.md nor CLAUDE.md exists') }
     $shim = Test-ClaudeShim -Rules $rules -Repo $repo -Findings $findings -Fix:$Fix -Force:$Force
     $briefName = Get-OctoAgentDocsConstant BriefName
     if (Test-Path -LiteralPath (Join-Path $root $briefName)) {
-        $findings.Add('migration-pending', $briefName, 'Migration brief is still present - follow its steps and delete it in the migration commit')
+        $findings.Add('migration-pending', $briefName, 'Migration brief is still present')
     }
     $routes = Test-DocsFolder -Rules $rules -Repo $repo -Findings $findings
     Test-GlobMatch -Rules $rules -Repo $repo -Findings $findings
@@ -362,10 +364,10 @@ function Test-ClaudeShim {
 
     # On a case-insensitive file system writing CLAUDE.md would overwrite a 'claude.md'.
     $alias = $Repo.RootNames | Where-Object { $_ -ieq 'CLAUDE.md' -and $_ -cne 'CLAUDE.md' } | Select-Object -First 1
-    if ($alias) { $Findings.Add('shim-valid', $alias, "Named '$alias', not CLAUDE.md - rename it before -Fix can write the shim"); return $verdict }
+    if ($alias) { $Findings.Add('shim-valid', $alias, "Named '$alias', not CLAUDE.md"); return $verdict }
     if ($verdict -eq 'ok') { return $verdict }
     if ($Repo.HasClaude -and -not $Force -and -not (Test-OctoAgentDocsShimLike $current)) {
-        $Findings.Add('shim-valid', 'CLAUDE.md', 'Has real content while AGENTS.md is canonical - migrate it by hand, or run -Fix -Force to replace it with the shim')
+        $Findings.Add('shim-valid', 'CLAUDE.md', 'Has real content while AGENTS.md is canonical')
     }
     elseif (-not $Fix) { $Findings.Add('shim-valid', 'CLAUDE.md', "$(if ($Repo.HasClaude) { 'CLAUDE.md must contain exactly the shim and nothing else' } else { 'CLAUDE.md shim is absent' }) (run with -Fix)") }
     elseif (-not (Update-ClaudeShim -Repo $Repo -Content "$shim`n")) { $Findings.Add('shim-valid', 'CLAUDE.md', 'CLAUDE.md shim would be written (run without -WhatIf)') }
@@ -393,16 +395,16 @@ function Test-DocsFolder {
         $fm = Get-Frontmatter -Content $content
         $rel = "docs/$($d.Name)"
         if (-not $fm['description']) { $Findings.Add('frontmatter-present', $rel, "No 'description' in frontmatter") }
-        elseif ($fm['description'].Length -gt $maxDescription) { $Findings.Add('frontmatter-present', $rel, "description is $($fm['description'].Length) characters, limit $maxDescription - shorten it to one scannable line") }
+        elseif ($fm['description'].Length -gt $maxDescription) { $Findings.Add('frontmatter-present', $rel, "description is $($fm['description'].Length) characters (limit $maxDescription)") }
         $hasRoutes = [bool]$fm['applies_to']
         if (-not ($hasRoutes -xor ($fm['background'] -match '^(true|yes)$'))) { $Findings.Add('doc-reachable', $rel, "Needs either 'applies_to' globs or 'background: true', not both and not neither") }
         if ($content.Length -gt $maxCharacters) {
-            $Findings.Add('doc-size', $rel, "$($content.Length) characters (limit $maxCharacters) - loaded whole whenever this doc is routed. Trim it; split only if it covers more than one topic; or raise the limit in .agent-docs.json")
+            $Findings.Add('doc-size', $rel, "$($content.Length) characters (limit $maxCharacters)")
         }
         if ($hasRoutes) { $routes.Add([ordered]@{ file = $rel; globs = (Split-GlobList -Value $fm['applies_to']); description = [string]$fm['description'] }) }
     }
     $maxDocs = $Rules.Option('docs-count', 'max')
-    if ($routes.Count -gt $maxDocs) { $Findings.Add('docs-count', 'docs/', "$($routes.Count) routed docs (limit $maxDocs) - the routing table needs grouping") }
+    if ($routes.Count -gt $maxDocs) { $Findings.Add('docs-count', 'docs/', "$($routes.Count) routed docs (limit $maxDocs)") }
     return , $routes
 }
 
@@ -423,7 +425,7 @@ function Test-GlobMatch {
             if (-not $pattern) { $Findings.Add('globs-match', $at, "applies_to glob '$glob' has an unclosed '{'"); continue }
             $regex = [regex]::new($pattern)
             if (-not $files.Where({ $regex.IsMatch($_) }, 'First')) {
-                $Findings.Add('globs-match', $at, "applies_to glob '$glob' matches no file - the doc is routed to code that is not there")
+                $Findings.Add('globs-match', $at, "applies_to glob '$glob' matches no file")
             }
         }
     }
@@ -530,7 +532,7 @@ function Test-InvisibleCharacter {
             $hits = [regex]::Matches($content, $invisible[$kind])
             if ($hits.Count -eq 0) { continue }
             $line = ($content.Substring(0, $hits[0].Index) -split "`n").Count
-            $Findings.Add('no-invisible-characters', "$($Repo.Relative($f.FullName)):$line", "$($hits.Count) $kind(s) - invisible to a reviewer, not to a model. Remove them")
+            $Findings.Add('no-invisible-characters', "$($Repo.Relative($f.FullName)):$line", "$($hits.Count) $kind(s)")
         }
     }
 }
@@ -556,7 +558,7 @@ function Test-EagerImport {
                 # '\ ' is an escaped space inside the path, as Claude Code reads it.
                 $target = ($m.Groups[1].Value.Replace('\ ', '_') -replace '#.*$', '').TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '"', "'")
                 if ($target -match '^(\.{1,2}/|~/|/)[^/\s]' -or $target -match $textFile -or $target -match $nestedFile) {
-                    $Findings.Add('no-eager-import', "$($Repo.Relative($f)):$($i + 1)", "'@$target' is a Claude-only import: other agents ignore it and never see that content. Link it as [text]($target) or state the path in prose")
+                    $Findings.Add('no-eager-import', "$($Repo.Relative($f)):$($i + 1)", "'@$target' is a Claude-only import")
                 }
             }
         }
@@ -628,12 +630,12 @@ function Test-SiblingClaudeMention {
         $at = "${Rel}:$(($Text.Substring(0, $m.Index) -split "`n").Count)"
         $sibling = Join-Path $SiblingRoot $name
         if (Test-Path -LiteralPath (Join-Path $sibling 'AGENTS.md') -PathType Leaf) {
-            $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md - $name has migrated; name '$name/AGENTS.md' or the $name/docs/ file that holds the section, since an agent reading the shim gets only '@AGENTS.md'")
+            $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md points at a shim (use '$name/AGENTS.md')")
         }
         elseif (Test-Path -LiteralPath $sibling -PathType Container) {
-            if ($Findings.Rules.IsOn('reference-to-shim')) { $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md - $name has not migrated yet; point this at its AGENTS.md or a docs/ file when it does", 'warn') }
+            if ($Findings.Rules.IsOn('reference-to-shim')) { $Findings.Add('reference-to-shim', $at, "``$name`` CLAUDE.md - $name has not migrated to AGENTS.md yet", 'warn') }
         }
-        elseif ($Findings.Rules.IsOn('reference-resolves') -and -not $Repo.SiblingsAbsent()) { $Findings.Add('reference-resolves', $at, "``$name`` CLAUDE.md - no repository '$name' beside this one; check the name", 'warn') }
+        elseif ($Findings.Rules.IsOn('reference-resolves') -and -not $Repo.SiblingsAbsent()) { $Findings.Add('reference-resolves', $at, "``$name`` CLAUDE.md - no repository '$name' beside this one", 'warn') }
     }
 }
 
@@ -660,7 +662,7 @@ function Test-ReferenceTarget {
 
 function Get-ShimAdvice {
     param([string]$Reference)
-    return "points at a shim - reference '$($Reference -replace 'CLAUDE\.md$', 'AGENTS.md')' instead, since an agent reading the shim gets only '@AGENTS.md'"
+    return "points at a shim (use '$($Reference -replace 'CLAUDE\.md$', 'AGENTS.md')')"
 }
 
 function Get-HeadingAnchor {
@@ -685,11 +687,11 @@ function Test-RequiredSection {
     $headings = @([regex]::Matches((ConvertTo-OctoAgentDocsProse $Repo.ReadText($Repo.EntryPath)), '(?m)^##[ \t]+(.*?)[ \t]*$') | ForEach-Object { $_.Groups[1].Value })
     # Exact case: the closed set is exact text, and a heading's case is what readers see.
     $missing = @(foreach ($want in $sections) { if ($headings -cnotcontains $want) { "'## $want'" } })
-    if ($missing.Count -eq 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing section $($missing[0]) - every repo's entry point carries it") }
-    elseif ($missing.Count -gt 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing sections $($missing -join ', ') - every repo's entry point carries them") }
+    if ($missing.Count -eq 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing section $($missing[0])") }
+    elseif ($missing.Count -gt 1) { $Findings.Add('required-sections', $Repo.EntryName, "Missing sections $($missing -join ', ')") }
     if ($Repo.EntryPath -ne $Repo.AgentsPath) { return }
     foreach ($h in @($headings | Where-Object { $sections -cnotcontains $_ })) {
-        $Findings.Add('required-sections', $Repo.EntryName, "Section '## $h' is not a required section - move this content to docs/ or under one of the required sections")
+        $Findings.Add('required-sections', $Repo.EntryName, "Section '## $h' is not a required section")
     }
     $present = @($headings | Where-Object { $sections -ccontains $_ })
     $expected = @($sections | Where-Object { $present -ccontains $_ })
@@ -709,7 +711,7 @@ function Test-OpeningSentence {
     $lines = @($Repo.ReadText($Repo.EntryPath) -split "`n")
     $t = 0
     while ($t -lt $lines.Count -and -not $lines[$t].Trim()) { $t++ }
-    if ($t -ge $lines.Count -or $lines[$t] -notmatch '^#[ \t]') { $Findings.Add('required-sections', $Repo.EntryName, "Does not start with a '# ' title - add one; the opening sentence goes directly below it"); return }
+    if ($t -ge $lines.Count -or $lines[$t] -notmatch '^#[ \t]') { $Findings.Add('required-sections', $Repo.EntryName, "Does not start with a '# ' title"); return }
     $p = $t + 1
     while ($p -lt $lines.Count -and -not $lines[$p].Trim()) { $p++ }
     $e = $p
@@ -747,7 +749,7 @@ function Test-RoutingTable {
     $entry = $Repo.ReadText($Repo.EntryPath)
     $si = Find-OctoAgentDocsMarker -Text $entry -Marker $startMarker
     $ei = Find-OctoAgentDocsMarker -Text $entry -Marker $endMarker
-    if ($si -lt 0 -or $ei -lt $si) { $Findings.Add('routing-current', $Repo.EntryName, "Add $startMarker and $endMarker around the routing table"); return }
+    if ($si -lt 0 -or $ei -lt $si) { $Findings.Add('routing-current', $Repo.EntryName, "Routing markers $startMarker and $endMarker are missing or out of order"); return }
     if ($entry.Substring($si + $startMarker.Length, $ei - $si - $startMarker.Length) -ceq "`n$generated`n") { return }
     if (-not $Fix) { $Findings.Add('routing-current', $Repo.EntryName, 'Generated routing table is out of date (run with -Fix)') }
     elseif (-not (Update-RoutingTable -Repo $Repo -Table $generated)) { $Findings.Add('routing-current', $Repo.EntryName, 'Generated routing table would be rewritten (run without -WhatIf)') }
@@ -785,12 +787,12 @@ function Test-EntryBudget {
     $name = $Repo.EntryName
     $lineCount = (Get-TextLine -Content $entry).Count
     $maxLines = $Rules.Option('entry-point-lines', 'max')
-    if ($lineCount -gt $maxLines) { $Findings.Add('entry-point-lines', $name, "$lineCount lines over the budget of $maxLines - this file loads in every session. Move detail into docs/ and route it with applies_to") }
+    if ($lineCount -gt $maxLines) { $Findings.Add('entry-point-lines', $name, "$lineCount lines (limit $maxLines)") }
     $maxCharacters = $Rules.Option('entry-point-characters', 'max')
     $warnAt = $Rules.Option('entry-point-characters', 'warnAt')
-    if ($entry.Length -gt $maxCharacters) { $Findings.Add('entry-point-characters', $name, "$($entry.Length) characters over the budget of $maxCharacters - move detail into docs/, or shorten the longest lines") }
+    if ($entry.Length -gt $maxCharacters) { $Findings.Add('entry-point-characters', $name, "$($entry.Length) characters (limit $maxCharacters)") }
     elseif ($Rules.IsOn('entry-point-characters') -and $warnAt -gt 0 -and $entry.Length -gt $warnAt) {
-        $Findings.Add('entry-point-characters', $name, "$($entry.Length) characters, past the $warnAt target but under the $maxCharacters limit - worth trimming before it grows", 'warn')
+        $Findings.Add('entry-point-characters', $name, "$($entry.Length) characters (target $warnAt, limit $maxCharacters)", 'warn')
     }
     if (-not $Rules.IsOn('line-length')) { return }
     $maxLine = $Rules.Option('line-length', 'max')
@@ -806,7 +808,7 @@ function Test-EntryBudget {
         if ($line.Length -le $limit -or $line -match '^\s*(```|~~~)' -or $line.Trim() -notmatch '\s') { continue }
         $hits++
         if ($hits -gt $cap) { continue }
-        $what = if ($isTable) { "table row is $($line.Length) characters, limit $limit - shorten the globs or the description in the doc's frontmatter" } else { "line is $($line.Length) characters, limit $limit" }
+        $what = if ($isTable) { "table row is $($line.Length) characters (limit $limit)" } else { "line is $($line.Length) characters (limit $limit)" }
         $Findings.Add('line-length', "${name}:$($i + 1)", $what)
     }
     if ($hits -gt $cap) { $Findings.Add('line-length', $name, "$($hits - $cap) further over-length lines not listed") }
@@ -874,18 +876,23 @@ function Write-CiReport {
     # as the agent expects it, and the finding's own message), then why and fix once per fired
     # rule as plain text. A warning is only ever type=warning, and nothing here sets a task
     # result (no task.complete): the step fails through the exit code alone, which only the
-    # enforce gate sets. No colours, so every logging command starts its line.
+    # enforce gate sets. In mode logOnly an error is written as type=warning too, marked in its
+    # message, so a step that does not fail shows no red error entries. No colours, so every
+    # logging command starts its line.
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The agent writes the host output into the pipeline log, where ##vso commands are read')]
     param([AgentDocsRuleSet]$Rules, [AgentDocsRepository]$Repo, [AgentDocsFindings]$Findings)
     Write-Host "Agent docs check: $($Repo.Name) (entry point: $(if ($Repo.EntryName) { $Repo.EntryName } else { 'none' }), mode: $($Rules.Mode()))"
+    $enforce = $Rules.Mode() -eq 'enforce'
     $items = @($Findings.Items | Sort-Object -Stable { $_.tier }, { $_.severity -ne 'error' }, { ($_.file -split ':')[0] })
     foreach ($x in $items) {
         $path, $line = if ($x.file -match '^(.*):(\d+)$') { $Matches[1], $Matches[2] } else { $x.file, $null }
-        $properties = @("type=$(if ($x.severity -eq 'error') { 'error' } else { 'warning' })"
+        $demoted = $x.severity -eq 'error' -and -not $enforce
+        $marker = if ($demoted) { ' (error in enforce)' } else { '' }
+        $properties = @("type=$(if ($x.severity -eq 'error' -and -not $demoted) { 'error' } else { 'warning' })"
             if ($path) { "sourcepath=$(ConvertTo-AdoLogValue ([System.IO.Path]::GetFullPath((Join-Path $Repo.Root $path))) -Property)" }
             if ($line) { "linenumber=$line" }
             "code=$($x.rule)")
-        Write-Host "##vso[task.logissue $($properties -join ';')]$(ConvertTo-AdoLogValue "$($x.rule): $($x.message)")"
+        Write-Host "##vso[task.logissue $($properties -join ';')]$(ConvertTo-AdoLogValue "$($x.rule): $($x.message)$marker")"
     }
     # Why and how to fix once per fired rule, as plain log text, in the order of the issues.
     $fired = @($items.rule | Select-Object -Unique)
@@ -898,8 +905,9 @@ function Write-CiReport {
     }
     if ($Repo.SiblingsAbsent()) { Write-Host 'Sibling rules skipped: no sibling repository beside this checkout, so references into other repositories are checked only in a local workspace.' }
     $errorCount = $Findings.WithSeverity('error').Count
-    $outcome = if ($errorCount -eq 0) { '' } elseif ($Rules.Mode() -eq 'enforce') { ' - mode enforce: the step fails' } else { ' - mode logOnly: the step does not fail' }
-    Write-Host "$errorCount error(s), $($Findings.WithSeverity('warn').Count) warning(s)$outcome"
+    $outcome = if ($errorCount -eq 0) { '' } elseif ($enforce) { ' - mode enforce: the step fails' } else { ' - mode logOnly: the step does not fail' }
+    $shown = if ($errorCount -gt 0 -and -not $enforce) { ' (shown as warnings in logOnly)' } else { '' }
+    Write-Host "$errorCount error(s)$shown, $($Findings.WithSeverity('warn').Count) warning(s)$outcome"
 }
 
 function ConvertTo-AdoLogValue {
