@@ -142,6 +142,8 @@ Describe 'New-TestBranch' {
         $json = New-TestBranch -MinorVersion 3 -Description 'demo' -NoPush -Json 2>$null | ConvertFrom-Json
 
         $LASTEXITCODE | Should -Be 1
+        $json.data.success | Should -BeFalse
+        $json.data.exitCode | Should -Be 1
         $cli = $json.data.repositories | Where-Object repo -eq 'octo-cli'
         $cli.status | Should -Be 'Dirty'
         $cli.Success | Should -BeFalse
@@ -161,6 +163,33 @@ Describe 'New-TestBranch' {
         $json.data.summary.switched | Should -Be 3
         $json.data.summary.created | Should -Be 0
         $LASTEXITCODE | Should -Be 0
+    }
+
+    It 'publishes a branch made earlier with -NoPush when run again without it' {
+        New-TestBranch -MinorVersion 3 -Description 'demo' -NoPush | Out-Null
+        New-TestBranch -MinorVersion 3 -Description 'demo' | Out-Null
+        foreach ($name in $script:Repos) {
+            (Invoke-TestGit (Join-Path $script:Ws "remotes/$name.git") @('branch', '--list', 'test/0.3-demo')) | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It 'switches to a branch that exists only on origin (created by another clone)' {
+        New-TestBranch -MinorVersion 3 -Description 'demo' | Out-Null
+        foreach ($name in $script:Repos) {
+            $p = Join-Path $script:Line $name
+            Invoke-TestGit $p @('checkout', 'main') | Out-Null
+            Invoke-TestGit $p @('branch', '-D', 'test/0.3-demo') | Out-Null
+        }
+        $json = New-TestBranch -MinorVersion 3 -Description 'demo' -Json | ConvertFrom-Json
+        $json.data.summary.switched | Should -Be 3
+        (Invoke-TestGit (Join-Path $script:Line 'octo-sdk') @('branch', '--show-current')) | Should -Be 'test/0.3-demo'
+    }
+
+    It 'resolves a relative rootPath against the PowerShell location' {
+        Push-Location $script:Ws
+        try {
+            Resolve-OctoTestBranchRoot -MinorVersion 3 -Description 'demo' -RootPath './main' | Should -Be (Join-Path (Resolve-Path .).Path '0.3-demo')
+        } finally { Pop-Location }
     }
 
     It 'keeps an explicit -branch working (existing dev/demo checkouts)' {
