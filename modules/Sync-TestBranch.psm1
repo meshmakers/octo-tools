@@ -1,8 +1,8 @@
 <#
 .Synopsis
-Syncs a test branch with main for all octo-* git repositories
+Syncs a test branch with main for all repositories of Invoke-CloneMainRepos
 .Description
-This function merges changes from main into a test branch with format test/0.x-word for all octo-* repositories.
+This function merges changes from main into a test branch with format test/0.x-word for all repositories of Invoke-CloneMainRepos.
 It provides clear status information when manual intervention is required (e.g., merge conflicts).
 Branch naming rules:
 - Prefix 'test/' is mandatory
@@ -24,7 +24,8 @@ The minor version number (2-999) to use in branch name. Major version is always 
 .Parameter Description
 A single word (letters, numbers, underscore only) to append to branch name
 .Parameter branch
-Optional subdirectory path relative to rootPath where repositories are located
+Optional folder relative to rootPath where the repositories are located. Without it the directory
+<parent of rootPath>/0.<n>-<description> is used.
 .Parameter NoPush
 Skip pushing the merged branch to remote origin
 #>
@@ -62,7 +63,8 @@ function Sync-TestBranch {
         return
     }
 
-    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    # Without -branch: <parent of rootPath>/0.<n>-<description> (AB#9259); an explicit -branch is relative to rootPath.
+    $branchRootPath = Resolve-OctoTestBranchRoot -MinorVersion $MinorVersion -Description $Description -Branch $branch -RootPath $rootPath
 
     if (!(Test-Path $branchRootPath)) {
         Write-Error "Branch root path $branchRootPath does not exist"
@@ -76,8 +78,8 @@ function Sync-TestBranch {
     Write-Host "Syncing test branch '$branchName' with main in '$branchRootPath'" -ForegroundColor Cyan
     Write-Host ""
 
-    # Get all directories starting with "octo-"
-    $octoDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    # The repositories of Invoke-CloneMainRepos (mm-common and the other non octo-* repos included)
+    $octoDirectories = @(Get-OctoTestBranchRepoDirectories -Root $branchRootPath)
 
     foreach ($directory in $octoDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"

@@ -1,8 +1,8 @@
 <#
 .Synopsis
-Removes a test branch from all octo-* git repositories
+Removes a test branch from all repositories of Invoke-CloneMainRepos
 .Description
-This function removes a test branch with format test/0.x-word from all octo-* repositories.
+This function removes a test branch with format test/0.x-word from all repositories of Invoke-CloneMainRepos.
 Branch naming rules:
 - Prefix 'test/' is mandatory
 - Major version must be 0
@@ -23,7 +23,8 @@ The minor version number (2-999) to use in branch name. Major version is always 
 .Parameter Description
 A single word (letters, numbers, underscore only) to append to branch name
 .Parameter branch
-Optional subdirectory path relative to rootPath where repositories are located
+Optional folder relative to rootPath where the repositories are located. Without it the directory
+<parent of rootPath>/0.<n>-<description> is used.
 .Parameter LocalOnly
 Only delete local branches, keep remote branches
 #>
@@ -61,7 +62,8 @@ function Remove-TestBranch {
         return
     }
 
-    $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
+    # Without -branch: <parent of rootPath>/0.<n>-<description> (AB#9259); an explicit -branch is relative to rootPath.
+    $branchRootPath = Resolve-OctoTestBranchRoot -MinorVersion $MinorVersion -Description $Description -Branch $branch -RootPath $rootPath
 
     if (!(Test-Path $branchRootPath)) {
         Write-Error "Branch root path $branchRootPath does not exist"
@@ -75,8 +77,8 @@ function Remove-TestBranch {
         Write-Host "Removing test branch '$branchName' in '$branchRootPath'" -ForegroundColor Cyan
     }
 
-    # Get all directories starting with "octo-"
-    $octoDirectories = Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*"
+    # The repositories of Invoke-CloneMainRepos (mm-common and the other non octo-* repos included)
+    $octoDirectories = @(Get-OctoTestBranchRepoDirectories -Root $branchRootPath)
 
     foreach ($directory in $octoDirectories) {
         $gitDirectory = Join-Path -Path $directory.FullName -ChildPath ".git"
