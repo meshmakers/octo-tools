@@ -932,7 +932,7 @@ Describe 'Get-OctoDevStackServiceState (AB#9377)' {
 
     It 'reads Windows: the logon task is installed but supervises nothing' {
         Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'windows' }
-        $script:TaskArguments = (InModuleScope OctoDevStack { Get-OctoDevStackWindowsTaskCommand -ToolsPath 'C:\t' -RepoPath 'C:\d' -Port 5090 }).Arguments
+        $script:TaskArguments = (InModuleScope OctoDevStack { Get-OctoDevStackWindowsTaskCommand -ToolsPath '/tools' -RepoPath '/devstack' -Port 5090 }).Arguments
         Mock -ModuleName OctoDevStack Get-OctoDevStackLogonTaskArguments { $script:TaskArguments }
 
         $state = InModuleScope OctoDevStack { Get-OctoDevStackServiceState }
@@ -949,7 +949,7 @@ Describe 'Get-OctoDevStackServiceState (AB#9377)' {
             $plist = Get-OctoDevStackLaunchAgentPlist -Label 'io.meshmakers.octo-devstack' -RepoPath '/r' -Dll '/r/x.dll' -Url 'http://127.0.0.1:5090' -ToolsPath '/t' -Dotnet '/d/dotnet' -StatePath '/s' -PathValue '/bin'
             Get-OctoDevStackServicePort $plist | Should -Be 5090
             Get-OctoDevStackServicePort (Get-OctoDevStackSystemdUnit -RepoPath '/r' -Dll '/r/x.dll' -Url 'http://127.0.0.1:5192' -ToolsPath '/t' -Dotnet '/d/dotnet' -StatePath '/s') | Should -Be 5192
-            Get-OctoDevStackServicePort (Get-OctoDevStackWindowsTaskCommand -ToolsPath 'C:\t' -RepoPath 'C:\d' -Port 5191).Arguments | Should -Be 5191
+            Get-OctoDevStackServicePort (Get-OctoDevStackWindowsTaskCommand -ToolsPath '/tools' -RepoPath '/devstack' -Port 5191).Arguments | Should -Be 5191
             Get-OctoDevStackServicePort "gui/501/io.meshmakers.octo-devstack = {`n`targuments = {`n`t`t/d/dotnet`n`t`t/r/x.dll`n`t`t--url`n`t`thttp://127.0.0.1:5090`n`t}`n}" | Should -Be 5090
             Get-OctoDevStackServicePort '<key>ProgramArguments</key><array><string>/d/dotnet</string><string>/r/x.dll</string></array>' | Should -BeNullOrEmpty
             Get-OctoDevStackServicePort '' | Should -BeNullOrEmpty
