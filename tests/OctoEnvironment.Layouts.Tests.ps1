@@ -76,7 +76,7 @@ Describe 'Base lane detection (Resolve-OctoEnvironmentDefaultBase)' {
         $ws = New-FakeWorkspace
         $doc = Get-Doc (New-OctoEnvironment -env 'explicit' -repos octo-sdk -base 'branches/none' -Json)
         $doc.data.success | Should -BeFalse
-        $doc.data.error | Should -Match 'Base lane .*branches/none does not exist'
+        $doc.data.error | Should -Match 'Base lane .*branches[\\/]none does not exist'
         $doc.data.error | Should -Match 'Supported layouts'
         Test-Path (Join-Path $ws.Root 'wt-explicit') | Should -BeFalse
     }

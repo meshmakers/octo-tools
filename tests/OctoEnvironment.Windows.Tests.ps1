@@ -33,11 +33,7 @@ BeforeAll {
     }
 }
 
-AfterAll {
-    Restore-OctoEnvironmentTestState
-    # git writes its object files read-only; on Windows Pester cannot delete TestDrive then ("Access ... denied").
-    Get-ChildItem -LiteralPath $TestDrive -Recurse -Force -File -ErrorAction SilentlyContinue | Where-Object IsReadOnly | ForEach-Object { $_.IsReadOnly = $false }
-}
+AfterAll { Restore-OctoEnvironmentTestState }   # also clears the read-only flag git puts on its objects (TestDrive cleanup)
 
 Describe 'Network git calls are bounded and non-interactive (AB#8955)' {
     BeforeEach {

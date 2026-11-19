@@ -377,11 +377,18 @@ Describe 'Child process of a parallel build and the atomic package copy (AB#8814
         }
         $reads = 0
         $torn = 0
+        $busy = 0
         $values = [System.Collections.Generic.HashSet[int]]::new()
         Set-Content -Path $go -Value 'go'
         $deadline = [DateTime]::UtcNow.AddSeconds(60)
         while ($values.Count -lt 5 -and $writer.State -in 'NotStarted', 'Running' -and [DateTime]::UtcNow -lt $deadline) {
-            $bytes = [IO.File]::ReadAllBytes($target)
+            try { $bytes = [IO.File]::ReadAllBytes($target) }
+            catch [System.IO.IOException] {
+                # Windows: while the rename replaces the package, opening it fails with a sharing violation - the file is
+                # busy, never half written, and a reader (NuGet) opens it again. macOS/Linux never get here.
+                $busy++
+                continue
+            }
             $reads++
             if ($bytes.Length -ne $size -or $bytes[0] -ne $bytes[$size - 1] -or $bytes[0] -ne $bytes[$size / 2]) { $torn++ }
             [void]$values.Add([int]$bytes[0])

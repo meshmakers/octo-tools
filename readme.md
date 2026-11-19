@@ -527,11 +527,25 @@ Other sessions use the daemon, so a stop asks it first (`GET /api/daemon`): whil
 `-Force` overrides (the builds go on and the next daemon re-attaches to them). Sessions holding a stack lease are listed
 as a warning. A new octo-devstack commit is deployed with `Start-OctoDevStackDaemon -Restart -Rebuild` (stop, build
 Release, start; `-Rebuild` alone is refused while the daemon runs from those binaries).
-On macOS/Linux both cmdlets need `lsof` to find the process on the port.
+On macOS both cmdlets need `lsof` to find the process on the port; on Linux without `lsof` the daemon names its own
+pid (`GET /api/daemon`).
+
+As a background service that starts at login and after a crash (Windows: logon task, Linux: systemd user unit, macOS:
+LaunchAgent; the stack services survive every restart of the daemon):
+
+```powershell
+Install-OctoDevStackDaemonService       # Uninstall-OctoDevStackDaemonService removes it, the stack keeps running
+```
+
+While the service runs the daemon, `Start-OctoDevStackDaemon -Restart` goes through the service manager, and a start
+of an installed service that does not run starts it through the service manager too - never a second daemon next to
+it. Details: `Get-Help Install-OctoDevStackDaemonService -Full` and the octo-devstack README.
 
 From then on OctoMesh is managed through the daemon: MCP `http://127.0.0.1:5090/mcp`, status page
-`http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log`, configuration
-`~/.config/octo-devstack/devstack.yaml` (written on the first start).
+`http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log` (Windows: also `daemon.err.log`),
+configuration `devstack.yaml` in the octo-tools config folder (`~/.config/octo-tools/`, next to `installations.json`;
+`Get-OctoWorkspace` names it), written on the first start. A `~/.config/octo-devstack/devstack.yaml` of an older
+daemon is copied there once and left as it is.
 
 # Tests
 
