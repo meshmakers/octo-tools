@@ -300,6 +300,25 @@ Describe 'Start-OctoDevStackDaemon' {
         $script:HealthCalls | Should -Be 3
     }
 
+    It 'tells the daemon which octo-tools describes the workspace (OCTO_TOOLS_PATH, AB#9377) and restores the variable' {
+        $script:HealthCalls = 0
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:HealthCalls++; $script:HealthCalls -ge 2 }
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { $script:SeenToolsPath = $env:OCTO_TOOLS_PATH; 4242 }
+        $path = New-FakeCheckout 'starttools' -Built
+        $before = $env:OCTO_TOOLS_PATH
+        $env:OCTO_TOOLS_PATH = 'somewhere-else'
+        try {
+            $json = Start-OctoDevStackDaemon -Path $path -Port 5098 -Json | ConvertFrom-Json
+
+            $json.data.success | Should -BeTrue
+            $script:SeenToolsPath | Should -Be ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))))
+            $env:OCTO_TOOLS_PATH | Should -Be 'somewhere-else'
+        }
+        finally {
+            $env:OCTO_TOOLS_PATH = $before
+        }
+    }
+
     It 'starts with Start-Process (hidden, redirected) on Windows and keeps the previous logs' {
         Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
         Mock -ModuleName OctoDevStack Get-NetTCPConnection { }

@@ -34,6 +34,11 @@ function Get-OctoDevStackDefaultPath {
     return Join-Path (Split-Path -Parent $toolsRoot) 'octo-devstack'
 }
 
+function Get-OctoDevStackToolsPath {
+    # The octo-tools checkout this module belongs to: the one the daemon asks for the workspace.
+    return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))
+}
+
 function Get-OctoDevStackStatePath {
     if ($env:OCTO_DEVSTACK_STATE) { return $env:OCTO_DEVSTACK_STATE }
     $home_ = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
@@ -299,26 +304,35 @@ function Start-OctoDevStackDaemon {
         $data.built = $true
     }
 
-    if ($Foreground) {
-        Write-Host "octo-devstack in the foreground on $url (Ctrl+C stops it)" -ForegroundColor Cyan
-        Push-Location $repoPath
-        try { dotnet $dll --url $url }
-        finally { Pop-Location }
-        return
-    }
+    # The daemon asks this octo-tools for the workspace (Get-OctoWorkspace, AB#9377): it inherits OCTO_TOOLS_PATH. Without
+    # it, the daemon looks next to its own checkout, which -Path may have put somewhere else.
+    $previousToolsPath = $env:OCTO_TOOLS_PATH
+    $env:OCTO_TOOLS_PATH = Get-OctoDevStackToolsPath
+    try {
+        if ($Foreground) {
+            Write-Host "octo-devstack in the foreground on $url (Ctrl+C stops it)" -ForegroundColor Cyan
+            Push-Location $repoPath
+            try { dotnet $dll --url $url }
+            finally { Pop-Location }
+            return
+        }
 
-    if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
-    if (Test-OctoDevStackWindows) {
-        $errorLogPath = Join-Path $statePath 'daemon.err.log'
-        Save-OctoDevStackPreviousLog -LogPath $logPath
-        Save-OctoDevStackPreviousLog -LogPath $errorLogPath
-        # Start-Process joins the arguments with spaces and does not quote them: a path with spaces needs quotes.
-        $process = Start-Process -FilePath 'dotnet' -ArgumentList @("`"$dll`"", '--url', $url) -WorkingDirectory $repoPath `
-            -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru
-        $processId = if ($process) { [int]$process.Id } else { $null }
+        if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
+        if (Test-OctoDevStackWindows) {
+            $errorLogPath = Join-Path $statePath 'daemon.err.log'
+            Save-OctoDevStackPreviousLog -LogPath $logPath
+            Save-OctoDevStackPreviousLog -LogPath $errorLogPath
+            # Start-Process joins the arguments with spaces and does not quote them: a path with spaces needs quotes.
+            $process = Start-Process -FilePath 'dotnet' -ArgumentList @("`"$dll`"", '--url', $url) -WorkingDirectory $repoPath `
+                -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru
+            $processId = if ($process) { [int]$process.Id } else { $null }
+        }
+        else {
+            $processId = Start-OctoDevStackDetachedUnix -WorkingDirectory $repoPath -LogPath $logPath -Dll $dll -Url $url
+        }
     }
-    else {
-        $processId = Start-OctoDevStackDetachedUnix -WorkingDirectory $repoPath -LogPath $logPath -Dll $dll -Url $url
+    finally {
+        $env:OCTO_TOOLS_PATH = $previousToolsPath
     }
     if (-not $processId) {
         Write-OctoDevStackResult $command $Json $false $data "Could not start dotnet $dll; see $logPath."
