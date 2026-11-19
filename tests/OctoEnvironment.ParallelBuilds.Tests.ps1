@@ -383,9 +383,13 @@ Describe 'Child process of a parallel build and the atomic package copy (AB#8814
         $deadline = [DateTime]::UtcNow.AddSeconds(60)
         while ($values.Count -lt 5 -and $writer.State -in 'NotStarted', 'Running' -and [DateTime]::UtcNow -lt $deadline) {
             try { $bytes = [IO.File]::ReadAllBytes($target) }
+            catch [System.IO.FileNotFoundException] {
+                throw   # the package was gone: the replacement is not atomic - exactly what this test is about
+            }
             catch [System.IO.IOException] {
-                # Windows: while the rename replaces the package, opening it fails with a sharing violation - the file is
-                # busy, never half written, and a reader (NuGet) opens it again. macOS/Linux never get here.
+                # Windows: while the rename replaces the package, opening it fails with a sharing violation (Win32 32) - the
+                # file is busy, never half written, and a reader (NuGet) opens it again. macOS/Linux never get here.
+                if (($_.Exception.HResult -band 0xFFFF) -ne 32) { throw }
                 $busy++
                 continue
             }

@@ -2907,6 +2907,15 @@ function Invoke-BuildEnvironment {
     if ($rangeRecord) { throw $rangeRecord }
 }
 
+function Get-OctoWorkspaceLayout([string]$Root, [string]$DefaultLanePath, [bool]$CaseSensitive = [bool]$IsLinux) {
+    # flat when the default lane is the root itself, lanes otherwise, $null without a lane. Both are full paths without a
+    # trailing separator; Linux compares them case-sensitively (/srv/Mesh is another folder than /srv/mesh there).
+    if ([string]::IsNullOrEmpty($DefaultLanePath)) { return $null }
+    $comparison = if ($CaseSensitive) { [StringComparison]::Ordinal } else { [StringComparison]::OrdinalIgnoreCase }
+    if ([string]::Equals($DefaultLanePath, $Root, $comparison)) { return 'flat' }
+    return 'lanes'
+}
+
 function Get-OctoWorkspace {
     <#
     .SYNOPSIS
@@ -2946,10 +2955,10 @@ function Get-OctoWorkspace {
     catch {
         $problems.Add($_.Exception.Message)
     }
-    $layout = if ($null -eq $defaultLanePath) { $null }
-              elseif ([string]::Equals($defaultLanePath, $root, [StringComparison]::OrdinalIgnoreCase)) { 'flat' } # both are full paths without a trailing separator
-              else { 'lanes' }
-    $toolsConfigPath = Get-OctoToolsConfigPath
+    $layout = Get-OctoWorkspaceLayout -Root $root -DefaultLanePath $defaultLanePath
+    # Absolute, also for a relative $OCTO_TOOLS_CONFIG: configDirectory is where octo-devstack reads devstack.yaml, from
+    # another working directory.
+    $toolsConfigPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Get-OctoToolsConfigPath))
     $toolsConfigExists = Test-Path -LiteralPath $toolsConfigPath -PathType Leaf
     if (-not $toolsConfigExists) {
         $problems.Add("No octo-tools config at ${toolsConfigPath}: copy installations.example.json from the octo-tools repository there and edit it (docs/installations-config.md).")

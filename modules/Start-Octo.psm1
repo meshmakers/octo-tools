@@ -365,6 +365,13 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "AiServices.log"
     Delete-LogFile -branch $branch -file "AiWorker.log"
 
+    # A stop signal left by an earlier run goes before the first service starts: one created during the start waits
+    # below is a stop request of this run and must reach the poll of the non-interactive mode.
+    $stopFile = Join-Path -Path (Join-Path -Path $rootPath -ChildPath $branch) -ChildPath ".octo-stop"
+    if ($nonInteractive -and (Test-Path $stopFile)) {
+        Remove-Item -Force $stopFile
+    }
+
     # Start order as octo-devstack's startAfter (keep both in step): identity first - in a fresh setup it creates the
     # system database the other backends need -, the communication controller after the asset repository, whose
     # system tenant holds the CK methods the controller checks its handlers against at its start.
@@ -486,12 +493,7 @@ Use this function to selectively start OctoMesh services based on your requireme
 
     if ($nonInteractive) {
         $branchRootPath = Join-Path -Path $rootPath -ChildPath $branch
-        $stopFile = Join-Path -Path $branchRootPath -ChildPath ".octo-stop"
-
-        # Clean up any leftover stop signal
-        if (Test-Path $stopFile) {
-            Remove-Item -Force $stopFile
-        }
+        $stopFile = Join-Path -Path $branchRootPath -ChildPath ".octo-stop"   # a leftover one was removed before the first start
 
         Write-Host "Started in non-interactive mode. Create '$stopFile' or send SIGTERM to stop."
 

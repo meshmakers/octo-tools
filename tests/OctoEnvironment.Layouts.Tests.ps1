@@ -346,4 +346,28 @@ Describe 'Workspace description for octo-devstack (Get-OctoWorkspace, AB#9377)' 
         $data.toolsConfigExists | Should -BeTrue
         $data.problems | Should -BeNullOrEmpty
     }
+
+    It 'names the config folder as an absolute path also for a relative OCTO_TOOLS_CONFIG' {
+        # octo-devstack reads devstack.yaml from configDirectory, from another working directory.
+        New-FakeWorkspace | Out-Null
+        $folder = Join-Path $TestDrive 'relative-config'
+        New-Item -ItemType Directory -Force -Path $folder | Out-Null
+        Push-Location $folder
+        try {
+            $env:OCTO_TOOLS_CONFIG = 'installations.json'
+            $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        }
+        finally { Pop-Location }
+        $data.configDirectory | Should -Be ([IO.Path]::GetFullPath($folder))
+        $data.toolsConfigPath | Should -Be (Join-Path ([IO.Path]::GetFullPath($folder)) 'installations.json')
+    }
+
+    It 'compares root and default lane case-sensitively where the file system is (Linux)' {
+        InModuleScope OctoEnvironment {
+            Get-OctoWorkspaceLayout -Root '/srv/mesh' -DefaultLanePath '/srv/Mesh' -CaseSensitive $true | Should -Be 'lanes' -Because '/srv/Mesh is another folder on Linux'
+            Get-OctoWorkspaceLayout -Root 'C:\dev\Mesh' -DefaultLanePath 'C:\dev\mesh' -CaseSensitive $false | Should -Be 'flat'
+            Get-OctoWorkspaceLayout -Root '/srv/mesh' -DefaultLanePath '/srv/mesh' -CaseSensitive $true | Should -Be 'flat'
+            Get-OctoWorkspaceLayout -Root '/srv/mesh' -DefaultLanePath $null | Should -BeNullOrEmpty
+        }
+    }
 }

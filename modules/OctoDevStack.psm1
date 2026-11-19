@@ -154,12 +154,53 @@ function Get-OctoDevStackDllFromCommandLine([string]$CommandLine) {
     return $match.Groups[2].Value
 }
 
-function Send-OctoDevStackCtrlBreak([int]$ProcessId, [string]$Dll) {
+function Send-OctoDevStackCtrlBreak([int]$ProcessId, [string]$Dll, [int]$TimeoutSeconds = 10) {
     # Windows (AB#9377): the daemon's own helper sends CTRL_BREAK to the console the daemon has to itself (hidden window
     # of Start-OctoDevStackDaemon) and refuses when anything else is attached to it, e.g. the shell of a daemon in the
-    # foreground. $PID is the guard: the helper refuses when this session shares that console. $true = sent.
-    & dotnet $Dll '--send-ctrl-break' $ProcessId $PID 'console' *> $null
-    return ($LASTEXITCODE -eq 0)
+    # foreground. $PID is the guard: the helper refuses when this session shares that console. $true = sent. Never throws
+    # and never waits longer than -TimeoutSeconds (the helper is killed then): $false sends the caller to Stop-Process -
+    # also when dotnet is not found or the dll is one without the helper mode.
+    try {
+        $dotnet = Get-OctoDevStackNativeCommand 'dotnet'
+        if (-not $dotnet) { return $false }
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($dotnet)
+        foreach ($argument in @($Dll, '--send-ctrl-break', [string]$ProcessId, [string]$PID, 'console')) { $psi.ArgumentList.Add($argument) }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $helper = [System.Diagnostics.Process]::Start($psi)
+        $null = $helper.StandardOutput.ReadToEndAsync()
+        $null = $helper.StandardError.ReadToEndAsync()
+        if (-not $helper.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $helper.Kill($true) } catch { }
+            return $false
+        }
+        return ($helper.ExitCode -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-OctoDevStackSamePath([string]$A, [string]$B) {
+    # Two folders or files are the same: full paths without a trailing separator, case-insensitive except on Linux.
+    if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
+    $comparison = if ($IsLinux) { [StringComparison]::Ordinal } else { [StringComparison]::OrdinalIgnoreCase }
+    return [string]::Equals([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($A)), [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($B)), $comparison)
+}
+
+function Test-OctoDevStackTrustedDll([string]$Dll) {
+    # The CTRL_BREAK helper runs code from the dll a listener's command line names: only a dll inside the octo-devstack
+    # checkout this octo-tools resolves (any bin/<configuration>), never one another process points at - a copy of that
+    # name elsewhere, or an octo-devstack of another account.
+    if ([string]::IsNullOrWhiteSpace($Dll)) { return $false }
+    try {
+        $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Get-OctoDevStackDefaultPath))) + [IO.Path]::DirectorySeparatorChar
+        $full = [IO.Path]::GetFullPath($Dll)
+    }
+    catch { return $false }
+    $comparison = if ($IsLinux) { [StringComparison]::Ordinal } else { [StringComparison]::OrdinalIgnoreCase }
+    return $full.StartsWith($root, $comparison)
 }
 
 function Test-OctoDevStackCommandLine([string]$CommandLine) {
@@ -201,8 +242,15 @@ function Test-OctoDevStackStateLocked([string]$StatePath) {
     catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
         return $false
     }
-    catch [System.IO.IOException], [System.UnauthorizedAccessException] {
-        return $true
+    catch [System.IO.IOException] {
+        # Held by another process: a sharing or lock violation on Windows (Win32 32, 33), the failed flock on macOS/Linux
+        # (as octo-devstack's DaemonLock.IsHeldByAnother; the real OS decides, not the test seam).
+        if (-not $IsWindows) { return $true }
+        return (($_.Exception.HResult -band 0xFFFF) -in 32, 33)
+    }
+    catch [System.UnauthorizedAccessException] {
+        # A lock file this user cannot write is no other daemon (the daemon's start reports it as an error), never "locked".
+        return $false
     }
 }
 
@@ -291,6 +339,22 @@ function Start-OctoDevStackDaemon {
         return
     }
 
+    # A service of this port that launchd or systemd runs launches the checkout of its definition: that one is built and
+    # started. A -Path that names another one is refused (the service would go on starting the old one). A unit no user
+    # manager can run (WSL without systemd) does not count: the daemon is started by hand then, from -Path.
+    $service = Get-OctoDevStackServiceState -Port $Port
+    if (-not $Foreground -and $service.installed -and $service.kind -in @('launchAgent', 'systemdUser') -and $service.repoPath -and
+        -not (Test-OctoDevStackSamePath $service.repoPath $repoPath) -and
+        ($service.supervised -or (Test-OctoDevStackServiceManager -Kind $service.kind))) {
+        if (-not [string]::IsNullOrWhiteSpace($Path)) {
+            Write-OctoDevStackResult $command $Json $false $data ("The $($service.kind) ($($service.path)) runs octo-devstack from $($service.repoPath), not from ${repoPath}: nothing was built or started. " +
+                "Register it for that checkout first (Install-OctoDevStackDaemonService -Path '$repoPath' -Port $Port), or leave -Path out.")
+            return
+        }
+        $repoPath = $service.repoPath
+        $dll = Join-Path $repoPath $script:DllRelativePath
+    }
+
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $ours = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
     $stopped = $false
@@ -306,9 +370,17 @@ function Start-OctoDevStackDaemon {
         }
         # A daemon its service manager runs (launchd, systemd; AB#9377) is restarted by it: a second daemon of our own would
         # race its KeepAlive / Restart for the port. A daemon started by hand next to launchd's (another pid; launchd's
-        # waits for the state folder) is stopped below like one without a service, and launchd's takes over.
-        $service = Get-OctoDevStackServiceState -Port $Port
-        if (Test-OctoDevStackServiceRuns -Service $service -ProcessId $ours.pid) {
+        # waits for the state folder) is stopped below like one without a service, and launchd's takes over - not with
+        # -Rebuild: launchd's daemon would start from the binaries before the build replaced them.
+        $runsOurs = Test-OctoDevStackServiceRuns -Service $service -ProcessId $ours.pid
+        if ($Rebuild -and $service.supervised -and -not $runsOurs) {
+            $data.alreadyRunning = $true
+            $data.pid = $ours.pid
+            Write-OctoDevStackResult $command $Json $false $data ("octo-devstack (PID $($ours.pid)) was started by hand next to the daemon of the $($service.kind)$(if ($service.pid) { " (PID $($service.pid))" }), which takes over when it ends: " +
+                'nothing was stopped or built. Stop the one started by hand first (Stop-OctoDevStackDaemon), then run -Restart -Rebuild.')
+            return
+        }
+        if ($runsOurs) {
             $data.service = $service.kind
             $check = Get-OctoDevStackRestartCheck -Port $Port
             $data.restartSafe = $check.safe
@@ -330,6 +402,12 @@ function Start-OctoDevStackDaemon {
                     Stop-OctoDevStackService -Service $service
                     $deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
                     while ((Test-OctoDevStackProcessAlive -ProcessId $ours.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+                    if (Test-OctoDevStackProcessAlive -ProcessId $ours.pid) {
+                        # Its binaries are still in use: no build. A service the stop unloaded is loaded again (its daemon
+                        # waits for this one), so it is not left off.
+                        if (-not (Get-OctoDevStackServiceState -Port $Port).supervised) { Start-OctoDevStackService -Service $service }
+                        throw "octo-devstack (PID $($ours.pid)) did not end within $HealthTimeoutSeconds s of the stop; nothing was built."
+                    }
                     if ($Json) { Invoke-Build -repositoryPath $repoPath -configuration Release -Json | Out-Null } else { Invoke-Build -repositoryPath $repoPath -configuration Release }
                     $buildFailed = ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dll))
                     $data.built = -not $buildFailed
@@ -630,7 +708,10 @@ function Stop-OctoDevStackDaemon {
             return
         }
         $data.stopped = $true
-        $data.graceful = $true
+        # The unit's Result says how it ended: success = by itself on SIGTERM; timeout / signal = systemd had to kill it.
+        # Unknown (no answer) stays null.
+        $result = Get-OctoDevStackSystemdShow -Property 'Result'
+        $data.graceful = if ($result -eq 'success') { $true } elseif ($result) { $false } else { $null }
         $data.warnings = @($data.warnings) + "The systemd unit stays enabled and starts octo-devstack again at the next login (Uninstall-OctoDevStackDaemonService removes it)."
         if (-not $Json) { Write-Host "octo-devstack stopped (systemd unit, PID $($target.pid)); the stack services keep running and are adopted by the next start." -ForegroundColor Green }
         Write-OctoDevStackResult $command $Json $true $data $null
@@ -641,8 +722,10 @@ function Stop-OctoDevStackDaemon {
     }
     try {
         if (Test-OctoDevStackWindows) {
+            # The helper only from the octo-devstack checkout of this octo-tools (Test-OctoDevStackTrustedDll); any other dll the
+            # command line names is not run - the daemon is ended with Stop-Process then.
             $dll = Get-OctoDevStackDllFromCommandLine $target.commandLine
-            $data.graceful = [bool]($dll -and (Test-Path -LiteralPath $dll -PathType Leaf) -and (Send-OctoDevStackCtrlBreak -ProcessId $target.pid -Dll $dll))
+            $data.graceful = [bool]($dll -and (Test-Path -LiteralPath $dll -PathType Leaf) -and (Test-OctoDevStackTrustedDll $dll) -and (Send-OctoDevStackCtrlBreak -ProcessId $target.pid -Dll $dll))
             if ($data.graceful) {
                 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
                 while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
@@ -740,6 +823,27 @@ function Get-OctoDevStackSystemdActive {
     if (-not $systemctl) { return $false }
     $output = & $systemctl --user is-active "$script:ServiceName.service" 2>$null
     return ((@($output) -join '').Trim() -eq 'active')
+}
+
+function Get-OctoDevStackSystemdShow([string]$Property) {
+    # One property of the unit (`systemctl --user show -p <Property> --value`: MainPID, Result, ...); $null when systemctl
+    # is not there or does not answer.
+    $systemctl = Get-OctoDevStackNativeCommand 'systemctl'
+    if (-not $systemctl) { return $null }
+    $output = & $systemctl --user show -p $Property --value "$script:ServiceName.service" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $value = (@($output) -join '').Trim()
+    if ($value) { return $value }
+    return $null
+}
+
+function Test-OctoDevStackSystemdUserManager {
+    # Whether the user's systemd manager answers: a unit file and systemctl are not enough - in a container, over SSH
+    # without a user session or in WSL without systemd `systemctl --user` fails.
+    $systemctl = Get-OctoDevStackNativeCommand 'systemctl'
+    if (-not $systemctl) { return $false }
+    & $systemctl --user show-environment *> $null
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Get-OctoDevStackLaunchAgentLabel { return "io.meshmakers.$script:ServiceName" }
@@ -853,14 +957,27 @@ function Get-OctoDevStackServicePort([string]$Definition) {
     return $null
 }
 
+function Get-OctoDevStackServiceRepoPath([string]$Definition) {
+    # The octo-devstack checkout a service definition launches: WorkingDirectory= of a unit, <key>WorkingDirectory</key> of a
+    # plist (XML-unescaped), -Path '<folder>' of the logon task's command. $null when it names none.
+    $unit = [regex]::Match($Definition, '(?m)^WorkingDirectory=(.+?)\s*$')
+    if ($unit.Success) { return $unit.Groups[1].Value }
+    $plist = [regex]::Match($Definition, '<key>WorkingDirectory</key>\s*<string>([^<]*)</string>')
+    if ($plist.Success) { return [System.Net.WebUtility]::HtmlDecode($plist.Groups[1].Value) }
+    $task = [regex]::Match($Definition, "-Path '((?:[^']|'')*)'")
+    if ($task.Success) { return $task.Groups[1].Value.Replace("''", "'") }
+    return $null
+}
+
 function Get-OctoDevStackServiceState([int]$Port = 5090) {
     # The background service Install-OctoDevStackDaemonService set up on this OS for the daemon on -Port: { platform, kind,
     # path, installed, supervised (the service manager runs the daemon now and starts it again when it exits), pid, port
     # (the port of the service's daemon, $null when its definition names none) }. A service of another port is neither
     # installed nor supervised here: a development or test daemon on its own port is started and stopped like one without
     # a service, and the service's daemon is left alone. A definition without a port counts for every port.
+    # repoPath: the octo-devstack checkout the service launches (WorkingDirectory of the unit or plist, -Path of the task).
     $platform = Get-OctoDevStackServicePlatform
-    $state = [pscustomobject]@{ platform = $platform; kind = $null; path = $null; installed = $false; supervised = $false; pid = $null; port = $null }
+    $state = [pscustomobject]@{ platform = $platform; kind = $null; path = $null; installed = $false; supervised = $false; pid = $null; port = $null; repoPath = $null }
     $definition = ''
     switch ($platform) {
         'macos' {
@@ -882,6 +999,10 @@ function Get-OctoDevStackServiceState([int]$Port = 5090) {
             $state.installed = Test-Path -LiteralPath $state.path
             if ($state.installed) {
                 $state.supervised = [bool](Get-OctoDevStackSystemdActive)
+                if ($state.supervised) {
+                    $mainPid = Get-OctoDevStackSystemdShow -Property 'MainPID'
+                    if ($mainPid -match '^\d+$' -and [int]$mainPid -gt 0) { $state.pid = [int]$mainPid }
+                }
                 $definition = Get-Content -LiteralPath $state.path -Raw -ErrorAction SilentlyContinue
             }
         }
@@ -895,6 +1016,7 @@ function Get-OctoDevStackServiceState([int]$Port = 5090) {
         }
     }
     $state.port = Get-OctoDevStackServicePort ([string]$definition)
+    $state.repoPath = Get-OctoDevStackServiceRepoPath ([string]$definition)
     if ($null -ne $state.port -and $state.port -ne $Port) {
         $state.installed = $false
         $state.supervised = $false
@@ -910,8 +1032,15 @@ function Restart-OctoDevStackService($Service) {
 }
 
 function Stop-OctoDevStackService($Service) {
-    # Ends the daemon through its service manager and keeps it from coming back until Start-OctoDevStackService.
-    if ($Service.kind -eq 'launchAgent') { Invoke-OctoDevStackLaunchctl @('bootout', "$(Get-OctoDevStackLaunchdDomain)/$(Get-OctoDevStackLaunchAgentLabel)") -AllowFailure | Out-Null }
+    # Ends the daemon through its service manager and keeps it from coming back until Start-OctoDevStackService. launchd: a
+    # bootout of a job that is not loaded is fine (nothing to stop); one that leaves the job loaded throws.
+    if ($Service.kind -eq 'launchAgent') {
+        $target = "$(Get-OctoDevStackLaunchdDomain)/$(Get-OctoDevStackLaunchAgentLabel)"
+        $bootout = Invoke-OctoDevStackLaunchctl @('bootout', $target) -AllowFailure
+        if ($bootout.exitCode -ne 0 -and (Invoke-OctoDevStackLaunchctl @('print', $target) -AllowFailure).exitCode -eq 0) {
+            throw "launchctl bootout $target failed ($($bootout.exitCode)) and the job is still loaded: $($bootout.output)"
+        }
+    }
     else { Invoke-OctoDevStackSystemctl @('stop', "$script:ServiceName.service") }
 }
 
@@ -921,17 +1050,20 @@ function Start-OctoDevStackService($Service) {
 }
 
 function Test-OctoDevStackServiceRuns($Service, $ProcessId) {
-    # Whether the service manager runs the daemon with this pid: supervised, and (launchd names its job's pid) the same
-    # process. launchd runs another pid when a daemon was started by hand while the agent was not loaded: launchd's own
-    # then waits for the state folder (octo-devstack's daemon.lock) and takes over when the other one has ended.
+    # Whether the service manager runs the daemon with this pid. A pid the manager names (launchd's job pid, systemd's
+    # MainPID) must be the listener's: launchd runs another pid when a daemon was started by hand while the agent was not
+    # loaded (launchd's own then waits for the state folder and takes over when the other one has ended). launchd names a
+    # pid whenever its job runs, so a job without one sits between two starts and the listener is not its daemon. An active
+    # systemd unit without a MainPID (an older systemd) is the daemon of its state folder - a second one exits with 75.
     if (-not $Service.supervised) { return $false }
-    return (-not $Service.pid -or -not $ProcessId -or [int]$Service.pid -eq [int]$ProcessId)
+    if ($Service.pid) { return ($ProcessId -and [int]$Service.pid -eq [int]$ProcessId) }
+    return ($Service.kind -ne 'launchAgent')
 }
 
 function Test-OctoDevStackServiceManager([string]$Kind) {
-    # Whether the service manager of an installed service can be reached (a unit file without systemctl - WSL without
-    # systemd - cannot be started; the daemon is started by hand then).
-    if ($Kind -eq 'systemdUser') { return [bool](Get-OctoDevStackNativeCommand 'systemctl') }
+    # Whether the service manager of an installed service can be reached: a unit file without systemctl (WSL without
+    # systemd) or without a user manager that answers cannot be started; the daemon is started by hand then.
+    if ($Kind -eq 'systemdUser') { return [bool](Test-OctoDevStackSystemdUserManager) }
     return $true
 }
 
@@ -1025,6 +1157,7 @@ function Install-OctoDevStackDaemonService {
         [string]$Path,
         [int]$Port = 5090,
         [switch]$NoStart,
+        [int]$HealthTimeoutSeconds = 30,
         [switch]$Json
     )
 
@@ -1070,15 +1203,19 @@ function Install-OctoDevStackDaemonService {
                 $data.path = $unitPath
                 $dotnet = Get-OctoDevStackNativeCommand 'dotnet'
                 if (-not $dotnet) { throw 'dotnet is not on PATH.' }
-                if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unitPath) | Out-Null
-                Set-Content -LiteralPath $unitPath -Value (Get-OctoDevStackSystemdUnit -RepoPath $repoPath -Dll $dll -Url $url -ToolsPath $toolsPath -Dotnet $dotnet -StatePath $statePath) -NoNewline
+                if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath -ErrorAction Stop | Out-Null }
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unitPath) -ErrorAction Stop | Out-Null
+                Set-Content -LiteralPath $unitPath -Value (Get-OctoDevStackSystemdUnit -RepoPath $repoPath -Dll $dll -Url $url -ToolsPath $toolsPath -Dotnet $dotnet -StatePath $statePath) -NoNewline -ErrorAction Stop
                 Invoke-OctoDevStackSystemctl @('daemon-reload')
                 if ($NoStart -or $data.alreadyRunning) {
                     Invoke-OctoDevStackSystemctl @('enable', "$script:ServiceName.service")
                 }
                 else {
                     Invoke-OctoDevStackSystemctl @('enable', '--now', "$script:ServiceName.service")
+                    # Type=simple: systemd reports the start before the daemon is up - started means it answers.
+                    if (-not (Wait-OctoDevStackNewDaemon -Port $Port -PreviousPid 0 -TimeoutSeconds $HealthTimeoutSeconds)) {
+                        throw "the unit is enabled and started, but octo-devstack does not answer on $url within $HealthTimeoutSeconds s; see $(Join-Path $statePath 'daemon.log') and systemctl --user status $script:ServiceName"
+                    }
                     $data.started = $true
                 }
             }
@@ -1093,14 +1230,18 @@ function Install-OctoDevStackDaemonService {
                 if ($NoStart) { throw '-NoStart is not available on macOS: launchd loads the LaunchAgent at once.' }
                 $dotnet = Get-OctoDevStackNativeCommand 'dotnet'
                 if (-not $dotnet) { throw 'dotnet is not on PATH.' }
-                if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $data.path) | Out-Null
+                if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath -ErrorAction Stop | Out-Null }
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $data.path) -ErrorAction Stop | Out-Null
                 $plist = Get-OctoDevStackLaunchAgentPlist -Label (Get-OctoDevStackLaunchAgentLabel) -RepoPath $repoPath -Dll $dll -Url $url -ToolsPath $toolsPath `
                     -Dotnet $dotnet -StatePath $statePath -PathValue (Get-OctoDevStackServicePathValue)
-                Set-Content -LiteralPath $data.path -Value $plist -NoNewline
+                Set-Content -LiteralPath $data.path -Value $plist -NoNewline -ErrorAction Stop
                 $domain = Get-OctoDevStackLaunchdDomain
                 Invoke-OctoDevStackLaunchctl @('bootout', "$domain/$(Get-OctoDevStackLaunchAgentLabel)") -AllowFailure | Out-Null   # an older copy of it
                 Invoke-OctoDevStackLaunchctl @('bootstrap', $domain, $data.path) | Out-Null
+                # launchd reports the bootstrap before the daemon is up - started means it answers.
+                if (-not (Wait-OctoDevStackNewDaemon -Port $Port -PreviousPid 0 -TimeoutSeconds $HealthTimeoutSeconds)) {
+                    throw "the LaunchAgent is loaded, but octo-devstack does not answer on $url within $HealthTimeoutSeconds s; see $(Join-Path $statePath 'daemon.log')"
+                }
                 $data.started = $true
             }
         }
@@ -1154,7 +1295,7 @@ function Uninstall-OctoDevStackDaemonService {
                 $data.path = $unitPath
                 if (Test-Path -LiteralPath $unitPath) {
                     Invoke-OctoDevStackSystemctl @('disable', '--now', "$script:ServiceName.service")
-                    Remove-Item -LiteralPath $unitPath -Force
+                    Remove-Item -LiteralPath $unitPath -Force -ErrorAction Stop
                     Invoke-OctoDevStackSystemctl @('daemon-reload')
                     $data.removed = $true
                 }
@@ -1162,10 +1303,14 @@ function Uninstall-OctoDevStackDaemonService {
             'macos' {
                 $data.kind = 'launchAgent'
                 $data.path = Get-OctoDevStackLaunchAgentPath
-                $data.removed = Test-Path -LiteralPath $data.path
-                # bootout ends the daemon (SIGTERM; AbandonProcessGroup keeps the stack services) and unloads the agent.
-                Invoke-OctoDevStackLaunchctl @('bootout', "$(Get-OctoDevStackLaunchdDomain)/$(Get-OctoDevStackLaunchAgentLabel)") -AllowFailure | Out-Null
-                if ($data.removed) { Remove-Item -LiteralPath $data.path -Force }
+                # bootout ends the daemon (SIGTERM; AbandonProcessGroup keeps the stack services) and unloads the agent; a job
+                # that stays loaded throws and keeps its plist - removing it would leave launchd running a daemon nobody can
+                # find the definition of, and report it as removed.
+                Stop-OctoDevStackService -Service ([pscustomobject]@{ kind = 'launchAgent'; path = $data.path })
+                if (Test-Path -LiteralPath $data.path) {
+                    Remove-Item -LiteralPath $data.path -Force -ErrorAction Stop
+                    $data.removed = $true
+                }
             }
         }
     }
