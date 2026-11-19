@@ -123,10 +123,43 @@ function Get-OctoDevStackListener([int]$Port) {
 function Get-OctoDevStackListeningPids([int]$Port) {
     $lsof = Get-OctoDevStackNativeCommand 'lsof'
     if (-not $lsof) {
+        if (Test-OctoDevStackLinux) { return @(Get-OctoDevStackProcListeningPids -Port $Port) }
         Write-Warning "lsof is not installed: cannot tell which process listens on port $Port."
         return @()
     }
     return @(& $lsof -nP "-iTCP:$Port" -sTCP:LISTEN -t 2>$null | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ } | Select-Object -Unique)
+}
+
+function Test-OctoDevStackLinux { return [bool]$IsLinux }
+
+$script:ProcRoot = '/proc'
+
+function Get-OctoDevStackLinkTarget([string]$Path) {
+    try { return [string](Get-Item -LiteralPath $Path -Force -ErrorAction Stop).LinkTarget } catch { return $null }
+}
+
+function Get-OctoDevStackProcListeningPids([int]$Port) {
+    # Linux without lsof (minimal distributions, WSL; AB#9377): the inodes of the LISTEN sockets on the port from
+    # /proc/net/tcp and tcp6 (state 0A), then the pids whose fd links name one of them. Like lsof without root, only the
+    # user's own processes are readable. The daemon reads /proc the same way (octo-devstack LinuxProc).
+    $sockets = @{}
+    foreach ($table in 'net/tcp', 'net/tcp6') {
+        $file = Join-Path $script:ProcRoot $table
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        foreach ($line in @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Select-Object -Skip 1)) {
+            $fields = -split $line
+            if ($fields.Count -lt 10 -or $fields[3] -ne '0A' -or $fields[9] -eq '0') { continue }
+            $local = $fields[1]
+            if ([Convert]::ToInt32($local.Substring($local.LastIndexOf(':') + 1), 16) -eq $Port) { $sockets["socket:[$($fields[9])]"] = $true }
+        }
+    }
+    if ($sockets.Count -eq 0) { return @() }
+    $pids = foreach ($folder in @(Get-ChildItem -LiteralPath $script:ProcRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d+$' })) {
+        foreach ($fd in @(Get-ChildItem -LiteralPath (Join-Path $folder.FullName 'fd') -Force -ErrorAction SilentlyContinue)) {
+            if ($sockets.ContainsKey([string](Get-OctoDevStackLinkTarget -Path $fd.FullName))) { [int]$folder.Name; break }
+        }
+    }
+    return @($pids | Select-Object -Unique)
 }
 
 function Get-OctoDevStackProcessCommandLine([int]$ProcessId) {
