@@ -65,8 +65,9 @@ AfterAll {
 }
 
 Describe 'OctoDevStack module surface' {
-    It 'exports only the daemon start and stop' {
-        @((Get-Module OctoDevStack).ExportedFunctions.Keys | Sort-Object) | Should -Be @('Start-OctoDevStackDaemon', 'Stop-OctoDevStackDaemon')
+    It 'exports the daemon start and stop and the service install' {
+        @((Get-Module OctoDevStack).ExportedFunctions.Keys | Sort-Object) |
+            Should -Be @('Install-OctoDevStackDaemonService', 'Start-OctoDevStackDaemon', 'Stop-OctoDevStackDaemon', 'Uninstall-OctoDevStackDaemonService')
     }
 
     It 'defaults to a folder next to the octo-tools checkout (outside .claude/worktrees)' {
@@ -555,12 +556,12 @@ Describe 'Stop-OctoDevStackDaemon' {
 
     Context 'graceful stop on Windows (AB#9377)' {
         BeforeEach {
-            $script:Dll = Join-Path $TestDrive 'octo-devstack/bin/Release/net10.0/octo-devstack.dll'
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:Dll) | Out-Null
-            Set-Content -Path $script:Dll -Value ''
+            $script:StopDll = Join-Path $TestDrive 'octo-devstack/bin/Release/net10.0/octo-devstack.dll'
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:StopDll) | Out-Null
+            Set-Content -Path $script:StopDll -Value ''
             Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
             Mock -ModuleName OctoDevStack Get-NetTCPConnection { [pscustomobject]@{ OwningProcess = 1234 } }
-            Mock -ModuleName OctoDevStack Get-CimInstance { [pscustomobject]@{ CommandLine = "dotnet `"$script:Dll`" --url http://127.0.0.1:5090" } }
+            Mock -ModuleName OctoDevStack Get-CimInstance { [pscustomobject]@{ CommandLine = "dotnet `"$script:StopDll`" --url http://127.0.0.1:5090" } }
         }
 
         It 'sends CTRL_BREAK through the daemon''s helper and waits for it to shut down by itself' {
@@ -572,7 +573,7 @@ Describe 'Stop-OctoDevStackDaemon' {
 
             $json.data.stopped | Should -BeTrue
             $json.data.graceful | Should -BeTrue
-            Should -Invoke -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak -Times 1 -ParameterFilter { $ProcessId -eq 1234 -and $Dll -eq $script:Dll }
+            Should -Invoke -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak -Times 1 -ParameterFilter { $ProcessId -eq 1234 -and $Dll -eq $script:StopDll }
             Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 0
         }
 
@@ -642,5 +643,95 @@ Describe 'Invoke-CloneMainRepos -devTools' {
         $json.data.success | Should -BeFalse
         $json.data.error | Should -BeLike '*-devTools*-branch*'
         Should -Invoke -ModuleName Invoke-CloneMainRepos Clone-Repo -Times 0
+    }
+}
+
+Describe 'Install-OctoDevStackDaemonService (AB#9377)' {
+    BeforeEach {
+        $script:SavedXdg = $env:XDG_CONFIG_HOME
+        $env:XDG_CONFIG_HOME = Join-Path $TestDrive 'xdg'
+        $script:Checkout = New-FakeCheckout 'service' -Built
+        $script:Systemctl = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $false }
+        Mock -ModuleName OctoDevStack Invoke-OctoDevStackSystemctl { $script:Systemctl.Add($Arguments -join ' ') }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackNativeCommand { '/usr/bin/dotnet' } -ParameterFilter { $Name -eq 'dotnet' }
+        Mock -ModuleName OctoDevStack Register-OctoDevStackLogonTask { }
+        Mock -ModuleName OctoDevStack Unregister-OctoDevStackLogonTask { $true }
+        Mock -ModuleName OctoDevStack Invoke-OctoDevStackLaunchAgentScript { $script:LaunchAgentTools = $env:OCTO_TOOLS_PATH }
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDaemon { '{"data":{"success":true}}' }
+        $script:Tools = InModuleScope OctoDevStack { Get-OctoDevStackToolsPath }
+    }
+
+    AfterEach { $env:XDG_CONFIG_HOME = $script:SavedXdg }
+
+    It 'writes a systemd user unit that never ends the stack services and starts it on Linux' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'linux' }
+
+        $json = Install-OctoDevStackDaemonService -Path $script:Checkout -Json | ConvertFrom-Json
+
+        $json.data.error | Should -BeNullOrEmpty
+        $json.data.success | Should -BeTrue
+        $json.data.kind | Should -Be 'systemdUser'
+        $json.data.started | Should -BeTrue
+        $unit = Get-Content -Raw (Join-Path $env:XDG_CONFIG_HOME 'systemd/user/octo-devstack.service')
+        $unit | Should -Match '(?m)^KillMode=process$'
+        $unit | Should -Match '(?m)^Restart=on-failure$'
+        $unit | Should -Match ([regex]::Escape('"/usr/bin/dotnet" "' + (Join-Path $script:Checkout $script:Dll) + '" --url http://127.0.0.1:5090'))
+        $unit | Should -Match ([regex]::Escape("OCTO_TOOLS_PATH=$script:Tools"))
+        $script:Systemctl | Should -Be @('daemon-reload', 'enable --now octo-devstack.service')
+    }
+
+    It 'only enables the unit on Linux while a daemon already runs on the port (no second one)' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'linux' }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $true }
+
+        $json = Install-OctoDevStackDaemonService -Path $script:Checkout -Json | ConvertFrom-Json
+
+        $json.data.alreadyRunning | Should -BeTrue
+        $json.data.started | Should -BeFalse
+        $script:Systemctl | Should -Be @('daemon-reload', 'enable octo-devstack.service')
+    }
+
+    It 'registers a logon task that runs Start-OctoDevStackDaemon with the octo-tools profile on Windows, and starts the daemon' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'windows' }
+
+        $json = Install-OctoDevStackDaemonService -Path $script:Checkout -Port 5097 -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.kind | Should -Be 'scheduledTask'
+        $json.data.started | Should -BeTrue
+        Should -Invoke -ModuleName OctoDevStack Register-OctoDevStackLogonTask -Times 1 -ParameterFilter {
+            $TaskName -eq 'octo-devstack' -and $Execute -eq 'pwsh.exe' -and $Arguments -like '*-WindowStyle Hidden*' -and
+            $Arguments -like "*$(Join-Path $script:Tools 'modules/profile.ps1')*" -and $Arguments -like "*Start-OctoDevStackDaemon -Path '$script:Checkout' -Port 5097*"
+        }
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDaemon -Times 1 -ParameterFilter { $Port -eq 5097 }
+    }
+
+    It 'runs the LaunchAgent script with OCTO_TOOLS_PATH on macOS and refuses while a daemon runs' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'macos' }
+
+        (Install-OctoDevStackDaemonService -Path $script:Checkout -Json | ConvertFrom-Json).data.success | Should -BeTrue
+        $script:LaunchAgentTools | Should -Be $script:Tools
+
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $true }
+        $json = Install-OctoDevStackDaemonService -Path $script:Checkout -Json | ConvertFrom-Json
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike '*already runs*stop it first*'
+    }
+
+    It 'removes the unit on Linux and the task on Windows' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'linux' }
+        Install-OctoDevStackDaemonService -Path $script:Checkout -NoStart -Json | Out-Null
+        $script:Systemctl.Clear()
+
+        $json = Uninstall-OctoDevStackDaemonService -Path $script:Checkout -Json | ConvertFrom-Json
+
+        $json.data.removed | Should -BeTrue
+        Test-Path (Join-Path $env:XDG_CONFIG_HOME 'systemd/user/octo-devstack.service') | Should -BeFalse
+        $script:Systemctl | Should -Be @('disable --now octo-devstack.service', 'daemon-reload')
+
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'windows' }
+        (Uninstall-OctoDevStackDaemonService -Json | ConvertFrom-Json).data.removed | Should -BeTrue
+        Should -Invoke -ModuleName OctoDevStack Unregister-OctoDevStackLogonTask -Times 1
     }
 }

@@ -487,4 +487,266 @@ function Stop-OctoDevStackDaemon {
     Write-OctoDevStackResult $command $Json $true $data $null
 }
 
-Export-ModuleMember -Function @('Start-OctoDevStackDaemon', 'Stop-OctoDevStackDaemon')
+# ---------------------------------------------------------------------------------------------------------
+# Background service (AB#9377): the daemon starts at login on every OS. One wrapper per external effect, so the
+# tests can mock them (the ScheduledTasks cmdlets exist on Windows only).
+# ---------------------------------------------------------------------------------------------------------
+
+$script:ServiceName = 'octo-devstack'
+$script:WindowsTaskPath = '\OctoMesh\'
+
+function Get-OctoDevStackServicePlatform {
+    if ($IsWindows) { return 'windows' }
+    if ($IsMacOS) { return 'macos' }
+    return 'linux'
+}
+
+function Get-OctoDevStackSystemdUnitPath {
+    $configHome = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.config' }
+    return Join-Path $configHome "systemd/user/$script:ServiceName.service"
+}
+
+function Get-OctoDevStackSystemdUnit([string]$RepoPath, [string]$Dll, [string]$Url, [string]$ToolsPath, [string]$Dotnet, [string]$StatePath) {
+    # KillMode=process: a stop or restart of the unit ends the daemon only. The stack services it started are in the
+    # unit's cgroup, and systemd's default (control-group) would kill them all; the next daemon adopts them instead,
+    # like launchd's AbandonProcessGroup on macOS. Restart=on-failure: a crash restarts it, a stop (SIGTERM, exit 0) not.
+    $lines = @(
+        '[Unit]'
+        'Description=octo-devstack - MCP daemon for the local OctoMesh dev stack'
+        ''
+        '[Service]'
+        'Type=simple'
+        "WorkingDirectory=$RepoPath"
+        "ExecStart=`"$Dotnet`" `"$Dll`" --url $Url"
+        "Environment=`"OCTO_TOOLS_PATH=$ToolsPath`""
+        "Environment=`"PATH=$env:PATH`""
+        'Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1'
+    )
+    if ($env:DOTNET_ROOT) { $lines += "Environment=`"DOTNET_ROOT=$env:DOTNET_ROOT`"" }
+    $lines += @(
+        'KillMode=process'
+        'Restart=on-failure'
+        'RestartSec=5'
+        "StandardOutput=append:$StatePath/daemon.log"
+        "StandardError=append:$StatePath/daemon.log"
+        ''
+        '[Install]'
+        'WantedBy=default.target'
+    )
+    return ($lines -join "`n") + "`n"
+}
+
+function Invoke-OctoDevStackSystemctl([string[]]$Arguments) {
+    $systemctl = Get-OctoDevStackNativeCommand 'systemctl'
+    if (-not $systemctl) { throw 'systemctl is not installed: start the daemon in a terminal (Start-OctoDevStackDaemon) or with your own service manager.' }
+    $output = & $systemctl --user @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "systemctl --user $($Arguments -join ' ') failed: $(($output | Out-String).Trim())" }
+}
+
+function Invoke-OctoDevStackLaunchAgentScript([string]$Script, [string[]]$Arguments) {
+    $output = & /bin/sh $Script @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "$Script failed: $(($output | Out-String).Trim())" }
+}
+
+function Get-OctoDevStackWindowsTaskCommand([string]$ToolsPath, [string]$RepoPath, [int]$Port) {
+    # pwsh with the octo-tools profile running Start-OctoDevStackDaemon: it does nothing while the daemon answers,
+    # builds a missing Release build and starts the daemon hidden (it outlives the task's pwsh).
+    $profilePath = (Join-Path $ToolsPath 'modules/profile.ps1').Replace("'", "''")
+    $repo = $RepoPath.Replace("'", "''")
+    $script = ". '$profilePath' *> `$null; Start-OctoDevStackDaemon -Path '$repo' -Port $Port *> `$null"
+    return [pscustomobject]@{ Execute = 'pwsh.exe'; Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command `"$script`"" }
+}
+
+function Register-OctoDevStackLogonTask([string]$TaskName, [string]$Execute, [string]$Arguments, [string]$WorkingDirectory) {
+    $user = "$([Environment]::UserDomainName)\$([Environment]::UserName)"
+    $action = New-ScheduledTaskAction -Execute $Execute -Argument $Arguments -WorkingDirectory $WorkingDirectory
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    # Again every 15 minutes while the user is logged on: starts the daemon after a crash, does nothing otherwise.
+    $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)).Repetition
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $TaskName -TaskPath $script:WindowsTaskPath -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+        -Description 'Starts the octo-devstack daemon (local OctoMesh dev stack, MCP on 127.0.0.1) at logon and after a crash. Install-OctoDevStackDaemonService (octo-tools).' -Force | Out-Null
+}
+
+function Unregister-OctoDevStackLogonTask([string]$TaskName) {
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $script:WindowsTaskPath -ErrorAction SilentlyContinue
+    if (-not $task) { return $false }
+    Unregister-ScheduledTask -TaskName $TaskName -TaskPath $script:WindowsTaskPath -Confirm:$false
+    return $true
+}
+
+function Install-OctoDevStackDaemonService {
+    <#
+    .SYNOPSIS
+        Starts the octo-devstack daemon at login (and after a crash) on Windows, Linux and macOS (AB#9377).
+
+    .DESCRIPTION
+        - Windows: a scheduled task (\OctoMesh\octo-devstack) of the current user at logon, repeated every 15 minutes,
+          that runs Start-OctoDevStackDaemon with the octo-tools profile (it does nothing while the daemon answers).
+        - Linux: a systemd user unit (~/.config/systemd/user/octo-devstack.service, or below $XDG_CONFIG_HOME) with
+          KillMode=process - stopping or restarting the unit never ends the stack services - and Restart=on-failure.
+          The daemon then runs under systemd: restart it with `systemctl --user restart octo-devstack`. To keep it
+          running without a login session: `loginctl enable-linger`.
+        - macOS: the LaunchAgent of the checkout's scripts/install-launchagent.sh (KeepAlive, AbandonProcessGroup).
+        Every variant passes OCTO_TOOLS_PATH (this octo-tools checkout) to the daemon. A missing Release build is built
+        first. A daemon that already runs on the port is left alone: on Linux the unit is only enabled (it takes over at
+        the next login), on macOS the install is refused (launchd would start a second one at once) - stop it first.
+        Register the MCP server in Claude Code once: `claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:<Port>/mcp`.
+
+    .PARAMETER NoStart
+        Register only; start nothing now.
+
+    .PARAMETER Json
+        { success, exitCode, platform, kind (scheduledTask|systemdUser|launchAgent), name, path, started, alreadyRunning, mcpUrl, built[, error] }
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Path,
+        [int]$Port = 5090,
+        [switch]$NoStart,
+        [switch]$Json
+    )
+
+    $command = 'Install-OctoDevStackDaemonService'
+    $platform = Get-OctoDevStackServicePlatform
+    $repoPath = if ([string]::IsNullOrWhiteSpace($Path)) { Get-OctoDevStackDefaultPath } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path) }
+    $dll = Join-Path $repoPath $script:DllRelativePath
+    $url = "http://127.0.0.1:$Port"
+    $toolsPath = Get-OctoDevStackToolsPath
+    $statePath = Get-OctoDevStackStatePath
+    $data = @{ platform = $platform; kind = $null; name = $script:ServiceName; path = $null; started = $false; alreadyRunning = $false; mcpUrl = "$url/mcp"; built = $false }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src'))) {
+        Write-OctoDevStackResult $command $Json $false $data "No octo-devstack checkout in $repoPath. Run Invoke-CloneMainRepos -devTools (clones it next to octo-tools) or pass -Path."
+        return
+    }
+    if (-not (Test-Path -LiteralPath $dll)) {
+        if ($Json) { Invoke-Build -repositoryPath $repoPath -configuration Release -Json | Out-Null } else { Invoke-Build -repositoryPath $repoPath -configuration Release }
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dll)) {
+            Write-OctoDevStackResult $command $Json $false $data "Invoke-Build -repositoryPath $repoPath -configuration Release failed (see $(Join-Path $repoPath 'Invoke-Build.log'))."
+            return
+        }
+        $data.built = $true
+    }
+    $data.alreadyRunning = [bool](Test-OctoDevStackHealth -Port $Port)
+
+    try {
+        switch ($platform) {
+            'windows' {
+                $data.kind = 'scheduledTask'
+                $data.path = "$($script:WindowsTaskPath)$($script:ServiceName)"
+                $task = Get-OctoDevStackWindowsTaskCommand -ToolsPath $toolsPath -RepoPath $repoPath -Port $Port
+                Register-OctoDevStackLogonTask -TaskName $script:ServiceName -Execute $task.Execute -Arguments $task.Arguments -WorkingDirectory $toolsPath
+                if (-not $NoStart -and -not $data.alreadyRunning) {
+                    $start = Start-OctoDevStackDaemon -Path $repoPath -Port $Port -Json | ConvertFrom-Json
+                    if (-not $start.data.success) { throw "the task is registered, but the daemon did not start: $($start.data.error)" }
+                    $data.started = $true
+                }
+            }
+            'linux' {
+                $data.kind = 'systemdUser'
+                $unitPath = Get-OctoDevStackSystemdUnitPath
+                $data.path = $unitPath
+                $dotnet = Get-OctoDevStackNativeCommand 'dotnet'
+                if (-not $dotnet) { throw 'dotnet is not on PATH.' }
+                if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unitPath) | Out-Null
+                Set-Content -LiteralPath $unitPath -Value (Get-OctoDevStackSystemdUnit -RepoPath $repoPath -Dll $dll -Url $url -ToolsPath $toolsPath -Dotnet $dotnet -StatePath $statePath) -NoNewline
+                Invoke-OctoDevStackSystemctl @('daemon-reload')
+                if ($NoStart -or $data.alreadyRunning) {
+                    Invoke-OctoDevStackSystemctl @('enable', "$script:ServiceName.service")
+                }
+                else {
+                    Invoke-OctoDevStackSystemctl @('enable', '--now', "$script:ServiceName.service")
+                    $data.started = $true
+                }
+            }
+            'macos' {
+                $data.kind = 'launchAgent'
+                $data.path = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) "Library/LaunchAgents/io.meshmakers.$script:ServiceName.plist"
+                if ($data.alreadyRunning) {
+                    throw "octo-devstack already runs on $url and launchd would start a second one at once: stop it first (Stop-OctoDevStackDaemon), then install again."
+                }
+                if ($NoStart) { throw '-NoStart is not available on macOS: launchd loads the LaunchAgent at once.' }
+                $previousToolsPath = $env:OCTO_TOOLS_PATH
+                $env:OCTO_TOOLS_PATH = $toolsPath
+                try { Invoke-OctoDevStackLaunchAgentScript -Script (Join-Path $repoPath 'scripts/install-launchagent.sh') -Arguments @() }
+                finally { $env:OCTO_TOOLS_PATH = $previousToolsPath }
+                $data.started = $true
+            }
+        }
+    }
+    catch {
+        Write-OctoDevStackResult $command $Json $false $data "Could not install the $platform service: $($_.Exception.Message)"
+        return
+    }
+
+    if (-not $Json) {
+        Write-Host "octo-devstack starts at login ($($data.kind): $($data.path))." -ForegroundColor Green
+        if ($data.alreadyRunning) { Write-Host '  A daemon already runs on the port; it was left alone.' }
+        Write-Host "  MCP: $url/mcp - register once: claude mcp add --transport http --scope user octo-devstack $url/mcp"
+    }
+    Write-OctoDevStackResult $command $Json $true $data $null
+}
+
+function Uninstall-OctoDevStackDaemonService {
+    <#
+    .SYNOPSIS
+        Removes what Install-OctoDevStackDaemonService set up. The stack services are left alone.
+
+    .DESCRIPTION
+        Windows: unregisters the scheduled task (a running daemon keeps running; Stop-OctoDevStackDaemon stops it).
+        Linux: `systemctl --user disable --now` and the unit file (the daemon stops, its services keep running).
+        macOS: scripts/install-launchagent.sh --uninstall (launchd stops the daemon, its services keep running).
+
+    .PARAMETER Json
+        { success, exitCode, platform, kind, path, removed[, error] }
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Path,
+        [switch]$Json
+    )
+
+    $command = 'Uninstall-OctoDevStackDaemonService'
+    $platform = Get-OctoDevStackServicePlatform
+    $repoPath = if ([string]::IsNullOrWhiteSpace($Path)) { Get-OctoDevStackDefaultPath } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path) }
+    $data = @{ platform = $platform; kind = $null; path = $null; removed = $false }
+    try {
+        switch ($platform) {
+            'windows' {
+                $data.kind = 'scheduledTask'
+                $data.path = "$($script:WindowsTaskPath)$($script:ServiceName)"
+                $data.removed = [bool](Unregister-OctoDevStackLogonTask -TaskName $script:ServiceName)
+            }
+            'linux' {
+                $data.kind = 'systemdUser'
+                $unitPath = Get-OctoDevStackSystemdUnitPath
+                $data.path = $unitPath
+                if (Test-Path -LiteralPath $unitPath) {
+                    Invoke-OctoDevStackSystemctl @('disable', '--now', "$script:ServiceName.service")
+                    Remove-Item -LiteralPath $unitPath -Force
+                    Invoke-OctoDevStackSystemctl @('daemon-reload')
+                    $data.removed = $true
+                }
+            }
+            'macos' {
+                $data.kind = 'launchAgent'
+                $data.path = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) "Library/LaunchAgents/io.meshmakers.$script:ServiceName.plist"
+                $data.removed = Test-Path -LiteralPath $data.path
+                Invoke-OctoDevStackLaunchAgentScript -Script (Join-Path $repoPath 'scripts/install-launchagent.sh') -Arguments @('--uninstall')
+            }
+        }
+    }
+    catch {
+        Write-OctoDevStackResult $command $Json $false $data "Could not remove the $platform service: $($_.Exception.Message)"
+        return
+    }
+    if (-not $Json) {
+        Write-Host $(if ($data.removed) { "Removed the octo-devstack service ($($data.kind): $($data.path)); the stack services were left alone." } else { "No octo-devstack service was installed ($($data.kind))." }) -ForegroundColor Green
+    }
+    Write-OctoDevStackResult $command $Json $true $data $null
+}
+
+Export-ModuleMember -Function @('Start-OctoDevStackDaemon', 'Stop-OctoDevStackDaemon', 'Install-OctoDevStackDaemonService', 'Uninstall-OctoDevStackDaemonService')
