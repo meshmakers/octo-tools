@@ -1402,6 +1402,51 @@ Describe 'Stop and restart of a daemon its service runs (AB#9377)' {
         $script:ServiceCalls | Should -HaveCount 0
     }
 
+    It 'names no pid of launchd''s when its job has none (between two KeepAlive starts): it starts one once this one ended' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { $state = New-ServiceState launchAgent -Supervised; $state.pid = $null; $state }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $ProcessId -ne 902 -or $script:KillCalls.Count -eq 0 }
+
+        $json = Stop-OctoDevStackDaemon -Json -WarningAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.stopped | Should -BeTrue
+        @($json.data.warnings) -join ' ' | Should -Be 'The launchAgent will start its daemon again once this one (PID 902, not started by it) has ended.'
+
+        $path = New-FakeCheckout 'rebuild-launchd-without-pid' -Built
+        $json = Start-OctoDevStackDaemon -Path $path -Restart -Rebuild -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $json.data.error | Should -BeLike 'octo-devstack (PID 902) was not started by the launchAgent, which starts its own daemon once this one has ended: nothing was stopped or built*'
+        $json.data.error | Should -Not -BeLike '*PID )*'
+    }
+
+    It 'answers alreadyRunning for a -Path that is not the service''s checkout while its daemon runs: nothing would be built or started' {
+        $script:ServiceCheckout = New-FakeCheckout 'service-checkout-running' -Built
+        $other = New-FakeCheckout 'other-checkout-running' -Built
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState systemdUser -Supervised -RepoPath $script:ServiceCheckout }
+
+        $json = Start-OctoDevStackDaemon -Path $other -Json | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.alreadyRunning | Should -BeTrue
+        $json.data.pid | Should -Be 902
+        $script:ServiceCalls | Should -HaveCount 0
+        Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
+    }
+
+    It 'refuses a -Path that is not the service''s checkout when nothing listens: the service''s checkout would be started' {
+        $script:ServiceCheckout = New-FakeCheckout 'service-checkout-down' -Built
+        $other = New-FakeCheckout 'other-checkout-down' -Built
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState systemdUser -Installed -RepoPath $script:ServiceCheckout }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackSystemdUserManager { $true }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $false }
+
+        $json = Start-OctoDevStackDaemon -Path $other -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.error | Should -BeLike "*runs octo-devstack from $($script:ServiceCheckout), not from ${other}*"
+        $script:ServiceCalls | Should -HaveCount 0
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+    }
+
     It 'restarts a daemon started by hand next to launchd''s: stops it and reports launchd''s daemon that takes over' {
         Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState launchAgent -Supervised -ProcessId 4711 }
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $ProcessId -ne 902 -or $script:KillCalls.Count -eq 0 }

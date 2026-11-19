@@ -340,24 +340,33 @@ function Start-OctoDevStackDaemon {
     }
 
     # A service of this port that launchd or systemd runs launches the checkout of its definition: that one is built and
-    # started. A -Path that names another one is refused (the service would go on starting the old one). A unit no user
-    # manager can run (WSL without systemd) does not count: the daemon is started by hand then, from -Path.
+    # started. A -Path that names another one is refused as soon as something would be built or started (the service
+    # would go on starting the old one); a daemon that already answers stays a success. A unit no user manager can run
+    # (WSL without systemd) does not count: the daemon is started by hand then, from -Path.
     $service = Get-OctoDevStackServiceState -Port $Port
+    $pathConflict = $null
     if (-not $Foreground -and $service.installed -and $service.kind -in @('launchAgent', 'systemdUser') -and $service.repoPath -and
         -not (Test-OctoDevStackSamePath $service.repoPath $repoPath) -and
         ($service.supervised -or (Test-OctoDevStackServiceManager -Kind $service.kind))) {
         if (-not [string]::IsNullOrWhiteSpace($Path)) {
-            Write-OctoDevStackResult $command $Json $false $data ("The $($service.kind) ($($service.path)) runs octo-devstack from $($service.repoPath), not from ${repoPath}: nothing was built or started. " +
-                "Register it for that checkout first (Install-OctoDevStackDaemonService -Path '$repoPath' -Port $Port), or leave -Path out.")
-            return
+            $pathConflict = "The $($service.kind) ($($service.path)) runs octo-devstack from $($service.repoPath), not from ${repoPath}: nothing was built or started. " +
+                "Register it for that checkout first (Install-OctoDevStackDaemonService -Path '$repoPath' -Port $Port), or leave -Path out."
         }
-        $repoPath = $service.repoPath
-        $dll = Join-Path $repoPath $script:DllRelativePath
+        else {
+            $repoPath = $service.repoPath
+            $dll = Join-Path $repoPath $script:DllRelativePath
+        }
     }
 
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $ours = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
     $stopped = $false
+    if ($ours -and $Restart -and $pathConflict) {
+        $data.alreadyRunning = $true
+        $data.pid = $ours.pid
+        Write-OctoDevStackResult $command $Json $false $data $pathConflict
+        return
+    }
     if ($ours -and $Restart) {
         # Nothing to start from: leave the running daemon alone (a stop here would take the shared daemon down for good).
         if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src'))) {
@@ -376,7 +385,10 @@ function Start-OctoDevStackDaemon {
         if ($Rebuild -and $service.supervised -and -not $runsOurs) {
             $data.alreadyRunning = $true
             $data.pid = $ours.pid
-            Write-OctoDevStackResult $command $Json $false $data ("octo-devstack (PID $($ours.pid)) was started by hand next to the daemon of the $($service.kind)$(if ($service.pid) { " (PID $($service.pid))" }), which takes over when it ends: " +
+            # launchd without a pid (between two KeepAlive starts) runs no daemon at this moment; it starts one once this one ended.
+            $next = if ($service.pid) { "was started by hand next to the daemon of the $($service.kind) (PID $($service.pid)), which takes over when it ends" }
+                    else { "was not started by the $($service.kind), which starts its own daemon once this one has ended" }
+            Write-OctoDevStackResult $command $Json $false $data ("octo-devstack (PID $($ours.pid)) ${next}: " +
                 'nothing was stopped or built. Stop the one started by hand first (Stop-OctoDevStackDaemon), then run -Restart -Rebuild.')
             return
         }
@@ -467,6 +479,11 @@ function Start-OctoDevStackDaemon {
         }
         if (-not $Json) { Write-Host "octo-devstack is already running on $url$(if ($ours) { " (PID $($ours.pid))" }) - MCP $url/mcp" -ForegroundColor Green }
         Write-OctoDevStackResult $command $Json $true $data $null
+        return
+    }
+    if ($pathConflict) {
+        # From here on something is waited for, built or started - from the service's checkout, not from -Path.
+        Write-OctoDevStackResult $command $Json $false $data $pathConflict
         return
     }
     if ($listeners.Count -gt 0) {
@@ -690,7 +707,13 @@ function Stop-OctoDevStackDaemon {
     $runsTarget = Test-OctoDevStackServiceRuns -Service $service -ProcessId $target.pid
     if ($runsTarget) { $data.service = $service.kind }
     elseif ($service.supervised) {
-        $data.warnings = @($data.warnings) + "The $($service.kind) runs octo-devstack PID $($service.pid), which waits for this one (PID $($target.pid), not started by it) and takes over when it has ended."
+        $data.warnings = @($data.warnings) + $(if ($service.pid) {
+                "The $($service.kind) runs octo-devstack PID $($service.pid), which waits for this one (PID $($target.pid), not started by it) and takes over when it has ended."
+            }
+            else {
+                # launchd between two KeepAlive starts: no daemon of its own runs at this moment.
+                "The $($service.kind) will start its daemon again once this one (PID $($target.pid), not started by it) has ended."
+            })
     }
     if ($runsTarget -and $service.kind -eq 'launchAgent') {
         $data.refused = $true
