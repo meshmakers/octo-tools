@@ -42,7 +42,7 @@ BeforeAll {
         throw "test called launchctl $($Arguments -join ' ') without a mock"
     }
     Mock -ModuleName OctoDevStack Get-OctoDevStackSystemdActive { $false }
-    Mock -ModuleName OctoDevStack Test-OctoDevStackLogonTask { $false }
+    Mock -ModuleName OctoDevStack Get-OctoDevStackLogonTaskArguments { $null }
     Mock -ModuleName OctoDevStack Get-OctoDevStackLaunchAgentPath { Join-Path $TestDrive 'LaunchAgents/io.meshmakers.octo-devstack.plist' }
     Mock -ModuleName OctoDevStack Get-OctoDevStackLaunchdDomain { 'gui/501' }
     $script:SavedXdgRoot = $env:XDG_CONFIG_HOME
@@ -912,13 +912,58 @@ Describe 'Get-OctoDevStackServiceState (AB#9377)' {
 
     It 'reads Windows: the logon task is installed but supervises nothing' {
         Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'windows' }
-        Mock -ModuleName OctoDevStack Test-OctoDevStackLogonTask { $true }
+        $script:TaskArguments = (InModuleScope OctoDevStack { Get-OctoDevStackWindowsTaskCommand -ToolsPath 'C:\t' -RepoPath 'C:\d' -Port 5090 }).Arguments
+        Mock -ModuleName OctoDevStack Get-OctoDevStackLogonTaskArguments { $script:TaskArguments }
 
         $state = InModuleScope OctoDevStack { Get-OctoDevStackServiceState }
 
         $state.kind | Should -Be 'scheduledTask'
         $state.installed | Should -BeTrue
         $state.supervised | Should -BeFalse
+        $state.port | Should -Be 5090
+        (InModuleScope OctoDevStack { Get-OctoDevStackServiceState -Port 5192 }).installed | Should -BeFalse -Because 'the task starts the daemon on 5090, not one on 5192'
+    }
+
+    It 'reads the port from every service definition the module writes, and none from one without --url' {
+        InModuleScope OctoDevStack {
+            $plist = Get-OctoDevStackLaunchAgentPlist -Label 'io.meshmakers.octo-devstack' -RepoPath '/r' -Dll '/r/x.dll' -Url 'http://127.0.0.1:5090' -ToolsPath '/t' -Dotnet '/d/dotnet' -StatePath '/s' -PathValue '/bin'
+            Get-OctoDevStackServicePort $plist | Should -Be 5090
+            Get-OctoDevStackServicePort (Get-OctoDevStackSystemdUnit -RepoPath '/r' -Dll '/r/x.dll' -Url 'http://127.0.0.1:5192' -ToolsPath '/t' -Dotnet '/d/dotnet' -StatePath '/s') | Should -Be 5192
+            Get-OctoDevStackServicePort (Get-OctoDevStackWindowsTaskCommand -ToolsPath 'C:\t' -RepoPath 'C:\d' -Port 5191).Arguments | Should -Be 5191
+            Get-OctoDevStackServicePort "gui/501/io.meshmakers.octo-devstack = {`n`targuments = {`n`t`t/d/dotnet`n`t`t/r/x.dll`n`t`t--url`n`t`thttp://127.0.0.1:5090`n`t}`n}" | Should -Be 5090
+            Get-OctoDevStackServicePort '<key>ProgramArguments</key><array><string>/d/dotnet</string><string>/r/x.dll</string></array>' | Should -BeNullOrEmpty
+            Get-OctoDevStackServicePort '' | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'a service of another port is neither installed nor supervised for this one (systemd)' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'linux' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackSystemdActive { $true }
+        New-Item -ItemType Directory -Force -Path (Join-Path $env:XDG_CONFIG_HOME 'systemd/user') | Out-Null
+        Set-Content -Path (Join-Path $env:XDG_CONFIG_HOME 'systemd/user/octo-devstack.service') -Value 'ExecStart="/d/dotnet" "/r/x.dll" --url http://127.0.0.1:5090'
+
+        $own = InModuleScope OctoDevStack { Get-OctoDevStackServiceState -Port 5090 }
+        $other = InModuleScope OctoDevStack { Get-OctoDevStackServiceState -Port 5193 }
+
+        $own.supervised | Should -BeTrue
+        $other.supervised | Should -BeFalse
+        $other.installed | Should -BeFalse
+        $other.port | Should -Be 5090
+    }
+
+    It 'a service of another port is not supervised for this one (launchd, port from the plist when print names none)' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'macos' }
+        Mock -ModuleName OctoDevStack Invoke-OctoDevStackLaunchctl { [pscustomobject]@{ exitCode = 0; output = "gui/501/io.meshmakers.octo-devstack = {`n`tpid = 4711`n}" } } -ParameterFilter { $Arguments[0] -eq 'print' }
+        $plistPath = Join-Path $TestDrive 'LaunchAgents/io.meshmakers.octo-devstack.plist'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $plistPath) | Out-Null
+        Set-Content -Path $plistPath -Value (InModuleScope OctoDevStack { Get-OctoDevStackLaunchAgentPlist -Label 'l' -RepoPath '/r' -Dll '/r/x.dll' -Url 'http://127.0.0.1:5090' -ToolsPath '/t' -Dotnet '/d/dotnet' -StatePath '/s' -PathValue '/bin' })
+        try {
+            (InModuleScope OctoDevStack { Get-OctoDevStackServiceState -Port 5090 }).supervised | Should -BeTrue
+            $other = InModuleScope OctoDevStack { Get-OctoDevStackServiceState -Port 5191 }
+            $other.supervised | Should -BeFalse
+            $other.pid | Should -BeNullOrEmpty -Because 'the pid is that of the service''s daemon on 5090'
+        }
+        finally { Remove-Item -LiteralPath $plistPath -Force }
     }
 }
 
@@ -1093,5 +1138,49 @@ Describe 'Stop and restart of a daemon its service runs (AB#9377)' {
         $json.data.success | Should -BeFalse
         $json.data.error | Should -BeLike '*launchAgent runs octo-devstack, but nothing answers*No second daemon*'
         Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+    }
+
+    It 'stops a test daemon on another port by its own signal and leaves the systemd unit of 5090 alone' {
+        # Found on Linux: Stop-OctoDevStackDaemon -Port 5193 ran systemctl --user stop, which ended the unit's daemon on
+        # 5090, and then failed because the daemon on 5193 still ran.
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'linux' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackSystemdActive { $true }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
+        $saved = $env:XDG_CONFIG_HOME
+        $env:XDG_CONFIG_HOME = Join-Path $TestDrive 'xdg-other-port'
+        New-Item -ItemType Directory -Force -Path (Join-Path $env:XDG_CONFIG_HOME 'systemd/user') | Out-Null
+        Set-Content -Path (Join-Path $env:XDG_CONFIG_HOME 'systemd/user/octo-devstack.service') -Value 'ExecStart="/d/dotnet" "/r/x.dll" --url http://127.0.0.1:5090'
+        try { $json = Stop-OctoDevStackDaemon -Port 5193 -Json -WarningAction SilentlyContinue | ConvertFrom-Json }
+        finally { $env:XDG_CONFIG_HOME = $saved }
+
+        $json.data.success | Should -BeTrue
+        $json.data.stopped | Should -BeTrue
+        $json.data.service | Should -BeNullOrEmpty
+        $script:ServiceCalls | Should -HaveCount 0
+        $script:KillCalls | Should -Be @('-TERM 902')
+    }
+
+    It 'starts a daemon of its own on another port while launchd runs the one on 5090' {
+        # Found on Linux (same path on macOS): Start-OctoDevStackDaemon -Port 5194 waited for the service's daemon there.
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServicePlatform { 'macos' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        $script:Started = $false
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { $script:Started = $true; 4242 }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:Started }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackHealth { if ($script:Started) { [pscustomobject]@{ status = 'ok'; pid = 4242; version = '1.0.0'; commit = 'd774abca14f7' } } }
+        $plistPath = Join-Path $TestDrive 'LaunchAgents/io.meshmakers.octo-devstack.plist'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $plistPath) | Out-Null
+        Set-Content -Path $plistPath -Value (InModuleScope OctoDevStack { Get-OctoDevStackLaunchAgentPlist -Label 'l' -RepoPath '/r' -Dll '/r/x.dll' -Url 'http://127.0.0.1:5090' -ToolsPath '/t' -Dotnet '/d/dotnet' -StatePath '/s' -PathValue '/bin' })
+        $path = New-FakeCheckout 'other-port-start' -Built
+
+        try { $json = Start-OctoDevStackDaemon -Path $path -Port 5191 -Json | ConvertFrom-Json }
+        finally { Remove-Item -LiteralPath $plistPath -Force }
+
+        $json.data.error | Should -BeNullOrEmpty
+        $json.data.started | Should -BeTrue
+        $json.data.pid | Should -Be 4242
+        $json.data.service | Should -BeNullOrEmpty
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 1 -ParameterFilter { $Url -eq 'http://127.0.0.1:5191' }
+        @($script:ServiceCalls | Where-Object { $_ -notlike 'launchctl print *' }) | Should -HaveCount 0
     }
 }

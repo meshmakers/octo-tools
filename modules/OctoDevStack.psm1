@@ -211,7 +211,9 @@ function Start-OctoDevStackDaemon {
         - A daemon that the service of Install-OctoDevStackDaemonService runs (launchd, systemd; AB#9377) is restarted by
           its service manager (launchctl kickstart -k, systemctl --user restart; with -Rebuild: stopped through it, built,
           started through it), never by a second daemon of this cmdlet. While that service runs it and nothing answers
-          yet, the cmdlet waits for it instead of starting one. -Json service names it.
+          yet, the cmdlet waits for it instead of starting one. -Json service names it. Only the service of -Port counts
+          (the --url of its unit or plist): a daemon on another port, such as a test daemon, is started and restarted
+          by this cmdlet as without a service.
         - -Rebuild: builds Release again before the start. Only together with -Restart or when no daemon runs
           on the port: the build replaces the binaries the running daemon was loaded from.
         - Another program holds the port: refused, the process is named.
@@ -281,7 +283,7 @@ function Start-OctoDevStackDaemon {
         }
         # A daemon its service manager runs (launchd, systemd; AB#9377) is restarted by it: a second daemon of our own would
         # race its KeepAlive / Restart for the port.
-        $service = Get-OctoDevStackServiceState
+        $service = Get-OctoDevStackServiceState -Port $Port
         if ($service.supervised) {
             $data.service = $service.kind
             $check = Get-OctoDevStackRestartCheck -Port $Port
@@ -334,7 +336,7 @@ function Start-OctoDevStackDaemon {
             return
         }
         # The stop asks the daemon first and refuses while builds run or wait (unless -Force).
-        $stop =Stop-OctoDevStackDaemon -Port $Port -Force:$Force -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $stop = Stop-OctoDevStackDaemon -Port $Port -Force:$Force -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
         $data.restartSafe = $stop.data.restartSafe
         $data.blockers = @($stop.data.blockers)
         $data.warnings = @($stop.data.warnings)
@@ -371,7 +373,7 @@ function Start-OctoDevStackDaemon {
     }
     # Nothing listens, but a service manager runs octo-devstack (launchd between two of its starts, systemd while it comes
     # up; AB#9377): its daemon is waited for, a second one is never started next to it.
-    $service = if ($stopped) { $null } else { Get-OctoDevStackServiceState }
+    $service = if ($stopped) { $null } else { Get-OctoDevStackServiceState -Port $Port }
     if ($service -and $service.supervised) {
         $data.service = $service.kind
         $health = Wait-OctoDevStackNewDaemon -Port $Port -PreviousPid 0 -TimeoutSeconds $HealthTimeoutSeconds
@@ -484,7 +486,8 @@ function Stop-OctoDevStackDaemon {
         A daemon that the service of Install-OctoDevStackDaemonService runs (AB#9377): macOS refuses the stop - launchd
         (KeepAlive) would start it again at once; restart it with Start-OctoDevStackDaemon -Restart, remove it with
         Uninstall-OctoDevStackDaemonService. Linux stops the systemd unit (systemctl --user stop; it stays enabled for
-        the next login). Windows stops it and warns that the logon task starts it again within 15 minutes.
+        the next login). Windows stops it and warns that the logon task starts it again within 15 minutes. Only the
+        service of -Port counts: a daemon on another port is stopped by its own signal, the service is left alone.
 
     .PARAMETER Force
         Stop although builds run or wait.
@@ -540,7 +543,7 @@ function Stop-OctoDevStackDaemon {
 
     # A daemon its service manager runs (AB#9377). launchd (KeepAlive) would start it again at once, so a stop is refused
     # there; systemd stops the unit, which stays enabled for the next login.
-    $service = Get-OctoDevStackServiceState
+    $service = Get-OctoDevStackServiceState -Port $Port
     if ($service.supervised) { $data.service = $service.kind }
     if ($service.supervised -and $service.kind -eq 'launchAgent') {
         $data.refused = $true
@@ -758,7 +761,7 @@ function Get-OctoDevStackServicePathValue([string]$PathValue = $env:PATH) {
         if (-not $folder) { continue }
         if ($folder -eq '~') { $folder = $home_ }
         elseif ($folder.StartsWith('~/')) { $folder = Join-Path $home_ $folder.Substring(2) }
-        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { continue }
+        if (-not (Test-Path -LiteralPath $folder -PathType Container -ErrorAction SilentlyContinue)) { continue }   # also a folder this user may not read
         if ($folder -match '[\\/]fnm_multishells[\\/]') { $folder = Resolve-OctoDevStackLinkedFolder $folder }
         $folder = [IO.Path]::TrimEndingDirectorySeparator($folder)
         if (-not $result.Contains($folder)) { $result.Add($folder) }
@@ -766,11 +769,25 @@ function Get-OctoDevStackServicePathValue([string]$PathValue = $env:PATH) {
     return $result -join $separator
 }
 
-function Get-OctoDevStackServiceState {
-    # The background service Install-OctoDevStackDaemonService sets up on this OS: { platform, kind, path, installed,
-    # supervised (the service manager runs the daemon now and starts it again when it exits), pid }.
+function Get-OctoDevStackServicePort([string]$Definition) {
+    # The port of the daemon a service definition starts: `--url <url>` of a systemd unit, a plist or `launchctl print`,
+    # `-Port <n>` of the logon task's command. $null when it names none (a plist of the removed install-launchagent.sh).
+    foreach ($pattern in '--url(?:\s*</string>\s*<string>|\s+)\s*https?://[^\s<"'']*?:(\d+)', '-Port\s+(\d+)') {
+        $match = [regex]::Match($Definition, $pattern)
+        if ($match.Success) { return [int]$match.Groups[1].Value }
+    }
+    return $null
+}
+
+function Get-OctoDevStackServiceState([int]$Port = 5090) {
+    # The background service Install-OctoDevStackDaemonService set up on this OS for the daemon on -Port: { platform, kind,
+    # path, installed, supervised (the service manager runs the daemon now and starts it again when it exits), pid, port
+    # (the port of the service's daemon, $null when its definition names none) }. A service of another port is neither
+    # installed nor supervised here: a development or test daemon on its own port is started and stopped like one without
+    # a service, and the service's daemon is left alone. A definition without a port counts for every port.
     $platform = Get-OctoDevStackServicePlatform
-    $state = [pscustomobject]@{ platform = $platform; kind = $null; path = $null; installed = $false; supervised = $false; pid = $null }
+    $state = [pscustomobject]@{ platform = $platform; kind = $null; path = $null; installed = $false; supervised = $false; pid = $null; port = $null }
+    $definition = ''
     switch ($platform) {
         'macos' {
             $state.kind = 'launchAgent'
@@ -781,20 +798,33 @@ function Get-OctoDevStackServiceState {
                 $state.supervised = $true   # loaded with KeepAlive: launchd restarts it at once
                 $match = [regex]::Match($print.output, '(?m)^\s*pid = (\d+)')
                 if ($match.Success) { $state.pid = [int]$match.Groups[1].Value }
+                $definition = $print.output   # what launchd runs, also when the plist changed since it was loaded
             }
+            if ($state.installed) { $definition += "`n" + (Get-Content -LiteralPath $state.path -Raw -ErrorAction SilentlyContinue) }
         }
         'linux' {
             $state.kind = 'systemdUser'
             $state.path = Get-OctoDevStackSystemdUnitPath
             $state.installed = Test-Path -LiteralPath $state.path
-            if ($state.installed) { $state.supervised = [bool](Get-OctoDevStackSystemdActive) }
+            if ($state.installed) {
+                $state.supervised = [bool](Get-OctoDevStackSystemdActive)
+                $definition = Get-Content -LiteralPath $state.path -Raw -ErrorAction SilentlyContinue
+            }
         }
         'windows' {
             # The logon task starts the daemon every 15 minutes when it is gone; it does not run it, so it supervises nothing.
             $state.kind = 'scheduledTask'
             $state.path = "$($script:WindowsTaskPath)$($script:ServiceName)"
-            $state.installed = [bool](Test-OctoDevStackLogonTask -TaskName $script:ServiceName)
+            $arguments = Get-OctoDevStackLogonTaskArguments -TaskName $script:ServiceName
+            $state.installed = $null -ne $arguments
+            $definition = $arguments
         }
+    }
+    $state.port = Get-OctoDevStackServicePort ([string]$definition)
+    if ($null -ne $state.port -and $state.port -ne $Port) {
+        $state.installed = $false
+        $state.supervised = $false
+        $state.pid = $null
     }
     return $state
 }
@@ -848,9 +878,12 @@ function Register-OctoDevStackLogonTask([string]$TaskName, [string]$Execute, [st
         -Description 'Starts the octo-devstack daemon (local OctoMesh dev stack, MCP on 127.0.0.1) at logon and after a crash. Install-OctoDevStackDaemonService (octo-tools).' -Force | Out-Null
 }
 
-function Test-OctoDevStackLogonTask([string]$TaskName) {
-    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $false }
-    return [bool](Get-ScheduledTask -TaskName $TaskName -TaskPath $script:WindowsTaskPath -ErrorAction SilentlyContinue)
+function Get-OctoDevStackLogonTaskArguments([string]$TaskName) {
+    # The arguments of the logon task's action (they name the port), $null when there is no such task.
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $null }
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $script:WindowsTaskPath -ErrorAction SilentlyContinue
+    if (-not $task) { return $null }
+    return [string](@($task.Actions)[0].Arguments)
 }
 
 function Unregister-OctoDevStackLogonTask([string]$TaskName) {
@@ -953,7 +986,7 @@ function Install-OctoDevStackDaemonService {
                 $data.kind = 'launchAgent'
                 $data.path = Get-OctoDevStackLaunchAgentPath
                 if ($data.alreadyRunning) {
-                    $service = Get-OctoDevStackServiceState
+                    $service = Get-OctoDevStackServiceState -Port $Port
                     $how = if ($service.supervised) { 'remove the LaunchAgent that runs it first (Uninstall-OctoDevStackDaemonService)' } else { 'stop it first (Stop-OctoDevStackDaemon)' }
                     throw "octo-devstack already runs on $url and launchd would start a second one at once: $how, then install again."
                 }
