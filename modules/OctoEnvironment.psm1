@@ -2907,6 +2907,79 @@ function Invoke-BuildEnvironment {
     if ($rangeRecord) { throw $rangeRecord }
 }
 
+function Get-OctoWorkspace {
+    <#
+    .SYNOPSIS
+        Describes the workspace octo-tools runs in: root folder, layout, default lane and config folder (AB#9377).
+
+    .DESCRIPTION
+        The one place that knows how a developer's machine is laid out; octo-devstack asks it instead of keeping path
+        assumptions of its own. rootPath is the folder that holds the octo-tools checkout (profile.ps1). Supported
+        layouts (AB#9007):
+          - lanes: <rootPath>/branches/main holds the repositories; octo-tools and octo-devstack lie next to the lanes;
+          - flat: rootPath itself holds the repositories (e.g. C:\dev\meshmakers, ~/RiderProjects/meshmakers/main).
+        The default lane follows Resolve-OctoEnvironmentDefaultBase: $env:OCTO_ENVIRONMENT_BASE, else branches/main when
+        it holds a lane, else rootPath itself. Feature environments lie in <rootPath>/wt-<env>. The config folder is the
+        one of Get-OctoToolsConfigPath (installations.json; octo-devstack keeps devstack.yaml next to it).
+        Never throws for a workspace without a lane: defaultLane is null then and problems says why.
+
+    .PARAMETER Json
+        { rootPath, toolsPath, layout (lanes|flat|null), defaultLane (relative to rootPath; absolute when the setting is),
+          defaultLanePath, defaultLaneSource (setting|lanes|flat|null), environmentsRoot, configDirectory,
+          toolsConfigPath, toolsConfigExists, problems[] }
+    #>
+    [CmdletBinding()]
+    param([switch]$Json)
+
+    $root = Get-OctoEnvironmentRootPath
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $defaultLane = $null
+    $defaultLanePath = $null
+    $source = $null
+    try {
+        $defaultLane = Resolve-OctoEnvironmentDefaultBase
+        $defaultLanePath = Get-OctoEnvironmentBasePath -base $defaultLane
+        $source = if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($script:BaseSettingName))) { 'setting' }
+                  elseif ($defaultLane -eq $script:LanesLayoutBase) { 'lanes' }
+                  else { 'flat' }
+    }
+    catch {
+        $problems.Add($_.Exception.Message)
+    }
+    $layout = if ($null -eq $defaultLanePath) { $null }
+              elseif ([string]::Equals($defaultLanePath, $root, [StringComparison]::OrdinalIgnoreCase)) { 'flat' } # both are full paths without a trailing separator
+              else { 'lanes' }
+    $toolsConfigPath = Get-OctoToolsConfigPath
+    $toolsConfigExists = Test-Path -LiteralPath $toolsConfigPath -PathType Leaf
+    if (-not $toolsConfigExists) {
+        $problems.Add("No octo-tools config at ${toolsConfigPath}: copy installations.example.json from the octo-tools repository there and edit it (docs/installations-config.md).")
+    }
+    $data = [ordered]@{
+        rootPath          = $root
+        toolsPath         = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))
+        layout            = $layout
+        defaultLane       = $defaultLane
+        defaultLanePath   = $defaultLanePath
+        defaultLaneSource = $source
+        environmentsRoot  = $root
+        configDirectory   = Split-Path -Parent $toolsConfigPath
+        toolsConfigPath   = $toolsConfigPath
+        toolsConfigExists = $toolsConfigExists
+        problems          = @($problems)
+    }
+    if ($Json) {
+        Write-OctoJson -Command 'Get-OctoWorkspace' -Data $data
+        return
+    }
+    Write-Host "Workspace: $($data.rootPath)" -ForegroundColor Cyan
+    Write-Host "  octo-tools:   $($data.toolsPath)"
+    Write-Host "  layout:       $(if ($layout) { $layout } else { '-' })"
+    Write-Host "  default lane: $(if ($defaultLane) { "$defaultLane ($defaultLanePath, from $source)" } else { '-' })"
+    Write-Host "  environments: $(Join-Path $data.environmentsRoot 'wt-<env>')"
+    Write-Host "  config:       $($data.configDirectory)$(if (-not $toolsConfigExists) { ' (no installations.json)' })"
+    foreach ($problem in $problems) { Write-Warning $problem }
+}
+
 Export-ModuleMember -Function @(
     'New-OctoEnvironment',
     'Get-OctoEnvironment',
@@ -2915,5 +2988,6 @@ Export-ModuleMember -Function @(
     'Get-OctoAffectedRepos',
     'Remove-OctoEnvironment',
     'Initialize-OctoEnvironmentPackageCache',
-    'Invoke-BuildEnvironment'
+    'Invoke-BuildEnvironment',
+    'Get-OctoWorkspace'
 )
