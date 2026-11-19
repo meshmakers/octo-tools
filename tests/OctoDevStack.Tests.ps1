@@ -401,6 +401,32 @@ Describe 'Start-OctoDevStackDaemon' {
 
         $json.data.error | Should -BeLike 'octo-devstack (PID 4243) exited: Another octo-devstack runs with the state folder /s (daemon.lock is held): nothing was adopted or recorded; see *daemon.log.'
     }
+
+    It 'sees the daemon.lock of a daemon that holds the state folder, as the daemon takes it' {
+        $state = Join-Path $TestDrive 'locked-state'
+        New-Item -ItemType Directory -Force -Path $state | Out-Null
+        InModuleScope OctoDevStack -Parameters @{ s = $state } { param($s) Test-OctoDevStackStateLocked -StatePath $s } | Should -BeFalse -Because 'no daemon ever ran there'
+
+        $held = [IO.File]::Open((Join-Path $state 'daemon.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try { InModuleScope OctoDevStack -Parameters @{ s = $state } { param($s) Test-OctoDevStackStateLocked -StatePath $s } | Should -BeTrue }
+        finally { $held.Dispose() }
+
+        InModuleScope OctoDevStack -Parameters @{ s = $state } { param($s) Test-OctoDevStackStateLocked -StatePath $s } | Should -BeFalse -Because 'the daemon ended'
+    }
+
+    It 'starts and builds nothing while another daemon holds the state folder (another port, or still starting)' {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackStateLocked { $true }
+        $path = New-FakeCheckout 'state-locked'
+
+        $json = Start-OctoDevStackDaemon -Path $path -Port 5196 -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.stateLocked | Should -BeTrue
+        $json.data.error | Should -BeLike 'Another octo-devstack holds the state folder*daemon.lock*Nothing was started or built*OCTO_DEVSTACK_STATE*'
+        Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+        Should -Invoke -ModuleName OctoDevStack Start-Process -Times 0
+    }
 }
 
 Describe 'Stop-OctoDevStackDaemon' {

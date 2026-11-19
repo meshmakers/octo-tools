@@ -188,6 +188,24 @@ function Test-OctoDevStackProcessAlive([int]$ProcessId) {
     return [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+function Test-OctoDevStackStateLocked([string]$StatePath) {
+    # Whether an octo-devstack holds <state>/daemon.lock (octo-devstack DaemonLock: exclusive for the daemon's lifetime,
+    # a share-deny open on Windows, flock on macOS/Linux - the same open refuses here). A daemon that holds it runs on
+    # another port or is still starting.
+    $lock = Join-Path $StatePath 'daemon.lock'
+    if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { return $false }
+    try {
+        [IO.File]::Open($lock, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None).Dispose()
+        return $false
+    }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $false
+    }
+    catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+        return $true
+    }
+}
+
 function Write-OctoDevStackResult([string]$Command, [bool]$Json, [bool]$Success, [hashtable]$Data, [string]$ErrorMessage) {
     $exitCode = [int](-not $Success)
     $global:LASTEXITCODE = $exitCode
@@ -397,6 +415,14 @@ function Start-OctoDevStackDaemon {
         $data.commit = $health.commit
         if (-not $Json) { Write-Host "octo-devstack is running under the $($service.kind) on $url (PID $($data.pid))$(if ($stopped) { ' - it took over from the stopped one' }) - MCP $url/mcp" -ForegroundColor Green }
         Write-OctoDevStackResult $command $Json $true $data $null
+        return
+    }
+    # Another daemon holds the state folder (on another port, or still starting - the logon task can come by then): a
+    # start would only end at its daemon.lock, and on Windows its log redirection would first truncate that daemon's log.
+    if (Test-OctoDevStackStateLocked -StatePath $statePath) {
+        $data.stateLocked = $true
+        Write-OctoDevStackResult $command $Json $false $data ("Another octo-devstack holds the state folder $statePath (daemon.lock): it runs on another port or is still starting. " +
+            'Nothing was started or built. GET /api/daemon of it names its pid and url; a second daemon needs a state folder of its own (OCTO_DEVSTACK_STATE).')
         return
     }
     if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src'))) {
