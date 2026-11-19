@@ -736,34 +736,22 @@ Describe 'Install-OctoDevStackDaemonService (AB#9377)' {
     }
 }
 
-Describe 'Listening pids on Linux without lsof (AB#9377)' {
-    It 'reads the LISTEN sockets of the port from /proc/net/tcp and the pids from their fd links' {
-        $proc = Join-Path $TestDrive 'proc'
-        New-Item -ItemType Directory -Force -Path (Join-Path $proc 'net') | Out-Null
-        Set-Content -Path (Join-Path $proc 'net/tcp') -Value @(
-            '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
-            '   0: 0100007F:13BA 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41001 1 0 100 0 0 10 0'
-            '   1: 0100007F:13BA 0100007F:A1B2 01 00000000:00000000 00:00000000 00000000  1000        0 41002 1 0 20 4 30 10 -1'
-            '   2: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41009 1 0 100 0 0 10 0'
-        )
-        $script:Links = @{}
-        foreach ($entry in @(@(120, 7, 'socket:[41001]'), @(300, 4, 'socket:[41002]'), @(400, 3, 'socket:[41009]'))) {
-            $fd = Join-Path $proc "$($entry[0])/fd/$($entry[1])"
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fd) | Out-Null
-            Set-Content -Path $fd -Value ''
-            $script:Links[(Get-Item -LiteralPath $fd).FullName] = $entry[2]
-        }
+Describe 'Listening pids without lsof (AB#9377)' {
+    It 'asks the daemon for its own pid instead of scanning the system a second time' {
         Mock -ModuleName OctoDevStack Get-OctoDevStackNativeCommand { $null } -ParameterFilter { $Name -eq 'lsof' }
-        Mock -ModuleName OctoDevStack Test-OctoDevStackLinux { $true }
-        Mock -ModuleName OctoDevStack Get-OctoDevStackLinkTarget { $script:Links[$Path] }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus }
 
-        $pids = InModuleScope OctoDevStack -Parameters @{ Proc = $proc } {
-            param($Proc)
-            $script:ProcRoot = $Proc
-            try { Get-OctoDevStackListeningPids -Port 5050 } finally { $script:ProcRoot = '/proc' }
-        }
+        $pids = InModuleScope OctoDevStack { Get-OctoDevStackListeningPids -Port 5090 }
 
-        # 0x13BA = 5050: pid 120 listens; 300 holds an established connection of the port, 400 listens on 8080.
-        @($pids) | Should -Be @(120)
+        @($pids) | Should -Be @(902)
+    }
+
+    It 'warns and finds nothing when nothing answers as octo-devstack' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackNativeCommand { $null } -ParameterFilter { $Name -eq 'lsof' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { $null }
+
+        $pids = InModuleScope OctoDevStack { Get-OctoDevStackListeningPids -Port 5090 3>$null }
+
+        @($pids) | Should -HaveCount 0
     }
 }
