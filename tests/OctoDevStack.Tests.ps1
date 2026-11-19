@@ -399,7 +399,7 @@ Describe 'Start-OctoDevStackDaemon' {
         try { $json = Start-OctoDevStackDaemon -Path $path -Json -ErrorAction SilentlyContinue | ConvertFrom-Json }
         finally { Remove-Item -LiteralPath (Join-Path $state 'daemon.log') -ErrorAction SilentlyContinue }
 
-        $json.data.error | Should -BeLike 'octo-devstack (PID 4243) exited: Another octo-devstack runs with the state folder /s (daemon.lock is held)*; see *daemon.log.'
+        $json.data.error | Should -BeLike 'octo-devstack (PID 4243) exited: Another octo-devstack runs with the state folder /s (daemon.lock is held): nothing was adopted or recorded; see *daemon.log.'
     }
 }
 

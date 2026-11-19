@@ -910,11 +910,12 @@ function Test-OctoDevStackServiceManager([string]$Kind) {
 }
 
 function Get-OctoDevStackLastLogLine([string[]]$Paths) {
-    # The last non-empty line of the first of these logs that has one (what a daemon that ended said last).
+    # The last non-empty line of the first of these logs that has one (what a daemon that ended said last), without its
+    # closing period: it goes into a sentence of the caller.
     foreach ($path in $Paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
         $line = @(Get-Content -LiteralPath $path -Tail 5 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() }) | Select-Object -Last 1
-        if ($line) { return $line.Trim() }
+        if ($line) { return $line.Trim().TrimEnd('.') }
     }
     return $null
 }
