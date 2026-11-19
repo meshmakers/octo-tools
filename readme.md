@@ -527,11 +527,31 @@ Other sessions use the daemon, so a stop asks it first (`GET /api/daemon`): whil
 `-Force` overrides (the builds go on and the next daemon re-attaches to them). Sessions holding a stack lease are listed
 as a warning. A new octo-devstack commit is deployed with `Start-OctoDevStackDaemon -Restart -Rebuild` (stop, build
 Release, start; `-Rebuild` alone is refused while the daemon runs from those binaries).
-On macOS/Linux both cmdlets need `lsof` to find the process on the port.
+On macOS both cmdlets need `lsof` to find the process on the port. On Linux without `lsof` the daemon names its own
+pid (`GET /api/daemon`) - so a daemon that does not answer (an older version, one that hangs) is not found there:
+`Stop-OctoDevStackDaemon` then reports that nothing runs. Install `lsof` to stop such a daemon.
+
+As a background service that starts at login and after a crash (Windows: logon task, Linux: systemd user unit, macOS:
+LaunchAgent; the stack services survive every restart of the daemon):
+
+```powershell
+Install-OctoDevStackDaemonService       # Uninstall-OctoDevStackDaemonService removes it, the stack keeps running
+```
+
+On macOS a daemon started by hand (the quick start above) must be stopped first - `Stop-OctoDevStackDaemon`, then
+`Install-OctoDevStackDaemonService` - otherwise launchd would start a second one; the install refuses then. On Linux
+the unit is only enabled while a daemon runs and takes over at the next login.
+
+Under launchd and systemd `Start-OctoDevStackDaemon -Restart` goes through the service manager, and a start of an
+installed service that does not run starts it through the service manager too - never a second daemon next to it. The
+Windows logon task supervises nothing: it runs `Start-OctoDevStackDaemon` every 15 minutes, which does nothing while the
+daemon answers. Details: `Get-Help Install-OctoDevStackDaemonService -Full` and the octo-devstack README.
 
 From then on OctoMesh is managed through the daemon: MCP `http://127.0.0.1:5090/mcp`, status page
-`http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log`, configuration
-`~/.config/octo-devstack/devstack.yaml` (written on the first start).
+`http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log` (Windows: also `daemon.err.log`),
+configuration `devstack.yaml` in the octo-tools config folder (`~/.config/octo-tools/`, next to `installations.json`;
+`Get-OctoWorkspace` names it), written on the first start. A `~/.config/octo-devstack/devstack.yaml` of an older
+daemon is copied there once and left as it is.
 
 # Tests
 
@@ -542,7 +562,12 @@ and never build or touch the real NuGet folders):
 # once; -MaximumVersion keeps it on Pester 5 - -MinimumVersion alone installs Pester 6
 Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser
 # Windows with Defender "Controlled Folder Access": Install-Module cannot write to Documents\PowerShell\Modules;
-# use Save-Module Pester -MaximumVersion 5.99 -Path <folder> and Import-Module <folder>\Pester instead.
+# save the modules to ~/.local/share/powershell/Modules instead (Save-Module needs the folder to exist), which
+# profile.ps1 adds to PSModulePath on Windows - load the profile first (. ./modules/profile.ps1), or add the folder to
+# $env:PSModulePath yourself. Also powershell-yaml, which Invoke-IdentityOverlay and Compare-Pipelines need:
+#   New-Item -ItemType Directory -Force ~/.local/share/powershell/Modules
+#   Save-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Path ~/.local/share/powershell/Modules
+#   Save-Module powershell-yaml -Path ~/.local/share/powershell/Modules
 # every session: load Pester 5 explicitly (if Pester 6 is already loaded, start a fresh pwsh first)
 Import-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99
 Invoke-Pester ./tests

@@ -200,6 +200,15 @@ function Restore-OctoEnvironmentTestState {
     $env:OCTO_CK_CACHE_DIRECTORY = $script:PreviousCkCacheDirectory
     $env:OCTO_ENVIRONMENT_BASE = $script:PreviousEnvironmentBase
     if ($null -ne $script:PreviousRootPath) { $global:rootPath = $script:PreviousRootPath } else { Remove-Variable -Name rootPath -Scope Global -ErrorAction SilentlyContinue }
+    Clear-TestDriveReadOnly
+}
+
+function Clear-TestDriveReadOnly {
+    # git writes its object files read-only. Pester removes a file's TestDrive with [IO.Directory]::Delete, which on
+    # Windows cannot delete a read-only file ("Access to the path '<object>' is denied"): the whole file then fails
+    # with "Framework failed" although every test passed. Called from the AfterAll of each file (it runs before that).
+    if (-not $TestDrive -or -not (Test-Path -LiteralPath $TestDrive)) { return }
+    Get-ChildItem -LiteralPath $TestDrive -Recurse -Force -File -Attributes ReadOnly -ErrorAction SilentlyContinue | ForEach-Object { $_.IsReadOnly = $false }
 }
 
 # Once per file, before the first Describe: Pester keeps what exists in TestDrive when a block starts. Last, so that

@@ -356,14 +356,16 @@ Describe 'CLAUDE.md shim' {
         @(Get-ChildItem -LiteralPath $r -File).Name | Should -Contain 'claude.md'
         Get-Content -LiteralPath (Join-Path $r 'claude.md') -Raw | Should -Be "# Real`n"
     }
-    It 'never writes through a symbolic link' {
+    It 'never writes through a link to a file outside the repository' {
         $r = New-Fixture
         $outside = New-TempDir
         Write-File (Join-Path $outside 'CLAUDE.md') "<!-- shared -->`n@../x/AGENTS.md`n"
         Remove-Item -LiteralPath (Join-Path $r 'CLAUDE.md')
         $link = New-Item -ItemType SymbolicLink -Path (Join-Path $r 'CLAUDE.md') -Target (Join-Path $outside 'CLAUDE.md') -ErrorAction SilentlyContinue
-        if (-not $link) { Set-ItResult -Skipped -Because 'this platform will not create symlinks unprivileged'; return }
-        { Test-OctoAgentDocs -Path $r -Fix 6>$null } | Should -Throw '*symbolic link*'
+        # Windows creates no symbolic link without the privilege (or Developer Mode); a hard link needs none and writes
+        # through to the same outside file, so the guard must refuse it the same way.
+        if (-not $link) { $link = New-Item -ItemType HardLink -Path (Join-Path $r 'CLAUDE.md') -Target (Join-Path $outside 'CLAUDE.md') }
+        { Test-OctoAgentDocs -Path $r -Fix 6>$null } | Should -Throw "*is a link ($($link.LinkType))*left alone*"
         Get-Content -LiteralPath (Join-Path $outside 'CLAUDE.md') -Raw | Should -Be "<!-- shared -->`n@../x/AGENTS.md`n"
     }
 }
@@ -401,8 +403,9 @@ Describe 'references' {
         @{ case = 'a sibling repository that is not checked out'; text = 'See `octo-nowhere/docs/x.md`.' }
     ) {
         $r = New-Fixture
-        if ($file) { Write-File (Join-Path $r $file) '# F' }
-        if ($heading) { Add-Line $r 'docs/one.md' $heading }
+        # $_ = this case: a case without 'file' or 'heading' must not read a variable of that name from a caller's scope.
+        if ($_.file) { Write-File (Join-Path $r $_.file) '# F' }
+        if ($_.heading) { Add-Line $r 'docs/one.md' $_.heading }
         Add-Line $r 'AGENTS.md' $text
         (Get-RuleFinding (Get-Result $r) 'reference-resolves').Count | Should -Be 0
     }

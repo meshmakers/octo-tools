@@ -61,11 +61,14 @@ $pesterManifest = Join-Path $pester.ModuleBase 'Pester.psd1'
 $runFile = {
     param([string]$file, [string]$pesterManifest)
     Import-Module $pesterManifest
-    $configuration = New-PesterConfiguration
-    $configuration.Run.Path = $file
-    $configuration.Run.PassThru = $true
-    $configuration.Output.Verbosity = 'None'
-    $run = Invoke-Pester -Configuration $configuration 6>$null 3>$null
+    $__pesterConfiguration = New-PesterConfiguration
+    $__pesterConfiguration.Run.Path = $file
+    $__pesterConfiguration.Run.PassThru = $true
+    $__pesterConfiguration.Output.Verbosity = 'None'
+    # The tests run in child scopes of this one: a variable of the runner would be visible to them (a -ForEach case
+    # without a key reads a variable of that name from here). A run must see what Invoke-Pester alone sees.
+    Remove-Variable -Name file, pesterManifest
+    $run = Invoke-Pester -Configuration $__pesterConfiguration 6>$null 3>$null
     $errors = @(
         foreach ($container in @($run.Containers | Where-Object { $_.Result -eq 'Failed' })) {
             foreach ($record in @($container.ErrorRecord)) { "container: $($record.Exception.Message)" }

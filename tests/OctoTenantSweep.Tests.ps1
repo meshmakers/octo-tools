@@ -173,12 +173,26 @@ Describe 'token hygiene' {
     }
 }
 
-Describe 'real process wrapper (fake octo-cli on the PATH)' -Skip:($IsWindows) {
+Describe 'real process wrapper (fake octo-cli on the PATH)' {
     BeforeAll {
-        $script:FakeDir = Join-Path ([IO.Path]::GetTempPath()) ("fake-octo-cli-" + [guid]::NewGuid().ToString('N'))
+        $script:FakeDir = Join-Path $TestDrive ("fake-octo-cli-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $script:FakeDir | Out-Null
-        $fake = Join-Path $script:FakeDir 'octo-cli'
-        @'
+        if ($IsWindows) {
+            # Windows: octo-cli.cmd (found through PATHEXT like the real octo-cli.exe) runs the same fake as a pwsh
+            # process - a real child with its own stdout, stderr and exit code, as on macOS/Linux.
+            @'
+switch -Wildcard ($args -join ' ') {
+    '*--help*' { [Console]::Out.WriteLine('Octo Mesh Management Tool, Version 3.5.27.0'); exit 0 }
+    '*t2_bad*' { [Console]::Out.WriteLine("Access to tenant 'bad' denied (not provisioned). Run ProvisionCurrentUser -ttid bad"); [Console]::Error.WriteLine('Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjYW5hcnkifQ.c2ln'); exit 252 }
+    '*GraphQl*' { [Console]::Error.WriteLine('banner and log line on stderr'); [Console]::Out.WriteLine('{"data":{"runtime":{"n":7}}}'); exit 0 }
+    default { [Console]::Out.WriteLine('ok'); exit 0 }
+}
+'@ | Set-Content -Path (Join-Path $script:FakeDir 'fake-octo-cli.ps1')
+            "@pwsh -NoLogo -NoProfile -NonInteractive -File `"%~dp0fake-octo-cli.ps1`" %*`r`n@exit /b %ERRORLEVEL%`r`n" | Set-Content -Path (Join-Path $script:FakeDir 'octo-cli.cmd') -NoNewline
+        }
+        else {
+            $fake = Join-Path $script:FakeDir 'octo-cli'
+            @'
 #!/bin/sh
 case "$*" in
   *--help*) echo "Octo Mesh Management Tool, Version 3.5.27.0"; exit 0 ;;
@@ -187,7 +201,8 @@ case "$*" in
   *) echo ok; exit 0 ;;
 esac
 '@ | Set-Content -Path $fake -NoNewline
-        chmod +x $fake
+            chmod +x $fake
+        }
         $script:OldPath = $env:PATH
         $env:PATH = "$($script:FakeDir)$([IO.Path]::PathSeparator)$($env:PATH)"
         Remove-Module Invoke-OctoTenantSweep -Force

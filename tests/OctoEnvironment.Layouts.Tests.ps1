@@ -76,7 +76,7 @@ Describe 'Base lane detection (Resolve-OctoEnvironmentDefaultBase)' {
         $ws = New-FakeWorkspace
         $doc = Get-Doc (New-OctoEnvironment -env 'explicit' -repos octo-sdk -base 'branches/none' -Json)
         $doc.data.success | Should -BeFalse
-        $doc.data.error | Should -Match 'Base lane .*branches/none does not exist'
+        $doc.data.error | Should -Match 'Base lane .*branches[\\/]none does not exist'
         $doc.data.error | Should -Match 'Supported layouts'
         Test-Path (Join-Path $ws.Root 'wt-explicit') | Should -BeFalse
     }
@@ -274,6 +274,100 @@ Describe 'Review round 2 (AB#9007)' {
             @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $ws.Main).pid | Should -Be @(3, 4)
             # an in-place worktree below wt-* passed as a further root still counts
             @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath @($ws.Main, (Split-Path -Parent $envRepo))).pid | Should -Be @(1, 2, 3, 4)
+        }
+    }
+}
+
+Describe 'Workspace description for octo-devstack (Get-OctoWorkspace, AB#9377)' {
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '../modules/Get-OctoToolsConfig.psm1') -Force
+        $script:SavedToolsConfig = $env:OCTO_TOOLS_CONFIG
+        $script:ToolsConfig = Join-Path $TestDrive 'config/octo-tools/installations.json'
+    }
+
+    BeforeEach { $env:OCTO_TOOLS_CONFIG = $script:ToolsConfig }
+
+    AfterEach { $env:OCTO_ENVIRONMENT_BASE = $null }
+
+    AfterAll { $env:OCTO_TOOLS_CONFIG = $script:SavedToolsConfig }
+
+    It 'describes the lanes layout' {
+        $ws = New-FakeWorkspace
+        $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        $data.rootPath | Should -Be ([IO.Path]::GetFullPath($ws.Root))
+        $data.layout | Should -Be 'lanes'
+        $data.defaultLane | Should -Be 'branches/main'
+        $data.defaultLanePath | Should -Be ([IO.Path]::GetFullPath($ws.Main))
+        $data.defaultLaneSource | Should -Be 'lanes'
+        $data.environmentsRoot | Should -Be $data.rootPath
+    }
+
+    It 'describes the flat layout' {
+        $ws = New-FakeFlatWorkspace
+        $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        $data.layout | Should -Be 'flat'
+        $data.defaultLane | Should -Be '.'
+        $data.defaultLanePath | Should -Be ([IO.Path]::GetFullPath($ws.Root))
+        $data.defaultLaneSource | Should -Be 'flat'
+    }
+
+    It 'takes the default lane from OCTO_ENVIRONMENT_BASE' {
+        $ws = New-FakeWorkspace
+        $other = Join-Path $ws.Root 'branches/release'
+        New-Item -ItemType Directory -Force -Path $other | Out-Null
+        Set-Content -Path (Join-Path $other 'Octo.User.props') -Value '<Project />'
+        $env:OCTO_ENVIRONMENT_BASE = 'branches/release'
+        $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        $data.defaultLane | Should -Be 'branches/release'
+        $data.defaultLaneSource | Should -Be 'setting'
+        $data.layout | Should -Be 'lanes'
+    }
+
+    It 'reports a workspace without a lane as a problem instead of throwing' {
+        $root = Join-Path $TestDrive 'no-lane'
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        $global:rootPath = $root
+        $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        $data.defaultLane | Should -BeNullOrEmpty
+        $data.layout | Should -BeNullOrEmpty
+        $data.problems -join "`n" | Should -Match 'No base lane found'
+    }
+
+    It 'names the config folder of Get-OctoToolsConfigPath and whether installations.json exists' {
+        New-FakeWorkspace | Out-Null
+        $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        $data.configDirectory | Should -Be (Split-Path -Parent $script:ToolsConfig)
+        $data.toolsConfigExists | Should -BeFalse
+        $data.problems -join "`n" | Should -Match 'installations.example.json'
+
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:ToolsConfig) | Out-Null
+        Set-Content -Path $script:ToolsConfig -Value '{ "installations": [] }'
+        $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        $data.toolsConfigExists | Should -BeTrue
+        $data.problems | Should -BeNullOrEmpty
+    }
+
+    It 'names the config folder as an absolute path also for a relative OCTO_TOOLS_CONFIG' {
+        # octo-devstack reads devstack.yaml from configDirectory, from another working directory.
+        New-FakeWorkspace | Out-Null
+        $folder = Join-Path $TestDrive 'relative-config'
+        New-Item -ItemType Directory -Force -Path $folder | Out-Null
+        Push-Location $folder
+        try {
+            $env:OCTO_TOOLS_CONFIG = 'installations.json'
+            $data = (Get-Doc (Get-OctoWorkspace -Json)).data
+        }
+        finally { Pop-Location }
+        $data.configDirectory | Should -Be ([IO.Path]::GetFullPath($folder))
+        $data.toolsConfigPath | Should -Be (Join-Path ([IO.Path]::GetFullPath($folder)) 'installations.json')
+    }
+
+    It 'compares root and default lane case-sensitively where the file system is (Linux)' {
+        InModuleScope OctoEnvironment {
+            Get-OctoWorkspaceLayout -Root '/srv/mesh' -DefaultLanePath '/srv/Mesh' -CaseSensitive $true | Should -Be 'lanes' -Because '/srv/Mesh is another folder on Linux'
+            Get-OctoWorkspaceLayout -Root 'C:\dev\Mesh' -DefaultLanePath 'C:\dev\mesh' -CaseSensitive $false | Should -Be 'flat'
+            Get-OctoWorkspaceLayout -Root '/srv/mesh' -DefaultLanePath '/srv/mesh' -CaseSensitive $true | Should -Be 'flat'
+            Get-OctoWorkspaceLayout -Root '/srv/mesh' -DefaultLanePath $null | Should -BeNullOrEmpty
         }
     }
 }

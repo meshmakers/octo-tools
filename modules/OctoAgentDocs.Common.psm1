@@ -141,13 +141,13 @@ function Read-OctoAgentDocsText {
 function Write-OctoAgentDocsText {
     <#
     .SYNOPSIS
-    UTF-8 without BOM. A symlink is never written through: the target may be outside the
-    repository being fixed.
+    UTF-8 without BOM. A link (symbolic or hard) is never written through: its target may be outside
+    the repository being fixed.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'The callers decide through their own ShouldProcess; this is the write primitive')]
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Content)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if ($item -and $item.LinkType) { throw "'$Path' is a symbolic link and is left alone. Replace the link with a file first." }
+    if ($item -and $item.LinkType) { throw "'$Path' is a link ($($item.LinkType)) and is left alone. Replace the link with a file first." }
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
