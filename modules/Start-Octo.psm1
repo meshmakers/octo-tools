@@ -365,20 +365,24 @@ Use this function to selectively start OctoMesh services based on your requireme
     Delete-LogFile -branch $branch -file "AiServices.log"
     Delete-LogFile -branch $branch -file "AiWorker.log"
 
+    # Start order as octo-devstack's startAfter (keep both in step): identity first - in a fresh setup it creates the
+    # system database the other backends need -, the communication controller after the asset repository, whose
+    # system tenant holds the CK methods the controller checks its handlers against at its start.
     if ($identityService) {
         Start-Service -branch $branch -workingDirectory "octo-identity-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "IdentityServices.log" -cmdArguments @("Meshmakers.Octo.Backend.IdentityServices.dll", "--urls=https://0.0.0.0:5003;http://0.0.0.0:5002") -jobName "IdentityServices"
+        $identityJob = $jobs[$jobs.Count - 1]
+        Wait-OctoServicePort -Port 5002 -Name 'IdentityServices' -IsRunning { $identityJob.State -eq 'Running' }.GetNewClosure() | Out-Null
     }
+    $assetRepoJob = $null
     if ($assetRepoService) {
         Start-Service -branch $branch -workingDirectory "octo-asset-repo-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "AssetRepositoryServices.log" -cmdArguments @("Meshmakers.Octo.Backend.AssetRepositoryServices.dll", "--urls=http://0.0.0.0:5000;https://0.0.0.0:5001") -jobName "AssetRepositoryServices"
+        $assetRepoJob = $jobs[$jobs.Count - 1]
     }
     if ($meshAdapter) {
         Start-Service -branch $branch -workingDirectory "octo-mesh-adapter/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "MeshAdapter.log" -cmdArguments @("Meshmakers.Octo.MeshAdapter.dll", "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021", "--Adapter:TenantId=$meshAdapterTenantId", "--Adapter:AdapterRtId=$meshAdapterId", "--Adapter:AdapterCkTypeId=System.Communication/Adapter") -jobName "MeshAdapter"
     }
     if ($botService) {
         Start-Service -branch $branch -workingDirectory "octo-bot-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "BotServices.log" -cmdArguments @("Meshmakers.Octo.Backend.BotServices.dll", "--urls=https://0.0.0.0:5009;http://0.0.0.0:5008") -jobName "BotServices"
-    }
-    if ($communicationControllerService) {
-        Start-Service -branch $branch -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://0.0.0.0:5015;http://0.0.0.0:5014") -jobName "CommunicationControllerServices"
     }
     if ($platformServices) {
         Start-Service -branch $branch -workingDirectory "octo-platform-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "PlatformServices.log" -cmdArguments @("Meshmakers.Octo.Backend.PlatformServices.dll", "--urls=https://0.0.0.0:5025;http://0.0.0.0:5024") -jobName "PlatformServices"
@@ -436,6 +440,14 @@ Use this function to selectively start OctoMesh services based on your requireme
         } else {
             Write-Host "Skipping AiWorker (directory not found: $aiWorkerPath)" -ForegroundColor Yellow
         }
+    }
+
+    if ($communicationControllerService) {
+        # Last of the backends: it validates its CK method handlers against the asset repository's system tenant.
+        if ($assetRepoJob) {
+            Wait-OctoServicePort -Port 5000 -Name 'AssetRepositoryServices' -IsRunning { $assetRepoJob.State -eq 'Running' }.GetNewClosure() | Out-Null
+        }
+        Start-Service -branch $branch -workingDirectory "octo-communication-controller-services/bin/$configuration/$publishVersion/" -cmd "dotnet" -logname "CommunicationControllerServices.log" -cmdArguments @("Meshmakers.Octo.Backend.CommunicationControllerServices.dll", "--urls=https://0.0.0.0:5015;http://0.0.0.0:5014") -jobName "CommunicationControllerServices"
     }
 
     # Start custom octo-start.ps1 scripts from repositories
@@ -574,6 +586,47 @@ function Set-OctoTenantDatabasePrefixEnvironment([string]$TenantDatabasePrefix) 
     elseif ($script:StartOctoSetTenantDatabasePrefix) {
         Remove-Item Env:OCTO_SYSTEM__TENANTDATABASEPREFIX -ErrorAction SilentlyContinue
         $script:StartOctoSetTenantDatabasePrefix = $false
+    }
+}
+
+<#
+.SYNOPSIS
+Waits until a service Start-Octo started accepts connections on a port (the order octo-devstack's startAfter keeps).
+
+.DESCRIPTION
+Returns $true once 127.0.0.1:<Port> accepts a connection, $false when -IsRunning says the service's job ended or
+-TimeoutSeconds passed - with a warning; Start-Octo then starts the next services anyway. Pass the plain http port of
+a service: a bare connect to its https port makes Kestrel log a failed TLS handshake.
+#>
+function Wait-OctoServicePort {
+    param(
+        [Parameter(Mandatory)] [int]$Port,
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [scriptblock]$IsRunning,
+        [int]$TimeoutSeconds = 180,
+        [int]$IntervalMilliseconds = 1000
+    )
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Host "Waiting for $Name (port $Port) before the services that need it..." -ForegroundColor DarkGray
+    while ($true) {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            if ($client.ConnectAsync('127.0.0.1', $Port).Wait(500) -and $client.Connected) {
+                Write-Host "$Name is up after $([int]$watch.Elapsed.TotalSeconds) s" -ForegroundColor DarkGray
+                return $true
+            }
+        }
+        catch { }   # refused: not up yet
+        finally { $client.Dispose() }
+        if (-not (& $IsRunning)) {
+            Write-Warning "$Name ended before it opened port $Port (see its log); starting the next services anyway."
+            return $false
+        }
+        if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            Write-Warning "$Name did not open port $Port within $TimeoutSeconds s; starting the next services anyway."
+            return $false
+        }
+        Start-Sleep -Milliseconds $IntervalMilliseconds
     }
 }
 

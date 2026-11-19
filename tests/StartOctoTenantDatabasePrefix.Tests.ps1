@@ -43,6 +43,39 @@ Describe 'Set-OctoTenantDatabasePrefixEnvironment' {
     }
 }
 
+Describe 'Wait-OctoServicePort (the start order of octo-devstack''s startAfter)' {
+    BeforeAll {
+        Import-Module $script:ModulePath -Force
+        # A port that refuses connections and that no other socket can take meanwhile: bound, never listening.
+        $script:Closed = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::InterNetwork, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::Tcp)
+        $script:Closed.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 0))
+        $script:ClosedPort = $script:Closed.LocalEndPoint.Port
+    }
+    AfterAll { $script:Closed.Dispose() }
+
+    It 'returns as soon as the service accepts connections' {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $port = $listener.LocalEndpoint.Port
+            InModuleScope Start-Octo -Parameters @{ port = $port } { param($port) Wait-OctoServicePort -Port $port -Name 'Identity' -IsRunning { $true } -IntervalMilliseconds 10 6>$null } | Should -BeTrue
+        }
+        finally { $listener.Stop() }
+    }
+
+    It 'stops waiting with a warning when the service''s job ended' {
+        $result = InModuleScope Start-Octo -Parameters @{ port = $script:ClosedPort } { param($port) Wait-OctoServicePort -Port $port -Name 'Identity' -IsRunning { $false } -IntervalMilliseconds 10 -WarningVariable w -WarningAction SilentlyContinue 6>$null; $w }
+        $result[0] | Should -BeFalse
+        "$($result[1])" | Should -BeLike "Identity ended before it opened port $($script:ClosedPort)*starting the next services anyway*"
+    }
+
+    It 'stops waiting with a warning after the timeout' {
+        $result = InModuleScope Start-Octo -Parameters @{ port = $script:ClosedPort } { param($port) Wait-OctoServicePort -Port $port -Name 'AssetRepository' -IsRunning { $true } -TimeoutSeconds 0 -IntervalMilliseconds 10 -WarningVariable w -WarningAction SilentlyContinue 6>$null; $w }
+        $result[0] | Should -BeFalse
+        "$($result[1])" | Should -BeLike "AssetRepository did not open port $($script:ClosedPort) within 0 s*"
+    }
+}
+
 Describe 'Start-Octo parameters' {
     BeforeAll {
         Import-Module $script:ModulePath -Force

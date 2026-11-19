@@ -123,7 +123,7 @@ kind (`Install-OctoKubernetes`, below) is the only supported local infrastructur
 - `Stop-OctoInfrastructure` - Stop Docker infrastructure
 - `Install-OctoInfrastructure` - Initial infrastructure setup
 - `Get-OctoInfrastructureStatus` - Check infrastructure status
-- `Start-Octo` - Start the Octo application after infrastructure is running
+- `Start-Octo` - Start the Octo application after infrastructure is running. Start order as octo-devstack's `startAfter` (keep both in step): identity first, the other backends once it accepts connections on 5002 (in a fresh setup it creates the system database), the communication controller last, once the asset repository accepts connections on 5000 (it checks its CK method handlers against the system tenant at its start); `Wait-OctoServicePort` warns and goes on when a service ends or does not come up within 180 s
 - `Stop-Octo` - Stop services started in non-interactive mode (`Start-Octo -nonInteractive $true`)
 
 ### Local Kubernetes (Kind) dev environment
