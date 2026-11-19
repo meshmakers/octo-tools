@@ -372,6 +372,7 @@ Describe 'Stop-OctoDevStackDaemon' {
         Mock -ModuleName OctoDevStack Stop-Process { }
         $script:KillCalls = [System.Collections.Generic.List[string]]::new()
         Mock -ModuleName OctoDevStack Send-OctoDevStackSignal { $script:KillCalls.Add("-$Signal $ProcessId") }
+        Mock -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak { $false }
         Mock -ModuleName OctoDevStack Get-OctoDevStackDaemonStatus { New-DaemonStatus }
     }
 
@@ -546,8 +547,65 @@ Describe 'Stop-OctoDevStackDaemon' {
         $json = Stop-OctoDevStackDaemon -Json | ConvertFrom-Json
 
         $json.data.stopped | Should -BeTrue
+        $json.data.graceful | Should -BeFalse
         Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 1 -ParameterFilter { $Id -eq 1234 }
+        Should -Invoke -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak -Times 0 -Because 'the dll of the command line does not exist here'
         $script:KillCalls | Should -HaveCount 0
+    }
+
+    Context 'graceful stop on Windows (AB#9377)' {
+        BeforeEach {
+            $script:Dll = Join-Path $TestDrive 'octo-devstack/bin/Release/net10.0/octo-devstack.dll'
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:Dll) | Out-Null
+            Set-Content -Path $script:Dll -Value ''
+            Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
+            Mock -ModuleName OctoDevStack Get-NetTCPConnection { [pscustomobject]@{ OwningProcess = 1234 } }
+            Mock -ModuleName OctoDevStack Get-CimInstance { [pscustomobject]@{ CommandLine = "dotnet `"$script:Dll`" --url http://127.0.0.1:5090" } }
+        }
+
+        It 'sends CTRL_BREAK through the daemon''s helper and waits for it to shut down by itself' {
+            Mock -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak { $true }
+            $script:AliveChecks = 0
+            Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $script:AliveChecks++; $script:AliveChecks -lt 3 }
+
+            $json = Stop-OctoDevStackDaemon -Json | ConvertFrom-Json
+
+            $json.data.stopped | Should -BeTrue
+            $json.data.graceful | Should -BeTrue
+            Should -Invoke -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak -Times 1 -ParameterFilter { $ProcessId -eq 1234 -and $Dll -eq $script:Dll }
+            Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 0
+        }
+
+        It 'kills when the helper refuses (an older daemon, a console shared with a shell)' {
+            Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
+
+            $json = Stop-OctoDevStackDaemon -Json | ConvertFrom-Json
+
+            $json.data.stopped | Should -BeTrue
+            $json.data.graceful | Should -BeFalse
+            Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 1 -ParameterFilter { $Id -eq 1234 }
+        }
+
+        It 'kills when the daemon has not shut down within -TimeoutSeconds' {
+            Mock -ModuleName OctoDevStack Send-OctoDevStackCtrlBreak { $true }
+            $script:Killed = $false
+            Mock -ModuleName OctoDevStack Stop-Process { $script:Killed = $true }
+            Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { -not $script:Killed }
+
+            $json = Stop-OctoDevStackDaemon -TimeoutSeconds 0 -Json | ConvertFrom-Json
+
+            $json.data.stopped | Should -BeTrue
+            $json.data.graceful | Should -BeFalse
+            Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 1
+        }
+    }
+
+    It 'reads the dll from quoted and plain command lines' {
+        InModuleScope OctoDevStack {
+            Get-OctoDevStackDllFromCommandLine '"C:\Program Files\dotnet\dotnet.exe" "C:\dev\x y\octo-devstack.dll" --url u' | Should -Be 'C:\dev\x y\octo-devstack.dll'
+            Get-OctoDevStackDllFromCommandLine 'dotnet /home/me/octo-devstack/bin/Release/net10.0/octo-devstack.dll --url u' | Should -Be '/home/me/octo-devstack/bin/Release/net10.0/octo-devstack.dll'
+            Get-OctoDevStackDllFromCommandLine 'dotnet other.dll' | Should -BeNullOrEmpty
+        }
     }
 }
 

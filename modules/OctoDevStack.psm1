@@ -142,6 +142,22 @@ function Send-OctoDevStackSignal([int]$ProcessId, [string]$Signal = 'TERM') {
     if ($LASTEXITCODE -ne 0) { throw "kill -$Signal $ProcessId failed (exit code $LASTEXITCODE)." }
 }
 
+function Get-OctoDevStackDllFromCommandLine([string]$CommandLine) {
+    # The octo-devstack.dll a daemon runs, from its command line (quoted or not); $null when it names none.
+    $match = [regex]::Match([string]$CommandLine, '"([^"]*octo-devstack\.dll)"|([^\s"]*octo-devstack\.dll)')
+    if (-not $match.Success) { return $null }
+    if ($match.Groups[1].Success) { return $match.Groups[1].Value }
+    return $match.Groups[2].Value
+}
+
+function Send-OctoDevStackCtrlBreak([int]$ProcessId, [string]$Dll) {
+    # Windows (AB#9377): the daemon's own helper sends CTRL_BREAK to the console the daemon has to itself (hidden window
+    # of Start-OctoDevStackDaemon) and refuses when anything else is attached to it, e.g. the shell of a daemon in the
+    # foreground. $PID is the guard: the helper refuses when this session shares that console. $true = sent.
+    & dotnet $Dll '--send-ctrl-break' $ProcessId $PID 'console' *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Test-OctoDevStackCommandLine([string]$CommandLine) {
     return $CommandLine -match '(^|[\\/\s"''])octo-devstack\.dll(["''\s]|$)'
 }
@@ -373,8 +389,11 @@ function Stop-OctoDevStackDaemon {
     .DESCRIPTION
         Only the process that listens on the port AND whose command line names octo-devstack.dll is stopped
         (lsof/ps on macOS/Linux, Get-NetTCPConnection/Win32_Process on Windows) - never by name. Another
-        program on the port is refused. macOS/Linux: SIGTERM, SIGKILL after -TimeoutSeconds; Windows:
-        Stop-Process. "stopped" is reported only after the process is gone.
+        program on the port is refused. macOS/Linux: SIGTERM, SIGKILL after -TimeoutSeconds; Windows: CTRL_BREAK
+        through the daemon's own helper (a clean shutdown with its STOP record), Stop-Process -Force after
+        -TimeoutSeconds or when the helper refuses (an older daemon, a daemon that shares its console with a
+        shell). "stopped" is reported only after the process is gone; -Json "graceful" says whether it shut down
+        by itself.
 
         Before it stops anything it asks the daemon whether a restart is safe (GET /api/daemon, read-only):
         while a build runs or waits the stop is refused and the builds and their owners are named - other
@@ -399,7 +418,7 @@ function Stop-OctoDevStackDaemon {
     )
 
     $command = 'Stop-OctoDevStackDaemon'
-    $data = @{ stopped = $false; pid = $null; port = $Port; restartSafe = $null; blockers = @(); warnings = @(); version = $null; commit = $null }
+    $data = @{ stopped = $false; graceful = $null; pid = $null; port = $Port; restartSafe = $null; blockers = @(); warnings = @(); version = $null; commit = $null }
     $listeners = @(Get-OctoDevStackListener -Port $Port)
     $target = @($listeners | Where-Object { Test-OctoDevStackCommandLine $_.commandLine }) | Select-Object -First 1
     if (-not $target) {
@@ -435,13 +454,23 @@ function Stop-OctoDevStackDaemon {
     }
     try {
         if (Test-OctoDevStackWindows) {
-            Stop-Process -Id $target.pid -Force -ErrorAction Stop
+            $dll = Get-OctoDevStackDllFromCommandLine $target.commandLine
+            $data.graceful = [bool]($dll -and (Test-Path -LiteralPath $dll -PathType Leaf) -and (Send-OctoDevStackCtrlBreak -ProcessId $target.pid -Dll $dll))
+            if ($data.graceful) {
+                $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $data.graceful -or (Test-OctoDevStackProcessAlive -ProcessId $target.pid)) {
+                $data.graceful = $false
+                Stop-Process -Id $target.pid -Force -ErrorAction Stop
+            }
         }
         else {
             Send-OctoDevStackSignal -ProcessId $target.pid -Signal 'TERM'
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Test-OctoDevStackProcessAlive -ProcessId $target.pid) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-            if (Test-OctoDevStackProcessAlive -ProcessId $target.pid) { Send-OctoDevStackSignal -ProcessId $target.pid -Signal 'KILL' }
+            $data.graceful = -not (Test-OctoDevStackProcessAlive -ProcessId $target.pid)
+            if (-not $data.graceful) { Send-OctoDevStackSignal -ProcessId $target.pid -Signal 'KILL' }
         }
     }
     catch {
