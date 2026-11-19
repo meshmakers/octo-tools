@@ -384,6 +384,23 @@ Describe 'Start-OctoDevStackDaemon' {
         $json.data.started | Should -BeFalse
         $json.data.error | Should -BeLike '*exited*daemon.log*'
     }
+
+    It 'names what a daemon that exited said last, e.g. the daemon that holds the state folder' {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $false }
+        $state = $env:OCTO_DEVSTACK_STATE
+        New-Item -ItemType Directory -Force -Path $state | Out-Null
+        # macOS/Linux: stdout and stderr go into daemon.log (the start is mocked, so the test writes what the daemon would).
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix {
+            Add-Content -LiteralPath (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.log') -Value @('Debug output', 'Another octo-devstack runs with the state folder /s (daemon.lock is held): nothing was adopted or recorded.', '')
+            4243
+        }
+        $path = New-FakeCheckout 'held' -Built
+
+        try { $json = Start-OctoDevStackDaemon -Path $path -Json -ErrorAction SilentlyContinue | ConvertFrom-Json }
+        finally { Remove-Item -LiteralPath (Join-Path $state 'daemon.log') -ErrorAction SilentlyContinue }
+
+        $json.data.error | Should -BeLike 'octo-devstack (PID 4243) exited: Another octo-devstack runs with the state folder /s (daemon.lock is held)*; see *daemon.log.'
+    }
 }
 
 Describe 'Stop-OctoDevStackDaemon' {
@@ -700,6 +717,8 @@ Describe 'Install-OctoDevStackDaemonService (AB#9377)' {
         $unit = Get-Content -Raw (Join-Path $env:XDG_CONFIG_HOME 'systemd/user/octo-devstack.service')
         $unit | Should -Match '(?m)^KillMode=process$'
         $unit | Should -Match '(?m)^Restart=on-failure$'
+        $unit | Should -Match '(?m)^SuccessExitStatus=75$' -Because 'a daemon refused by the daemon.lock of another one exits with 75 and is not started again and again'
+        $unit | Should -Match '(?m)^Environment=OCTO_DEVSTACK_SERVICE=systemd$'
         $unit | Should -Match ([regex]::Escape('"/usr/bin/dotnet" "' + (Join-Path $script:Checkout $script:Dll) + '" --url http://127.0.0.1:5090'))
         $unit | Should -Match ([regex]::Escape("OCTO_TOOLS_PATH=$script:Tools"))
         $script:Systemctl | Should -Be @('daemon-reload', 'enable --now octo-devstack.service')
@@ -830,6 +849,7 @@ Describe 'Daemon service files (AB#9377)' {
         for ($i = 0; $i -lt $nodes.Count; $i += 2) { $environment[$nodes[$i].InnerText] = $nodes[$i + 1].InnerText }
         $environment.OCTO_TOOLS_PATH | Should -Be '/x/R&D <dev>/octo-tools'
         $environment.PATH | Should -Be '/a&b:/usr/bin'
+        $environment.OCTO_DEVSTACK_SERVICE | Should -Be 'launchd' -Because 'a daemon of launchd waits for a held daemon.lock instead of exiting (KeepAlive would start it again every 10 s)'
         $text | Should -Match '<key>KeepAlive</key><true/>'
         $text | Should -Match '<key>AbandonProcessGroup</key><true/>'
         $text | Should -Not -Match "`r"
@@ -1137,6 +1157,89 @@ Describe 'Stop and restart of a daemon its service runs (AB#9377)' {
 
         $json.data.success | Should -BeFalse
         $json.data.error | Should -BeLike '*launchAgent runs octo-devstack, but nothing answers*No second daemon*'
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+    }
+
+    It 'starts an installed systemd unit that does not run (after a stop), never a daemon of its own next to it' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState systemdUser -Installed }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackNativeCommand { '/usr/bin/systemctl' } -ParameterFilter { $Name -eq 'systemctl' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $false }
+        $path = New-FakeCheckout 'unit-stopped' -Built
+
+        $json = Start-OctoDevStackDaemon -Path $path -Json | ConvertFrom-Json
+
+        $json.data.error | Should -BeNullOrEmpty
+        $json.data.started | Should -BeTrue
+        $json.data.service | Should -Be 'systemdUser'
+        $json.data.pid | Should -Be 5151
+        $script:ServiceCalls | Should -Be @('systemctl start octo-devstack.service')
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+    }
+
+    It 'loads an installed LaunchAgent that is not loaded, after building a missing dll first' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState launchAgent -Installed }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $false }
+        Mock -ModuleName OctoDevStack Invoke-Build { $script:ServiceCalls.Add('build'); New-Item -ItemType File -Force -Path (Join-Path $repositoryPath 'bin/Release/net10.0/octo-devstack.dll') | Out-Null; $global:LASTEXITCODE = 0 }
+        $path = New-FakeCheckout 'agent-unloaded'
+
+        $json = Start-OctoDevStackDaemon -Path $path -Json | ConvertFrom-Json
+
+        $json.data.started | Should -BeTrue
+        $json.data.built | Should -BeTrue
+        $script:ServiceCalls | Should -Be @('build', "launchctl bootstrap gui/501 $(Join-Path $TestDrive 'service-launchAgent')")
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
+    }
+
+    It 'starts a daemon of its own when a unit file exists but systemctl does not (WSL without systemd)' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState systemdUser -Installed }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackNativeCommand { $null } -ParameterFilter { $Name -eq 'systemctl' }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
+        $script:Started = $false
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { $script:Started = $true; 4242 }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:Started }
+        $path = New-FakeCheckout 'unit-without-systemctl' -Built
+
+        $json = Start-OctoDevStackDaemon -Path $path -Json | ConvertFrom-Json
+
+        $json.data.started | Should -BeTrue
+        $json.data.pid | Should -Be 4242
+        $script:ServiceCalls | Should -HaveCount 0
+    }
+
+    It 'stops a daemon started by hand next to launchd''s waiting one by its own signal; launchd''s takes over' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState launchAgent -Supervised -ProcessId 4711 }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $ProcessId -ne 902 -or $script:KillCalls.Count -eq 0 }
+
+        $json = Stop-OctoDevStackDaemon -Json -WarningAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeTrue
+        $json.data.stopped | Should -BeTrue
+        $json.data.refused | Should -BeNullOrEmpty
+        $json.data.service | Should -BeNullOrEmpty -Because 'launchd does not run the daemon that was stopped'
+        @($json.data.warnings) -join ' ' | Should -BeLike '*launchAgent runs octo-devstack PID 4711, which waits for this one (PID 902*takes over*'
+        $script:KillCalls | Should -Be @('-TERM 902')
+        $script:ServiceCalls | Should -HaveCount 0
+    }
+
+    It 'restarts a daemon started by hand next to launchd''s: stops it and reports launchd''s daemon that takes over' {
+        Mock -ModuleName OctoDevStack Get-OctoDevStackServiceState { New-ServiceState launchAgent -Supervised -ProcessId 4711 }
+        Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $ProcessId -ne 902 -or $script:KillCalls.Count -eq 0 }
+        Mock -ModuleName OctoDevStack Get-OctoDevStackHealth {
+            $processId = if ($script:KillCalls.Count -gt 0) { 4711 } else { 902 }
+            [pscustomobject]@{ status = 'ok'; pid = $processId; version = '1.0.0'; commit = 'd774abca14f7' }
+        }
+        $path = New-FakeCheckout 'hand-next-to-launchd' -Built
+
+        $json = Start-OctoDevStackDaemon -Path $path -Restart -Json -WarningAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.error | Should -BeNullOrEmpty
+        $json.data.restarted | Should -BeTrue
+        $json.data.pid | Should -Be 4711
+        $json.data.service | Should -Be 'launchAgent'
+        $script:KillCalls | Should -Be @('-TERM 902')
+        $script:ServiceCalls | Should -HaveCount 0 -Because 'no kickstart: it would restart launchd''s waiting daemon, not the one on the port'
         Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
     }
 

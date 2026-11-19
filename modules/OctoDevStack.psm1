@@ -214,6 +214,11 @@ function Start-OctoDevStackDaemon {
           yet, the cmdlet waits for it instead of starting one. -Json service names it. Only the service of -Port counts
           (the --url of its unit or plist): a daemon on another port, such as a test daemon, is started and restarted
           by this cmdlet as without a service.
+        - An installed service that does not run (Linux: the unit after Stop-OctoDevStackDaemon; macOS: the LaunchAgent
+          not loaded) is started through its service manager (systemctl --user start, launchctl bootstrap), after the
+          build of a missing dll; -Foreground still runs the daemon in this console. A daemon started by hand next to
+          launchd's (launchd's waits for the state folder, another pid) is stopped by its signal on -Restart, and
+          launchd's daemon takes over. A daemon that exits at its start is reported with the last line of its log.
         - -Rebuild: builds Release again before the start. Only together with -Restart or when no daemon runs
           on the port: the build replaces the binaries the running daemon was loaded from.
         - Another program holds the port: refused, the process is named.
@@ -282,9 +287,10 @@ function Start-OctoDevStackDaemon {
             return
         }
         # A daemon its service manager runs (launchd, systemd; AB#9377) is restarted by it: a second daemon of our own would
-        # race its KeepAlive / Restart for the port.
+        # race its KeepAlive / Restart for the port. A daemon started by hand next to launchd's (another pid; launchd's
+        # waits for the state folder) is stopped below like one without a service, and launchd's takes over.
         $service = Get-OctoDevStackServiceState -Port $Port
-        if ($service.supervised) {
+        if (Test-OctoDevStackServiceRuns -Service $service -ProcessId $ours.pid) {
             $data.service = $service.kind
             $check = Get-OctoDevStackRestartCheck -Port $Port
             $data.restartSafe = $check.safe
@@ -350,6 +356,7 @@ function Start-OctoDevStackDaemon {
             return
         }
         $stopped = $true
+        $stoppedPid = $ours.pid
         $listeners = @()
         $ours = $null
     }
@@ -372,20 +379,23 @@ function Start-OctoDevStackDaemon {
         return
     }
     # Nothing listens, but a service manager runs octo-devstack (launchd between two of its starts, systemd while it comes
-    # up; AB#9377): its daemon is waited for, a second one is never started next to it.
-    $service = if ($stopped) { $null } else { Get-OctoDevStackServiceState -Port $Port }
-    if ($service -and $service.supervised) {
+    # up, launchd's daemon taking over from one stopped above; AB#9377): its daemon is waited for, a second one is never
+    # started next to it.
+    $service = Get-OctoDevStackServiceState -Port $Port
+    if ($service.supervised) {
         $data.service = $service.kind
-        $health = Wait-OctoDevStackNewDaemon -Port $Port -PreviousPid 0 -TimeoutSeconds $HealthTimeoutSeconds
+        $health = Wait-OctoDevStackNewDaemon -Port $Port -PreviousPid $(if ($stopped) { $stoppedPid } else { 0 }) -TimeoutSeconds $HealthTimeoutSeconds
         if (-not $health) {
             Write-OctoDevStackResult $command $Json $false $data "The $($service.kind) runs octo-devstack, but nothing answers on $url within $HealthTimeoutSeconds s; see $logPath. No second daemon was started next to it."
             return
         }
-        $data.alreadyRunning = $true
+        $data.alreadyRunning = -not $stopped
+        $data.started = $stopped
+        $data.restarted = $stopped
         $data.pid = [int]$health.pid
         $data.version = $health.version
         $data.commit = $health.commit
-        if (-not $Json) { Write-Host "octo-devstack is running under the $($service.kind) on $url (PID $($data.pid)) - MCP $url/mcp" -ForegroundColor Green }
+        if (-not $Json) { Write-Host "octo-devstack is running under the $($service.kind) on $url (PID $($data.pid))$(if ($stopped) { ' - it took over from the stopped one' }) - MCP $url/mcp" -ForegroundColor Green }
         Write-OctoDevStackResult $command $Json $true $data $null
         return
     }
@@ -400,6 +410,31 @@ function Start-OctoDevStackDaemon {
             return
         }
         $data.built = $true
+    }
+
+    # An installed service that does not run (Linux: the unit after a stop; macOS: the agent not loaded) starts the daemon
+    # (AB#9377): a daemon of our own would hold the state folder when the service starts its own at the next login.
+    if (-not $Foreground -and $service.installed -and $service.kind -in @('launchAgent', 'systemdUser') -and (Test-OctoDevStackServiceManager -Kind $service.kind)) {
+        $data.service = $service.kind
+        try { Start-OctoDevStackService -Service $service }
+        catch {
+            Write-OctoDevStackResult $command $Json $false $data "Could not start the $($service.kind) $($service.path): $($_.Exception.Message)"
+            return
+        }
+        $health = Wait-OctoDevStackNewDaemon -Port $Port -PreviousPid $(if ($stopped) { $stoppedPid } else { 0 }) -TimeoutSeconds $HealthTimeoutSeconds
+        if (-not $health) {
+            $last = Get-OctoDevStackLastLogLine -Paths @($logPath)
+            Write-OctoDevStackResult $command $Json $false $data "The $($service.kind) was started, but nothing answers on $url within $HealthTimeoutSeconds s$(if ($last) { ": $last" }); see $logPath."
+            return
+        }
+        $data.started = $true
+        $data.restarted = $stopped
+        $data.pid = [int]$health.pid
+        $data.version = $health.version
+        $data.commit = $health.commit
+        if (-not $Json) { Write-Host "octo-devstack started by the $($service.kind) on $url (PID $($data.pid), version $($health.version) commit $($health.commit)) - MCP $url/mcp" -ForegroundColor Green }
+        Write-OctoDevStackResult $command $Json $true $data $null
+        return
     }
 
     # The daemon asks this octo-tools for the workspace (Get-OctoWorkspace, AB#9377): it inherits OCTO_TOOLS_PATH. Without
@@ -443,7 +478,9 @@ function Start-OctoDevStackDaemon {
         $alive = Test-OctoDevStackProcessAlive -ProcessId $processId
         if (-not $alive -or (Get-Date) -ge $deadline) {
             $why = if ($alive) { "does not answer after $HealthTimeoutSeconds s" } else { 'exited' }
-            Write-OctoDevStackResult $command $Json $false $data "octo-devstack (PID $processId) $why; see $logPath."
+            # What the daemon said last (a second daemon on the same state folder names the one that holds it).
+            $last = Get-OctoDevStackLastLogLine -Paths @((Join-Path $statePath 'daemon.err.log'), $logPath)
+            Write-OctoDevStackResult $command $Json $false $data "octo-devstack (PID $processId) $why$(if ($last) { ": $last" }); see $logPath."
             return
         }
         Start-Sleep -Milliseconds 500
@@ -487,7 +524,8 @@ function Stop-OctoDevStackDaemon {
         (KeepAlive) would start it again at once; restart it with Start-OctoDevStackDaemon -Restart, remove it with
         Uninstall-OctoDevStackDaemonService. Linux stops the systemd unit (systemctl --user stop; it stays enabled for
         the next login). Windows stops it and warns that the logon task starts it again within 15 minutes. Only the
-        service of -Port counts: a daemon on another port is stopped by its own signal, the service is left alone.
+        service of -Port counts: a daemon on another port is stopped by its own signal, the service is left alone. So is
+        a daemon started by hand while launchd's waits for the state folder (another pid): launchd's takes over.
 
     .PARAMETER Force
         Stop although builds run or wait.
@@ -542,16 +580,21 @@ function Stop-OctoDevStackDaemon {
     }
 
     # A daemon its service manager runs (AB#9377). launchd (KeepAlive) would start it again at once, so a stop is refused
-    # there; systemd stops the unit, which stays enabled for the next login.
+    # there; systemd stops the unit, which stays enabled for the next login. A daemon started by hand while launchd's
+    # waits for the state folder (another pid) is stopped by its own signal; launchd's takes over then.
     $service = Get-OctoDevStackServiceState -Port $Port
-    if ($service.supervised) { $data.service = $service.kind }
-    if ($service.supervised -and $service.kind -eq 'launchAgent') {
+    $runsTarget = Test-OctoDevStackServiceRuns -Service $service -ProcessId $target.pid
+    if ($runsTarget) { $data.service = $service.kind }
+    elseif ($service.supervised) {
+        $data.warnings = @($data.warnings) + "The $($service.kind) runs octo-devstack PID $($service.pid), which waits for this one (PID $($target.pid), not started by it) and takes over when it has ended."
+    }
+    if ($runsTarget -and $service.kind -eq 'launchAgent') {
         $data.refused = $true
         Write-OctoDevStackResult $command $Json $false $data ("octo-devstack (PID $($target.pid)) runs under launchd ($($service.path), KeepAlive): launchd would start it again at once, nothing stopped. " +
             'Restart it with Start-OctoDevStackDaemon -Restart; to stop it for good remove the service with Uninstall-OctoDevStackDaemonService.')
         return
     }
-    if ($service.supervised -and $service.kind -eq 'systemdUser') {
+    if ($runsTarget -and $service.kind -eq 'systemdUser') {
         try { Stop-OctoDevStackService -Service $service }
         catch { Write-OctoDevStackResult $command $Json $false $data "Could not stop the systemd unit: $($_.Exception.Message)"; return }
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds + 5)
@@ -639,12 +682,16 @@ function Get-OctoDevStackSystemdUnit([string]$RepoPath, [string]$Dll, [string]$U
         "Environment=`"OCTO_TOOLS_PATH=$ToolsPath`""
         "Environment=`"PATH=$(Get-OctoDevStackServicePathValue)`""
         'Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1'
+        'Environment=OCTO_DEVSTACK_SERVICE=systemd'
     )
     if ($env:DOTNET_ROOT) { $lines += "Environment=`"DOTNET_ROOT=$env:DOTNET_ROOT`"" }
+    # SuccessExitStatus=75: a daemon that finds its state folder held by another octo-devstack exits with 75 (its
+    # daemon.lock): no failure, so Restart=on-failure does not start it again every 5 seconds while the other one runs.
     $lines += @(
         'KillMode=process'
         'Restart=on-failure'
         'RestartSec=5'
+        'SuccessExitStatus=75'
         "StandardOutput=append:$StatePath/daemon.log"
         "StandardError=append:$StatePath/daemon.log"
         ''
@@ -696,10 +743,11 @@ function Invoke-OctoDevStackLaunchctl([string[]]$Arguments, [switch]$AllowFailur
 function Get-OctoDevStackLaunchAgentPlist([string]$Label, [string]$RepoPath, [string]$Dll, [string]$Url, [string]$ToolsPath, [string]$Dotnet, [string]$StatePath, [string]$PathValue) {
     # KeepAlive: launchd starts the daemon again whenever it exits. AbandonProcessGroup: stopping or restarting it never
     # ends the stack services it started (they are in its process group); the next daemon adopts them. Every value is
-    # XML-escaped: a folder may hold '&' or '<'.
+    # XML-escaped: a folder may hold '&' or '<'. OCTO_DEVSTACK_SERVICE=launchd: a daemon of launchd that finds its state
+    # folder held by another octo-devstack waits for it instead of exiting (KeepAlive would start it again every 10 s).
     $e = { param([string]$value) [Security.SecurityElement]::Escape($value) }
     $log = & $e (Join-Path $StatePath 'daemon.log')
-    $environment = [ordered]@{ PATH = $PathValue; HOME = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile); DOTNET_CLI_TELEMETRY_OPTOUT = '1'; OCTO_TOOLS_PATH = $ToolsPath }
+    $environment = [ordered]@{ PATH = $PathValue; HOME = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile); DOTNET_CLI_TELEMETRY_OPTOUT = '1'; OCTO_TOOLS_PATH = $ToolsPath; OCTO_DEVSTACK_SERVICE = 'launchd' }
     if ($env:DOTNET_ROOT) { $environment.DOTNET_ROOT = $env:DOTNET_ROOT }
     $variables = ($environment.GetEnumerator() | ForEach-Object { "    <key>$($_.Key)</key><string>$(& $e $_.Value)</string>" }) -join "`n"
     return @"
@@ -844,6 +892,31 @@ function Stop-OctoDevStackService($Service) {
 function Start-OctoDevStackService($Service) {
     if ($Service.kind -eq 'launchAgent') { Invoke-OctoDevStackLaunchctl @('bootstrap', (Get-OctoDevStackLaunchdDomain), $Service.path) | Out-Null }
     else { Invoke-OctoDevStackSystemctl @('start', "$script:ServiceName.service") }
+}
+
+function Test-OctoDevStackServiceRuns($Service, $ProcessId) {
+    # Whether the service manager runs the daemon with this pid: supervised, and (launchd names its job's pid) the same
+    # process. launchd runs another pid when a daemon was started by hand while the agent was not loaded: launchd's own
+    # then waits for the state folder (octo-devstack's daemon.lock) and takes over when the other one has ended.
+    if (-not $Service.supervised) { return $false }
+    return (-not $Service.pid -or -not $ProcessId -or [int]$Service.pid -eq [int]$ProcessId)
+}
+
+function Test-OctoDevStackServiceManager([string]$Kind) {
+    # Whether the service manager of an installed service can be reached (a unit file without systemctl - WSL without
+    # systemd - cannot be started; the daemon is started by hand then).
+    if ($Kind -eq 'systemdUser') { return [bool](Get-OctoDevStackNativeCommand 'systemctl') }
+    return $true
+}
+
+function Get-OctoDevStackLastLogLine([string[]]$Paths) {
+    # The last non-empty line of the first of these logs that has one (what a daemon that ended said last).
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $line = @(Get-Content -LiteralPath $path -Tail 5 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() }) | Select-Object -Last 1
+        if ($line) { return $line.Trim() }
+    }
+    return $null
 }
 
 function Wait-OctoDevStackNewDaemon([int]$Port, $PreviousPid, [int]$TimeoutSeconds) {
