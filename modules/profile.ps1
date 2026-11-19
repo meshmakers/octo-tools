@@ -8,6 +8,16 @@ $publishVersion = "net10.0"
 $usersFolderPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 $privateProfilePath = Join-Path $usersFolderPath ".pwsh/profile.ps1";
 
+# Windows with Defender "Controlled Folder Access": Install-Module cannot write to Documents\PowerShell\Modules (and
+# without admin rights there is no other module folder), so modules octo-tools needs (powershell-yaml) are saved to
+# ~/.local/share/powershell/Modules - the folder pwsh itself uses for CurrentUser on macOS/Linux - and found here:
+#   Save-Module powershell-yaml -Path ~/.local/share/powershell/Modules
+$userModulesOutsideDocuments = Join-Path $usersFolderPath '.local/share/powershell/Modules'
+if ($IsWindows -and (Test-Path -LiteralPath $userModulesOutsideDocuments) -and
+    -not (($env:PSModulePath -split [System.IO.Path]::PathSeparator) -contains $userModulesOutsideDocuments)) {
+    $env:PSModulePath += "$([System.IO.Path]::PathSeparator)$userModulesOutsideDocuments"
+}
+
 $pathSep = [System.IO.Path]::PathSeparator
 
 if ($IsMacOS) {

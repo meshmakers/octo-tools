@@ -1,16 +1,28 @@
 #Requires -Modules Pester
 <#
     Pester tests for Invoke-IdentityOverlay -Json: per-client added / skipped-duplicate counts parsed from octo-cli's
-    output. octo-cli is replaced by a fake function; nothing is called out. Needs powershell-yaml (skipped without).
+    output. octo-cli is replaced by a fake function; nothing is called out. With powershell-yaml installed the overlay is
+    parsed by it; without (a machine where Install-Module is blocked), ConvertFrom-Yaml is a stub that returns what the
+    module returns for this overlay - the tests are about the counts, not the YAML parser - so they never skip.
 
     Run:  Invoke-Pester ./tests/InvokeIdentityOverlay.Tests.ps1
 #>
 
-BeforeDiscovery {
-    $script:NoYaml = -not (Get-Module -ListAvailable -Name 'powershell-yaml')
-}
-
 BeforeAll {
+    $script:StubbedYaml = -not (Get-Module -ListAvailable -Name 'powershell-yaml')
+    if ($script:StubbedYaml) {
+        function global:ConvertFrom-Yaml([string]$Yaml) {
+            [ordered]@{
+                overlayName = 'local-dev'
+                clients     = @(
+                    [ordered]@{ clientId = 'octo-data-refinery-studio'; redirectUris = @('http://localhost:4200/auth-callback'); allowedCorsOrigins = @('http://localhost:4200') }
+                    [ordered]@{ clientId = 'octo-cli'; redirectUris = @('http://localhost:5000/callback') }
+                    [ordered]@{ clientId = 'broken-client'; redirectUris = @('http://localhost:1/x') }
+                )
+            }
+        }
+    }
+
     $modules = Join-Path $PSScriptRoot '../modules'
     Import-Module (Join-Path $modules 'OctoJsonOutput.psm1') -Force
     Import-Module (Join-Path $modules 'Invoke-IdentityOverlay.psm1') -Force
@@ -50,9 +62,17 @@ clients:
 
 AfterAll {
     Remove-Item -Path 'function:global:fake-octo-cli' -ErrorAction SilentlyContinue
+    if ($script:StubbedYaml) { Remove-Item -Path 'function:global:ConvertFrom-Yaml' -ErrorAction SilentlyContinue }
 }
 
-Describe 'Invoke-IdentityOverlay -Json counts' -Skip:$NoYaml {
+Describe 'Invoke-IdentityOverlay -Json counts' {
+    BeforeAll {
+        # The cmdlet refuses without powershell-yaml; with the stub above it may go on.
+        if ($script:StubbedYaml) {
+            Mock -ModuleName Invoke-IdentityOverlay Get-Module { [pscustomobject]@{ Name = 'powershell-yaml'; Version = [version]'0.0' } } -ParameterFilter { $Name -eq 'powershell-yaml' }
+        }
+    }
+
     It 'reports per-client counts, null when unparseable or failed, totals in the summary, and only one JSON document' {
         $out = @(Invoke-IdentityOverlay -OverlayFile $Overlay -OctoCli 'fake-octo-cli' -Json)
         $out.Count | Should -Be 1
