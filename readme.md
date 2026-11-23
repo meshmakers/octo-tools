@@ -233,7 +233,12 @@ Get-OctoTestLock
   rebuilt, no build output). `-build Always` / `-build Never` override the check. The build output is the
   project's `<AssemblyName>.dll` below `<project>/bin/<configuration>` or, in repositories that build every project
   into one folder at the repository root, `<repo>/bin/<configuration>` (the newest of both counts; each project only
-  by its own assembly name).
+  by its own assembly name). Each source is judged against the output the build writes for it: the test project's
+  own sources against its assembly, a referenced project's sources against that project's output - MSBuild keeps the
+  test assembly when a referenced project changed only inside. The reference's dll next to the test assembly must be
+  as new as its output (else only the library was built), and its reference assembly (`obj/**/refint`) must not be
+  newer than the test assembly (its public API changed). Sources of projects the test project does not reference do
+  not count.
 - **Readable result.** The failed tests come first: full name, first line of the error message, first stack frame.
   `-Json` returns per test project the totals, the duration, up to 50 failed tests (`-maxFailures`, `truncated`) and
   the paths of the TRX files and the log. Everything is kept in
@@ -502,7 +507,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
   modules) - **on every OS**: on Windows they lock files, on macOS/Linux they would keep running on deleted files.
   In-place worktrees (outside `wt-<env>`), the base lane, other `wt-*` lanes, the octo-devstack daemon and processes
   that are not dotnet (shells, IDEs, Claude Code sessions) are never stopped. A matched process that still runs
-  afterwards refuses the removal with its pid, and nothing is removed. The console names every stopped process;
+  afterwards refuses the removal with its pid, and nothing is removed; after a stop the worktree state is read once more (files a stopped process wrote are kept). The console names every stopped process;
   `-Json` reports `kill` (`roots`, `processes` with `pid`, `name`, `reason`, `killedCount`, `failed`); `-WhatIf`
   lists the processes it would stop and stops none. (`Invoke-KillDotnet -action stop|list` does the same for any
   lane folder; the default `auto` stops on Windows and only lists on macOS/Linux.)

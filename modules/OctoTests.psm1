@@ -847,12 +847,12 @@ function Resolve-OctoTestProject {
     throw "Test project '$name' not found. Test projects of the repository: $(($projects.Name) -join ', ')"
 }
 
-function Get-OctoTestOutputTime {
+function Get-OctoTestOutputFile {
     # Newest <AssemblyName>.dll below <project>/bin/<configuration> or, for repositories whose Directory.Build.props put
     # every project's output into one folder at the repository root (AB#9659), <repository>/bin/<configuration> (UTC), or
     # $null without a build output. Only the project's own assembly name counts, so test projects that share the
     # repository folder are never judged by each other's dll. The newest, not the oldest: folders of a target framework
-    # the project no longer builds (or of the other layout) stay behind after an upgrade.
+    # the project no longer builds (or of the other layout) stay behind after an upgrade. Returns the FileInfo.
     param(
         [Parameter(Mandatory = $true)] [string]$projectDirectory,
         [Parameter(Mandatory = $true)] [string]$assemblyName,
@@ -865,8 +865,44 @@ function Get-OctoTestOutputTime {
     if ($bins.Count -eq 0) { return $null }
     $newest = $bins | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue } |
         Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    return $newest
+}
+
+function Get-OctoTestFileTime {
+    # LastWriteTimeUtc of a file, or $null when it does not exist.
+    param([string]$path)
+    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) { return [IO.File]::GetLastWriteTimeUtc($path) }
+    return $null
+}
+
+function Get-OctoTestReferenceAssemblyTime {
+    # Newest obj/<configuration>/**/refint/<AssemblyName>.dll (or ref/) of a project: MSBuild rewrites it only when the
+    # public API changed, and only then does it recompile the projects that reference it. $null without one.
+    param([string]$projectDirectory, [string]$assemblyName, [string]$configuration)
+    $obj = Join-Path $projectDirectory "obj/$configuration"
+    if (-not (Test-Path -LiteralPath $obj -PathType Container)) { return $null }
+    $newest = Get-ChildItem -LiteralPath $obj -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Directory.Name -in @('refint', 'ref') } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $newest) { return $null }
     return $newest.LastWriteTimeUtc
+}
+
+function Get-OctoTestBuildFiles {
+    # Directory.Build.props / .targets and Directory.Packages.props between the repository root and a project folder
+    # (the project folder itself is scanned with its sources). MSBuild imports them, so a change recompiles the project.
+    param([string]$repositoryPath, [string]$projectDirectory)
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($repositoryPath))
+    $directory = [IO.Path]::GetDirectoryName([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($projectDirectory)))
+    $files = @()
+    while ($directory -and $directory.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        foreach ($name in @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props')) {
+            $file = Join-Path $directory $name
+            if (Test-Path -LiteralPath $file -PathType Leaf) { $files += $file }
+        }
+        if ($directory -ieq $root) { break }
+        $directory = [IO.Path]::GetDirectoryName($directory)
+    }
+    return $files
 }
 
 function Get-OctoTestNewestSource {
@@ -884,23 +920,26 @@ function Get-OctoTestNewestSource {
 
 function Get-OctoTestBuildState {
     <#
-        Is the build of a test project current, so `dotnet test --no-build` runs what the sources say?
-        Not current when: there is no <AssemblyName>.dll below <project>/bin/<configuration> or
-        <repository>/bin/<configuration>; a source file of the repository is
-        newer than it; the output of a referenced project is newer (a src-only build ran after the tests were built);
-        or (DebugL) the lane feed holds a newer build of a 999.0.0 package the project restored (an upstream library
-        was rebuilt). Returns { Current; Reason }.
+        Is the build of a test project current, so `dotnet test --no-build` runs what the sources say? MSBuild does not
+        rewrite the test assembly when a referenced project changed only inside (its reference assembly stays), so each
+        source is judged against the output the build writes for it (AB#9659):
+        - the test project's own sources (and the Directory.*.props/targets above it) against its own <AssemblyName>.dll
+          (below <project>/bin/<configuration> or <repository>/bin/<configuration>);
+        - a referenced project's sources against its own output;
+        - its dll next to the test assembly must be at least as new as its own output (else a build that skipped the test
+          project ran after it: "<ref> was built after <test>"), and its reference assembly (obj/**/refint) must not be
+          newer than the test assembly (its public API changed, the test project must recompile);
+        - (DebugL) the lane feed must not hold a newer build of a 999.0.0 package the project restored.
+        Sources of projects the test project does not reference do not count. Returns { Current; Reason }.
     #>
     param(
         [Parameter(Mandatory = $true)] [object]$project,
         [Parameter(Mandatory = $true)] [string]$repositoryPath,
         [Parameter(Mandatory = $true)] [string]$configuration,
-        [string]$laneFeed = '',
-        # Get-OctoTestNewestSource of the repository, computed once per run.
-        $newestSource = $null
+        [string]$laneFeed = ''
     )
-    $output = Get-OctoTestOutputTime -projectDirectory $project.Directory -assemblyName $project.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
-    if ($null -eq $output) {
+    $ownFile = Get-OctoTestOutputFile -projectDirectory $project.Directory -assemblyName $project.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
+    if ($null -eq $ownFile) {
         # A build with -verifyTests compiles the solution's projects: one that is not in the solution stays unbuilt.
         $hint = ''
         try {
@@ -913,14 +952,37 @@ function Get-OctoTestBuildState {
         catch { $hint = '' }
         return [pscustomobject]@{ Current = $false; Reason = "no $configuration build output of $($project.Name)$hint" }
     }
-    if ($null -ne $newestSource -and $newestSource.Time -gt $output) {
-        $relative = [IO.Path]::GetRelativePath($repositoryPath, $newestSource.File) -replace '\\', '/'
+    $ownTime = $ownFile.LastWriteTimeUtc
+    $sourceChanged = {
+        param($newest)
+        $relative = [IO.Path]::GetRelativePath($repositoryPath, $newest.File) -replace '\\', '/'
         return [pscustomobject]@{ Current = $false; Reason = "source changed after the last build ($relative)" }
     }
+    $ownSource = Get-OctoTestNewestSource -repositoryPath $project.Directory
+    if ($null -ne $ownSource -and $ownSource.Time -gt $ownTime) { return (& $sourceChanged $ownSource) }
+    foreach ($file in @(Get-OctoTestBuildFiles -repositoryPath $repositoryPath -projectDirectory $project.Directory)) {
+        if ([IO.File]::GetLastWriteTimeUtc($file) -gt $ownTime) { return (& $sourceChanged ([pscustomobject]@{ File = $file })) }
+    }
     foreach ($reference in @($project.ProjectReferences)) {
-        $referenceOutput = Get-OctoTestOutputTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
-        if ($null -ne $referenceOutput -and $referenceOutput -gt $output) {
-            return [pscustomobject]@{ Current = $false; Reason = "$([IO.Path]::GetFileNameWithoutExtension($reference.Path)) was built after $($project.Name)" }
+        $name = [IO.Path]::GetFileNameWithoutExtension($reference.Path)
+        $referenceFile = Get-OctoTestOutputFile -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
+        $referenceTime = if ($referenceFile) { $referenceFile.LastWriteTimeUtc } else { $null }
+        # Its sources against the build that wrote its output; never built: against the test assembly.
+        $referenceSource = Get-OctoTestNewestSource -repositoryPath $reference.Directory
+        $builtAt = if ($null -ne $referenceTime) { $referenceTime } else { $ownTime }
+        if ($null -ne $referenceSource -and $referenceSource.Time -gt $builtAt) { return (& $sourceChanged $referenceSource) }
+        if ($null -eq $referenceTime) { continue }
+        # The copy next to the test assembly (the same file when every project builds into one folder).
+        $copyTime = Get-OctoTestFileTime -path (Join-Path $ownFile.DirectoryName "$($reference.AssemblyName).dll")
+        if ($null -eq $copyTime) { $copyTime = $ownTime }
+        if ($referenceTime -gt $copyTime) {
+            return [pscustomobject]@{ Current = $false; Reason = "$name was built after $($project.Name)" }
+        }
+        $referenceApi = Get-OctoTestReferenceAssemblyTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration
+        # Without a reference assembly every rebuild of the reference counts as a change of its API.
+        if ($null -eq $referenceApi) { $referenceApi = $referenceTime }
+        if ($referenceApi -gt $ownTime) {
+            return [pscustomobject]@{ Current = $false; Reason = "$name was built after $($project.Name)" }
         }
     }
     if ($configuration -ieq 'DebugL' -and $laneFeed -and (Test-Path -LiteralPath $laneFeed -PathType Container)) {
@@ -929,7 +991,7 @@ function Get-OctoTestBuildState {
             $ids = @([regex]::Matches([IO.File]::ReadAllText($assets), '"(?<id>[^"/]+)/999\.0\.0"') | ForEach-Object { $_.Groups['id'].Value } | Sort-Object -Unique)
             foreach ($id in $ids) {
                 $package = Join-Path $laneFeed "$id.999.0.0.nupkg"
-                if ((Test-Path -LiteralPath $package -PathType Leaf) -and [IO.File]::GetLastWriteTimeUtc($package) -gt $output) {
+                if ((Test-Path -LiteralPath $package -PathType Leaf) -and [IO.File]::GetLastWriteTimeUtc($package) -gt $ownTime) {
                     return [pscustomobject]@{ Current = $false; Reason = "the lane feed holds a newer $id.999.0.0.nupkg" }
                 }
             }
@@ -1537,7 +1599,6 @@ function Invoke-OctoTestRun {
 
     $resultsRoot = Get-OctoTestResultsRoot -lanePath $target.LanePath -repo $repo
     $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $target.LanePath
-    $newestSource = if ($build -eq 'Auto') { Get-OctoTestNewestSource -repositoryPath $target.RepoPath } else { $null }
 
     # The plan: per project what runs (filters), whether it builds and whether it needs the lock.
     $plan = @()
@@ -1582,7 +1643,7 @@ function Invoke-OctoTestRun {
             switch ($build) {
                 'Always' { [pscustomobject]@{ Current = $false; Reason = '-build Always' } }
                 'Never' { [pscustomobject]@{ Current = $true; Reason = '-build Never' } }
-                default { Get-OctoTestBuildState -project $entry -repositoryPath $target.RepoPath -configuration $configuration -laneFeed $laneSettings.laneFeed -newestSource $newestSource }
+                default { Get-OctoTestBuildState -project $entry -repositoryPath $target.RepoPath -configuration $configuration -laneFeed $laneSettings.laneFeed }
             }
         }
         $docker = switch ($dockerLock) { 'Always' { $true } 'Never' { $false } default { $entry.Docker } }

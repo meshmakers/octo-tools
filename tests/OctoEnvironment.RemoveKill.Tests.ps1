@@ -84,6 +84,17 @@ Describe 'Remove-OctoEnvironment stops the environment''s dotnet processes first
         Test-Path (Join-Path $envPath '.octo/environment.json') | Should -BeTrue
     }
 
+    It 'reads the state again after the stop: a file the stopped process wrote is kept, nothing removed' {
+        Mock -ModuleName Invoke-KillDotnet Stop-Process {
+            foreach ($one in @($Id)) { $script:FakeDotnet.Stopped.Add([int]$one) }
+            Set-Content -Path (Join-Path $script:wt 'written-by-the-process.txt') -Value 'x'
+        }
+        $doc = Get-Doc (Remove-OctoEnvironment -env 'env-k' -Json)
+        $doc.data.success | Should -BeFalse
+        $doc.data.error | Should -Match 'nothing removed: octo-sdk: uncommitted changes'
+        Test-Path (Join-Path $wt 'written-by-the-process.txt') | Should -BeTrue
+    }
+
     It 'a refused check (dirty worktree) stops no process' {
         Set-Content -Path (Join-Path $wt 'untracked.txt') -Value 'x'
         $doc = Get-Doc (Remove-OctoEnvironment -env 'env-k' -Json)

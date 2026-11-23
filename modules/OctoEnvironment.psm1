@@ -2514,8 +2514,9 @@ function Get-OctoAffectedRepos {
     assembly, Windows: modules) with -action stop, on every OS: on macOS/Linux too, so nothing keeps running on deleted
     files. In-place worktrees (outside wt-<env>), the base lane, other wt-* lanes, the octo-devstack daemon and every
     process that is not dotnet are never stopped. A matched process that is still running after the stop refuses the
-    removal (nothing removed, its pid named). A refused check stops nothing; -WhatIf only lists the processes it would
-    stop. -Json: kill { roots, skipped, processes [{ pid, name, reason }], killedCount, failed }.
+    removal (nothing removed, its pid named); after a stop the worktree state is read once more, so files a stopped
+    process wrote are kept. A refused check stops nothing; -WhatIf only lists the processes it would stop.
+    -Json: kill { roots, skipped, processes [{ pid, name, reason }], killedCount, failed[, error] }.
 .EXAMPLE
     Remove-OctoEnvironment -env ab8625-enum-null -WhatIf
 #>
@@ -2581,6 +2582,7 @@ function Remove-OctoEnvironment {
 
     if (-not $PSCmdlet.ShouldProcess($environmentPath, "Stop the environment's dotnet processes, remove $($owned.Count) worktree(s) and the environment's files")) {
         $killError = & $invokeKill 'list'
+        if ($killError) { $kill['error'] = $killError }
         if (-not $Json) {
             foreach ($process in $kill.processes) { Write-Host "  would stop dotnet process $($process.pid) $($process.name) ($($process.reason))" }
             if ($killError) { Write-Warning "Remove-OctoEnvironment: the processes of $environmentPath could not be listed: $killError" }
@@ -2593,20 +2595,23 @@ function Remove-OctoEnvironment {
     # moved was not part of the merge decision.
     $checkedHead = @{}
     foreach ($state in $states) { $checkedHead[[string]$state.path] = $state.head }
-    $fresh = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ } | Where-Object { $_.dirty -or $_.problem -or $_.head -ne $checkedHead[[string]$_.path] })
-    if ($fresh.Count -gt 0) {
+    $freshRefusal = {
+        $fresh = @($owned | ForEach-Object { Get-OctoEnvironmentRepoState -repo $_ } | Where-Object { $_.dirty -or $_.problem -or $_.head -ne $checkedHead[[string]$_.path] })
+        if ($fresh.Count -eq 0) { return $null }
         $reasons = @($fresh | ForEach-Object {
                 $why = if ($_.problem) { $_.problem } elseif ($_.dirty) { 'uncommitted changes' } else { 'HEAD moved during the check (new commits), run it again' }
                 "$($_.name): $why"
             })
-        & $fail "Remove-OctoEnvironment refused, nothing removed: $($reasons -join '; ')." $states
-        return
+        return "Remove-OctoEnvironment refused, nothing removed: $($reasons -join '; ')."
     }
+    $refusal = & $freshRefusal
+    if ($refusal) { & $fail $refusal $states; return }
     # Stop the environment's dotnet processes before anything is removed: on Windows they lock files (git worktree remove
     # fails half-way), on macOS/Linux they would keep running on deleted files.
     $killError = & $invokeKill 'stop'
+    $failedPids = @($kill.failed | ForEach-Object { [int]$_.pid })
     foreach ($process in $kill.processes) {
-        if (-not $Json) { Write-Host "Stopped dotnet process $($process.pid) $($process.name) of $env ($($process.reason))" -ForegroundColor Yellow }
+        if (-not $Json -and $failedPids -notcontains [int]$process.pid) { Write-Host "Stopped dotnet process $($process.pid) $($process.name) of $env ($($process.reason))" -ForegroundColor Yellow }
         # Stop-Process only signals; wait until it is gone, so no file is removed under a running process.
         Wait-Process -Id $process.pid -Timeout 10 -ErrorAction SilentlyContinue
     }
@@ -2618,6 +2623,11 @@ function Remove-OctoEnvironment {
         if ($Json) { Write-OctoJson -Command 'Remove-OctoEnvironment' -Data (New-OctoActionResult -Success $false -ExitCode 1 -Extra @{ environment = $env; error = "Remove-OctoEnvironment refused, nothing removed: $why."; repos = $states; kill = $kill }) }
         else { Write-Error "Remove-OctoEnvironment refused, nothing removed: $why." }
         return
+    }
+    # A stopped process may have written tracked files until it went: read the state once more.
+    if ($kill.processes.Count -gt 0) {
+        $refusal = & $freshRefusal
+        if ($refusal) { & $fail $refusal $states; return }
     }
     $errors = @()
     foreach ($repo in $owned) {
