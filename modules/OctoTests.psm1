@@ -852,20 +852,27 @@ function Get-OctoTestOutputFile {
     # every project's output into one folder at the repository root (AB#9659), <repository>/bin/<configuration> (UTC), or
     # $null without a build output. Only the project's own assembly name counts, so test projects that share the
     # repository folder are never judged by each other's dll. The newest, not the oldest: folders of a target framework
-    # the project no longer builds (or of the other layout) stay behind after an upgrade. Returns the FileInfo.
+    # the project no longer builds (or of the other layout) stay behind after an upgrade. Reference assemblies
+    # (ref/, refint/ below bin with ProduceReferenceAssemblyInOutDir) are no output. With -framework (a target
+    # framework folder such as net10.0) the output of that framework, when there is one. Returns the FileInfo.
     param(
         [Parameter(Mandatory = $true)] [string]$projectDirectory,
         [Parameter(Mandatory = $true)] [string]$assemblyName,
         [Parameter(Mandatory = $true)] [string]$configuration,
-        [string]$repositoryPath = ''
+        [string]$repositoryPath = '',
+        [string]$framework = ''
     )
     $bins = @(Join-Path $projectDirectory "bin/$configuration")
     if ($repositoryPath) { $bins += Join-Path $repositoryPath "bin/$configuration" }
     $bins = @($bins | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
     if ($bins.Count -eq 0) { return $null }
-    $newest = $bins | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue } |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    return $newest
+    $files = @($bins | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue } |
+            Where-Object { $_.Directory.Name -notin @('ref', 'refint') })
+    if ($framework) {
+        $inFramework = @($files | Where-Object { $_.Directory.Name -ieq $framework })
+        if ($inFramework.Count -gt 0) { $files = $inFramework }
+    }
+    return ($files | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1)
 }
 
 function Get-OctoTestFileTime {
@@ -876,13 +883,20 @@ function Get-OctoTestFileTime {
 }
 
 function Get-OctoTestReferenceAssemblyTime {
-    # Newest obj/<configuration>/**/refint/<AssemblyName>.dll (or ref/) of a project: MSBuild rewrites it only when the
-    # public API changed, and only then does it recompile the projects that reference it. $null without one.
-    param([string]$projectDirectory, [string]$assemblyName, [string]$configuration)
-    $obj = Join-Path $projectDirectory "obj/$configuration"
-    if (-not (Test-Path -LiteralPath $obj -PathType Container)) { return $null }
-    $newest = Get-ChildItem -LiteralPath $obj -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Directory.Name -in @('refint', 'ref') } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    # Newest reference assembly <AssemblyName>.dll in a ref/ folder of a project (obj/<configuration>/<tfm>/ref, or
+    # bin/<configuration>/<tfm>/ref with ProduceReferenceAssemblyInOutDir): CopyRefAssembly rewrites it only when the
+    # public API changed, and only then does MSBuild recompile the projects that compile against it. Not refint/: the
+    # compiler writes that one on every compile. With -framework the one of that target framework, when there is one.
+    # $null without one.
+    param([string]$projectDirectory, [string]$assemblyName, [string]$configuration, [string]$framework = '')
+    $folders = @((Join-Path $projectDirectory "obj/$configuration"), (Join-Path $projectDirectory "bin/$configuration") | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+    $files = @($folders | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue } |
+            Where-Object { $_.Directory.Name -eq 'ref' })
+    if ($framework) {
+        $inFramework = @($files | Where-Object { $_.Directory.Parent.Name -ieq $framework })
+        if ($inFramework.Count -gt 0) { $files = $inFramework }
+    }
+    $newest = $files | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $newest) { return $null }
     return $newest.LastWriteTimeUtc
 }
@@ -927,8 +941,9 @@ function Get-OctoTestBuildState {
           (below <project>/bin/<configuration> or <repository>/bin/<configuration>);
         - a referenced project's sources against its own output;
         - its dll next to the test assembly must be at least as new as its own output (else a build that skipped the test
-          project ran after it: "<ref> was built after <test>"), and its reference assembly (obj/**/refint) must not be
-          newer than the test assembly (its public API changed, the test project must recompile);
+          project ran after it: "<ref> was built after <test>"), and its reference assembly (obj/<cfg>/<tfm>/ref, which
+          CopyRefAssembly rewrites only on an API change) must not be newer than the test assembly (the test project must
+          recompile); a multi-targeted reference is judged in the target framework of the test assembly;
         - (DebugL) the lane feed must not hold a newer build of a 999.0.0 package the project restored.
         Sources of projects the test project does not reference do not count. Returns { Current; Reason }.
     #>
@@ -965,7 +980,8 @@ function Get-OctoTestBuildState {
     }
     foreach ($reference in @($project.ProjectReferences)) {
         $name = [IO.Path]::GetFileNameWithoutExtension($reference.Path)
-        $referenceFile = Get-OctoTestOutputFile -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
+        # Of the target framework the test assembly was built for (a multi-targeted library builds several).
+        $referenceFile = Get-OctoTestOutputFile -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -repositoryPath $repositoryPath -framework $ownFile.Directory.Name
         $referenceTime = if ($referenceFile) { $referenceFile.LastWriteTimeUtc } else { $null }
         # Its sources against the build that wrote its output; never built: against the test assembly.
         $referenceSource = Get-OctoTestNewestSource -repositoryPath $reference.Directory
@@ -978,7 +994,7 @@ function Get-OctoTestBuildState {
         if ($referenceTime -gt $copyTime) {
             return [pscustomobject]@{ Current = $false; Reason = "$name was built after $($project.Name)" }
         }
-        $referenceApi = Get-OctoTestReferenceAssemblyTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration
+        $referenceApi = Get-OctoTestReferenceAssemblyTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -framework $ownFile.Directory.Name
         # Without a reference assembly every rebuild of the reference counts as a change of its API.
         if ($null -eq $referenceApi) { $referenceApi = $referenceTime }
         if ($referenceApi -gt $ownTime) {

@@ -635,9 +635,11 @@ Describe 'Build state of a test project' {
             $touch = { param([string]$path, [DateTime]$time) New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null; Set-Content -Path $path -Value 'x'; [IO.File]::SetLastWriteTimeUtc($path, $time) }
 
             # Project-level layout. Order.cs edited after the test build; the full build rebuilt Sample.dll and copied it
-            # next to the test dll; the reference assembly (obj/refint) stayed, so the test dll was not rewritten.
+            # next to the test dll; the reference assembly (obj/<cfg>/<tfm>/ref) stayed, so the test dll was not
+            # rewritten. The compiler writes refint/ on every compile - it must not count as an API change.
             [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddMinutes(2))
-            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/net10.0/refint/Sample.dll') $built.AddHours(-2)
+            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll') $built.AddHours(-2)
+            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/net10.0/refint/Sample.dll') $built.AddMinutes(5)
             & $touch (Join-Path $repo 'src/Sample/bin/DebugL/net10.0/Sample.dll') $built.AddMinutes(5)
             & $touch (Join-Path $repo 'tests/Sample.UnitTests/bin/DebugL/net10.0/Sample.dll') $built.AddMinutes(5)
             (& $check).Current | Should -BeTrue
@@ -648,9 +650,15 @@ Describe 'Build state of a test project' {
             [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/bin/DebugL/net10.0/Sample.dll'), $built.AddMinutes(5))
 
             # the public API changed (reference assembly newer than the test dll): the test project must recompile
-            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/refint/Sample.dll'), $built.AddMinutes(5))
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddMinutes(5))
             (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
-            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/refint/Sample.dll'), $built.AddHours(-2))
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddHours(-2))
+
+            # a multi-targeted reference: its netstandard2.0 build finished last - only the test's framework counts
+            & $touch (Join-Path $repo 'src/Sample/bin/DebugL/netstandard2.0/Sample.dll') $built.AddMinutes(8)
+            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/netstandard2.0/ref/Sample.dll') $built.AddMinutes(8)
+            (& $check).Current | Should -BeTrue
+            Remove-Item (Join-Path $repo 'src/Sample/bin/DebugL/netstandard2.0'), (Join-Path $repo 'src/Sample/obj/DebugL/netstandard2.0') -Recurse -Force
 
             # no false reuse: the referenced project's source is newer than its own output, or the test's own source
             # newer than the test dll (a rebuild of Sample does not cover it)
@@ -670,7 +678,7 @@ Describe 'Build state of a test project' {
             & $touch (Join-Path $repo 'bin/DebugL/net10.0/Sample.UnitTests.dll') $built
             & $touch (Join-Path $repo 'bin/DebugL/net10.0/Sample.dll') $built.AddMinutes(5)
             (& $check).Current | Should -BeTrue
-            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/refint/Sample.dll'), $built.AddMinutes(5))
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddMinutes(5))
             (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
         }
     }
