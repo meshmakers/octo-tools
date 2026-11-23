@@ -673,6 +673,12 @@ Describe 'Build state of a test project' {
             & $touch (Join-Path $repo 'src/Unrelated/Unrelated.cs') $built.AddMinutes(30)
             (& $check).Current | Should -BeTrue
 
+            # a Directory.Build.props between the repository root and the referenced project (not above the test project)
+            & $touch (Join-Path $repo 'src/Directory.Build.props') $built.AddMinutes(6)
+            (& $check).Reason | Should -Be 'source changed after the last build (src/Directory.Build.props)'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Directory.Build.props'), $built.AddMinutes(4))
+            (& $check).Current | Should -BeTrue   # older than Sample's output: that build covered it
+
             # Repository-level layout: one folder for everything; Sample.dll there is the rebuilt one.
             Remove-Item (Join-Path $repo 'tests/Sample.UnitTests/bin'), (Join-Path $repo 'src/Sample/bin') -Recurse -Force
             & $touch (Join-Path $repo 'bin/DebugL/net10.0/Sample.UnitTests.dll') $built
@@ -730,6 +736,10 @@ Describe 'Build state of a test project' {
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Unrelated.999.0.0.nupkg'), $built.AddMinutes(5))
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Sample.999.0.0.nupkg'), $built.AddSeconds(1))
             (& $check).Current | Should -BeTrue   # only packages the project restored count, no project references
+            $assetsText = Get-Content -Raw -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json')
+            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value '{ "libraries": { "Meshmakers.Octo.Sdk/999.0.0": '
+            (& $check).Reason | Should -Be 'obj/project.assets.json is unreadable (a restore may be writing it)'
+            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value $assetsText -NoNewline
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(5))
             (& $check).Reason | Should -Be 'the lane feed holds a newer Meshmakers.Octo.Sdk.999.0.0.nupkg'
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(-5))

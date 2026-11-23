@@ -942,13 +942,14 @@ function Get-OctoTestBuildState {
         source is judged against the output the build writes for it (AB#9659):
         - the test project's own sources (and the Directory.*.props/targets above it) against its own <AssemblyName>.dll
           (below <project>/bin/<configuration> or <repository>/bin/<configuration>);
-        - a referenced project's sources against its own output;
+        - a referenced project's sources (and the Directory.*.props/targets above it) against its own output;
         - its dll next to the test assembly must be at least as new as its own output (else a build that skipped the test
           project ran after it: "<ref> was built after <test>"), and its reference assembly (obj/<cfg>/<tfm>/ref, which
           CopyRefAssembly rewrites only on an API change) must not be newer than the test assembly (the test project must
           recompile); a multi-targeted reference is judged in the target framework of the test assembly;
         - (DebugL) the lane feed must not hold a newer build of a 999.0.0 package the project restored (entries of
-          type "package" in obj/project.assets.json; a project reference of the same name does not count).
+          type "package" in obj/project.assets.json; a project reference of the same name does not count; an unreadable
+          project.assets.json is "not current").
         Sources of projects the test project does not reference do not count. Returns { Current; Reason }.
     #>
     param(
@@ -991,6 +992,10 @@ function Get-OctoTestBuildState {
         $referenceSource = Get-OctoTestNewestSource -repositoryPath $reference.Directory
         $builtAt = if ($null -ne $referenceTime) { $referenceTime } else { $ownTime }
         if ($null -ne $referenceSource -and $referenceSource.Time -gt $builtAt) { return (& $sourceChanged $referenceSource) }
+        # Its own Directory.Build.* / Directory.Packages.props chain (e.g. src/Directory.Build.props above src/<lib>).
+        foreach ($file in @(Get-OctoTestBuildFiles -repositoryPath $repositoryPath -projectDirectory $reference.Directory)) {
+            if ([IO.File]::GetLastWriteTimeUtc($file) -gt $builtAt) { return (& $sourceChanged ([pscustomobject]@{ File = $file })) }
+        }
         if ($null -eq $referenceTime) { continue }
         # The copy next to the test assembly (the same file when every project builds into one folder).
         $copyTime = Get-OctoTestFileTime -path (Join-Path $ownFile.DirectoryName "$($reference.AssemblyName).dll")
@@ -1011,7 +1016,8 @@ function Get-OctoTestBuildState {
             # Only restored packages ("type": "package"): a project reference of the same name (the repository packs
             # its own projects into the lane feed right after building them) is no package the project consumes.
             $libraries = $null
-            try { $libraries = (Get-Content -LiteralPath $assets -Raw | ConvertFrom-Json -AsHashtable)['libraries'] } catch { $libraries = $null }
+            try { $libraries = (Get-Content -LiteralPath $assets -Raw | ConvertFrom-Json -AsHashtable)['libraries'] }
+            catch { return [pscustomobject]@{ Current = $false; Reason = 'obj/project.assets.json is unreadable (a restore may be writing it)' } }
             $ids = @(foreach ($key in @($(if ($libraries) { $libraries.Keys }))) {
                     if ($key -match '^(?<id>[^/]+)/999\.0\.0$' -and [string]$libraries[$key]['type'] -eq 'package') { $Matches['id'] }
                 }) | Sort-Object -Unique

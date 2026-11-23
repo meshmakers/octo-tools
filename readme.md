@@ -234,7 +234,8 @@ Get-OctoTestLock
   project's `<AssemblyName>.dll` below `<project>/bin/<configuration>` or, in repositories that build every project
   into one folder at the repository root, `<repo>/bin/<configuration>` (the newest of both counts; each project only
   by its own assembly name). Each source is judged against the output the build writes for it: the test project's
-  own sources against its assembly, a referenced project's sources against that project's output - MSBuild keeps the
+  own sources against its assembly, a referenced project's sources (and the `Directory.Build.*` files above it)
+  against that project's output - MSBuild keeps the
   test assembly when a referenced project changed only inside. The reference's dll next to the test assembly must be
   as new as its output (else only the library was built), and its reference assembly (`obj/<configuration>/<tfm>/ref`,
   rewritten only when the public API changed; not `refint`, which every compile writes) must not be newer than the
