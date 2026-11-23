@@ -51,6 +51,18 @@ $script:OctoAdditionalOrderedBuildOrder = @(
     'octo-plug-dilos'
 )
 
+# Developer tooling next to the OctoMesh repositories, never part of the build (AB#9664): octo-tools and
+# octo-devstack (they sit next to octo-tools, and when that folder is used as a lane - Invoke-BuildAll without
+# -branch - they must not be built) and the Claude Code plugin repositories octo-claude-* (no solution, no package).
+# The one rule both code paths of Get-OctoBuildOrder use; wildcards as in -like.
+$script:OctoToolRepoPatterns = @('octo-tools', 'octo-devstack', 'octo-claude-*')
+
+function Test-OctoToolRepo {
+    param([string]$name)
+    foreach ($pattern in $script:OctoToolRepoPatterns) { if ($name -like $pattern) { return $true } }
+    return $false
+}
+
 function Get-OctoPinnedBuildOrder {
     <#
     .SYNOPSIS
@@ -134,11 +146,10 @@ function Get-OctoBuildOrder {
         [hashtable]$additionalRepos = @{}
     )
 
-    # octo-tools and octo-devstack are developer tools, not OctoMesh repositories: they sit next to octo-tools,
-    # and when that folder is used as a lane (Invoke-BuildAll without -branch) they must not be built.
+    # Developer tool repositories ($script:OctoToolRepoPatterns) are never built.
     # Candidates as { Name; Info }: Name is the repository name, Info the folder (for -additionalRepos the folder
     # name may differ from the repository name, e.g. wt-<lane>-octo-sdk).
-    $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*" | Where-Object { $_.Name -notin @('octo-tools', 'octo-devstack') } |
+    $octoDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "octo-*" | Where-Object { -not (Test-OctoToolRepo $_.Name) } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name; Info = $_ } })
     $mmDirectories = @(Get-ChildItem -Directory -Path $branchRootPath -Filter "mm-*" | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Info = $_ } })
     # Consumer apps (AB#8819): only in a feature environment, and only the repositories its manifest names - a lane
@@ -160,7 +171,7 @@ function Get-OctoBuildOrder {
         }
     }
     foreach ($name in @($additionalRepos.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
-        if ($name -in @('octo-tools', 'octo-devstack')) { continue }
+        if (Test-OctoToolRepo $name) { continue }
         if (@($octoDirectories + $mmDirectories | Where-Object { $_.Name -ieq $name }).Count -gt 0) { continue }
         $folder = [string]$additionalRepos[$name]
         if (-not (Test-Path -LiteralPath $folder -PathType Container)) { throw "Get-OctoBuildOrder: folder $folder of $name does not exist." }

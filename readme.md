@@ -150,7 +150,10 @@ build fails on locked files.
 
 The build order (`mm-*` -> pinned `octo-*` -> remaining `octo-*` alphabetically) lives in
 `modules/OctoBuildOrder.psm1` (`Get-OctoBuildOrder`) and is shared with `Invoke-BuildAll`.
-`Get-OctoBuildOrder -branchRootPath <checkout> | Format-Table Name, Group` shows it.
+`Get-OctoBuildOrder -branchRootPath <checkout> | Format-Table Name, Group` shows it. Developer tool
+repositories are never part of it, by one rule (`$script:OctoToolRepoPatterns`): `octo-tools`,
+`octo-devstack` and the Claude Code plugin repositories `octo-claude-*` (`octo-claude-pm`,
+`octo-claude-skills`, `octo-claude-meshify`), whether they are lane folders or `-additionalRepos`.
 
 `Copy-AllNuGetPackages -branch main` (also used by `Sync-NuGetPackages`) copies the newest file per
 package when several repositories contain the same `Meshmakers.*.999.0.0.nupkg` (e.g. a stale

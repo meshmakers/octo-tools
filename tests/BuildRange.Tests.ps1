@@ -170,6 +170,18 @@ Describe 'Get-OctoBuildOrder' {
         $names | Should -Not -Contain 'octo-tools'
     }
 
+    It 'never builds the Claude Code plugin repositories octo-claude-* (lane folders and -additionalRepos), and keeps every other repository' {
+        $before = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout).Name
+        foreach ($name in @('octo-claude-pm', 'octo-claude-skills', 'octo-claude-meshify')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $fake.Checkout $name) | Out-Null
+        }
+        $worktree = Join-Path $TestDrive 'wt-claude-pm'
+        New-Item -ItemType Directory -Force -Path $worktree | Out-Null
+        $names = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -additionalRepos @{ 'octo-claude-pm' = $worktree; 'octo-claude-new' = $worktree }).Name
+        @($names | Where-Object { $_ -like 'octo-claude-*' }) | Should -BeNullOrEmpty
+        $names | Should -Be $before
+    }
+
     It 'honours -excludeFrontend and -excludeAdditional' {
         @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -excludeFrontend $true).Name | Should -Not -Contain 'octo-frontend-libraries'
         $core = @(Get-OctoBuildOrder -branchRootPath $fake.Checkout -excludeAdditional $true)
