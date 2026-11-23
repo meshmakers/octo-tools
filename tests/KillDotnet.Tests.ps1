@@ -77,6 +77,24 @@ Describe 'Invoke-KillDotnet -branchRootPath on macOS/Linux' {
         Should -Invoke -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords -Times 1 -Exactly
     }
 
+    It '-action stop stops the matched processes on macOS/Linux too, -action list never (AB#9660)' {
+        $json = Invoke-KillDotnet -branchRootPath $script:Lane -action stop -Json | ConvertFrom-Json
+        $json.data.killedCount | Should -Be 2
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 2 -Exactly
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -contains 101 }
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -contains 104 }
+
+        Mock -ModuleName Invoke-KillDotnet Test-OctoKillDotnetWindows { $true }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { $null }
+        $json = Invoke-KillDotnet -branchRootPath $script:Lane -action list -Json | ConvertFrom-Json
+        $json.data.killedCount | Should -Be 0
+        @($json.data.processes.pid) | Should -Be @(104)   # Windows: no cwd, the command line matches
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 2 -Exactly   # none more
+
+        (Invoke-KillDotnet -action stop 2>&1 | Out-String) | Should -Match '-action needs -branchRootPath'
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 2 -Exactly
+    }
+
     It 'returns the matched processes without -Json' {
         $found = @(Invoke-KillDotnet -branchRootPath $script:Lane 6>$null)
         @($found.pid) | Should -Be @(101, 104)

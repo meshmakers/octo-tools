@@ -496,6 +496,16 @@ Remove-OctoEnvironment -env ab8625-enum-null
   the hand-made folder's `../nuget`); without `-inPlace` it is moved into `wt-<env>/<repo>` (refused while a process
   runs from it). `Remove-OctoEnvironment` only unregisters an in-place worktree; the hand-made folder stays until its
   owner removes it. Adopt only when no session works in the worktree any more, or with that session's agreement.
+- **Removal stops the environment's dotnet processes first** (AB#9660). Once the checks passed (a refused removal
+  stops nothing) and before the first worktree is removed, `Remove-OctoEnvironment` stops the dotnet processes of
+  `wt-<env>` with the lane matching of `Invoke-KillDotnet` (working directory, entry assembly, on Windows loaded
+  modules) - **on every OS**: on Windows they lock files, on macOS/Linux they would keep running on deleted files.
+  In-place worktrees (outside `wt-<env>`), the base lane, other `wt-*` lanes, the octo-devstack daemon and processes
+  that are not dotnet (shells, IDEs, Claude Code sessions) are never stopped. A matched process that still runs
+  afterwards refuses the removal with its pid, and nothing is removed. The console names every stopped process;
+  `-Json` reports `kill` (`roots`, `processes` with `pid`, `name`, `reason`, `killedCount`, `failed`); `-WhatIf`
+  lists the processes it would stop and stops none. (`Invoke-KillDotnet -action stop|list` does the same for any
+  lane folder; the default `auto` stops on Windows and only lists on macOS/Linux.)
 - `Remove-OctoEnvironment` deletes only what the environment owns. Claims stay in the base lane,
   `<base>/.octo/claims/<repo>.md` (`branches/main/.octo/claims` or `$rootPath/.octo/claims`; with `Environment:` /
   `Worktree:` lines, format documented by octo-claude-pm), never in the environment folder.

@@ -22,6 +22,7 @@
         is NOT run: the compiler server is shared by every build of the user.
       - macOS/Linux: nothing is stopped (still no file locks there), the matched processes are only
         reported.
+      - -action stop stops them on every OS, -action list stops nothing on any OS (Remove-OctoEnvironment, AB#9660).
     Returns the matched processes ({ pid, name, reason }, reason = cwd | commandLine | module).
 
 .PARAMETER branchRootPath
@@ -31,6 +32,10 @@
     Lane mode only: further folders whose processes belong to the same scope, e.g. the in-place worktrees of a feature
     environment (Invoke-BuildEnvironment). Each must exist and be a git repository or worktree (hold .git); they need
     no Octo.User.props. Matched with the same rule as the lane folder.
+
+.PARAMETER action
+    Lane mode only: auto (default) stops the matched processes on Windows and only lists them on macOS/Linux; stop
+    stops them on every OS; list never stops anything.
 
 .PARAMETER Json
     Legacy mode: { success, exitCode, killedCount[, skipped] }. Lane mode:
@@ -46,11 +51,12 @@ function Invoke-KillDotnet {
     param(
         [string]$branchRootPath = '',
         [string[]]$additionalRoots = @(),
+        [ValidateSet('auto', 'stop', 'list')] [string]$action = 'auto',
         [switch]$Json
     )
 
-    if ([string]::IsNullOrWhiteSpace($branchRootPath) -and @($additionalRoots | Where-Object { $_ }).Count -gt 0) {
-        Write-Error "Invoke-KillDotnet: -additionalRoots needs -branchRootPath (lane mode)."
+    if ([string]::IsNullOrWhiteSpace($branchRootPath) -and (@($additionalRoots | Where-Object { $_ }).Count -gt 0 -or $action -ne 'auto')) {
+        Write-Error "Invoke-KillDotnet: $(if ($action -ne 'auto') { '-action' } else { '-additionalRoots' }) needs -branchRootPath (lane mode)."
         $global:LASTEXITCODE = 1
         return
     }
@@ -80,7 +86,8 @@ function Invoke-KillDotnet {
         $processes = @(Get-OctoLaneDotnetProcesses -branchRootPath $roots)
         $killedCount = 0
         $failed = @()
-        if (Test-OctoKillDotnetWindows) {
+        $stop = switch ($action) { 'stop' { $true } 'list' { $false } default { Test-OctoKillDotnetWindows } }
+        if ($stop) {
             foreach ($process in $processes) {
                 if (-not $Json) { Write-Host "Stop dotnet process $($process.pid) of the lane ($($process.reason))" -ForegroundColor Yellow }
                 try {
@@ -98,7 +105,8 @@ function Invoke-KillDotnet {
             }
         }
         elseif (-not $Json -and $processes.Count -gt 0) {
-            Write-Host "$($processes.Count) dotnet process(es) of the lane found; not stopped (no file locks on this OS)" -ForegroundColor DarkGray
+            $why = if ($action -eq 'list') { '-action list' } else { 'no file locks on this OS' }
+            Write-Host "$($processes.Count) dotnet process(es) of the lane found; not stopped ($why)" -ForegroundColor DarkGray
         }
         $exitCode = if ($failed.Count -gt 0) { 1 } else { 0 }
         $global:LASTEXITCODE = $exitCode
