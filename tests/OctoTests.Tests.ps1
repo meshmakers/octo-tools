@@ -680,6 +680,18 @@ Describe 'Build state of a test project' {
             (& $check).Current | Should -BeTrue
             [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddMinutes(5))
             (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddHours(-2))
+
+            # ProduceReferenceAssemblyInOutDir: bin/<cfg>/<tfm>/ref holds reference assemblies, never a project's output -
+            # the test project's own one (newer than its dll) must not hide a source change
+            & $touch (Join-Path $repo 'bin/DebugL/net10.0/ref/Sample.UnitTests.dll') $built.AddMinutes(30)
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj'), $built.AddMinutes(10))
+            (& $check).Reason | Should -Be 'source changed after the last build (tests/Sample.UnitTests/Sample.UnitTests.csproj)'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj'), $built.AddHours(-1))
+            (& $check).Current | Should -BeTrue
+            # ... and a reference's one there counts as its reference assembly (API change)
+            & $touch (Join-Path $repo 'bin/DebugL/net10.0/ref/Sample.dll') $built.AddMinutes(6)
+            (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
         }
     }
 
@@ -708,12 +720,16 @@ Describe 'Build state of a test project' {
 
             # a lane package the project restored, rebuilt after the test build
             New-Item -ItemType Directory -Force -Path $feed, (Join-Path $repo 'tests/Sample.UnitTests/obj') | Out-Null
-            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value '{ "libraries": { "Meshmakers.Octo.Sdk/999.0.0": {}, "Newtonsoft.Json/13.0.3": {} } }'
+            # Meshmakers.Sample is a project reference of the same repository (type "project"), which its own build packs
+            # into the lane feed right after the test build: it must not count.
+            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value '{ "libraries": { "Meshmakers.Octo.Sdk/999.0.0": { "type": "package" }, "Meshmakers.Sample/999.0.0": { "type": "project", "path": "../../src/Sample/Sample.csproj" }, "Newtonsoft.Json/13.0.3": { "type": "package" } } }'
             Set-Content -Path (Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg') -Value 'sdk'
             Set-Content -Path (Join-Path $feed 'Meshmakers.Unrelated.999.0.0.nupkg') -Value 'unrelated'
+            Set-Content -Path (Join-Path $feed 'Meshmakers.Sample.999.0.0.nupkg') -Value 'own project'
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(-5))
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Unrelated.999.0.0.nupkg'), $built.AddMinutes(5))
-            (& $check).Current | Should -BeTrue   # only packages the project uses count
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Sample.999.0.0.nupkg'), $built.AddSeconds(1))
+            (& $check).Current | Should -BeTrue   # only packages the project restored count, no project references
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(5))
             (& $check).Reason | Should -Be 'the lane feed holds a newer Meshmakers.Octo.Sdk.999.0.0.nupkg'
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(-5))

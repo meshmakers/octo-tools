@@ -884,12 +884,15 @@ function Get-OctoTestFileTime {
 
 function Get-OctoTestReferenceAssemblyTime {
     # Newest reference assembly <AssemblyName>.dll in a ref/ folder of a project (obj/<configuration>/<tfm>/ref, or
-    # bin/<configuration>/<tfm>/ref with ProduceReferenceAssemblyInOutDir): CopyRefAssembly rewrites it only when the
+    # bin/<configuration>/<tfm>/ref with ProduceReferenceAssemblyInOutDir, also in <repository>/bin when every project
+    # builds into one folder): CopyRefAssembly rewrites it only when the
     # public API changed, and only then does MSBuild recompile the projects that compile against it. Not refint/: the
     # compiler writes that one on every compile. With -framework the one of that target framework, when there is one.
     # $null without one.
-    param([string]$projectDirectory, [string]$assemblyName, [string]$configuration, [string]$framework = '')
-    $folders = @((Join-Path $projectDirectory "obj/$configuration"), (Join-Path $projectDirectory "bin/$configuration") | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+    param([string]$projectDirectory, [string]$assemblyName, [string]$configuration, [string]$framework = '', [string]$repositoryPath = '')
+    $folders = @((Join-Path $projectDirectory "obj/$configuration"), (Join-Path $projectDirectory "bin/$configuration"))
+    if ($repositoryPath) { $folders += Join-Path $repositoryPath "bin/$configuration" }
+    $folders = @($folders | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
     $files = @($folders | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue } |
             Where-Object { $_.Directory.Name -eq 'ref' })
     if ($framework) {
@@ -944,7 +947,8 @@ function Get-OctoTestBuildState {
           project ran after it: "<ref> was built after <test>"), and its reference assembly (obj/<cfg>/<tfm>/ref, which
           CopyRefAssembly rewrites only on an API change) must not be newer than the test assembly (the test project must
           recompile); a multi-targeted reference is judged in the target framework of the test assembly;
-        - (DebugL) the lane feed must not hold a newer build of a 999.0.0 package the project restored.
+        - (DebugL) the lane feed must not hold a newer build of a 999.0.0 package the project restored (entries of
+          type "package" in obj/project.assets.json; a project reference of the same name does not count).
         Sources of projects the test project does not reference do not count. Returns { Current; Reason }.
     #>
     param(
@@ -994,7 +998,7 @@ function Get-OctoTestBuildState {
         if ($referenceTime -gt $copyTime) {
             return [pscustomobject]@{ Current = $false; Reason = "$name was built after $($project.Name)" }
         }
-        $referenceApi = Get-OctoTestReferenceAssemblyTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -framework $ownFile.Directory.Name
+        $referenceApi = Get-OctoTestReferenceAssemblyTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -framework $referenceFile.Directory.Name -repositoryPath $repositoryPath
         # Without a reference assembly every rebuild of the reference counts as a change of its API.
         if ($null -eq $referenceApi) { $referenceApi = $referenceTime }
         if ($referenceApi -gt $ownTime) {
@@ -1004,7 +1008,13 @@ function Get-OctoTestBuildState {
     if ($configuration -ieq 'DebugL' -and $laneFeed -and (Test-Path -LiteralPath $laneFeed -PathType Container)) {
         $assets = Join-Path $project.Directory 'obj/project.assets.json'
         if (Test-Path -LiteralPath $assets -PathType Leaf) {
-            $ids = @([regex]::Matches([IO.File]::ReadAllText($assets), '"(?<id>[^"/]+)/999\.0\.0"') | ForEach-Object { $_.Groups['id'].Value } | Sort-Object -Unique)
+            # Only restored packages ("type": "package"): a project reference of the same name (the repository packs
+            # its own projects into the lane feed right after building them) is no package the project consumes.
+            $libraries = $null
+            try { $libraries = (Get-Content -LiteralPath $assets -Raw | ConvertFrom-Json -AsHashtable)['libraries'] } catch { $libraries = $null }
+            $ids = @(foreach ($key in @($(if ($libraries) { $libraries.Keys }))) {
+                    if ($key -match '^(?<id>[^/]+)/999\.0\.0$' -and [string]$libraries[$key]['type'] -eq 'package') { $Matches['id'] }
+                }) | Sort-Object -Unique
             foreach ($id in $ids) {
                 $package = Join-Path $laneFeed "$id.999.0.0.nupkg"
                 if ((Test-Path -LiteralPath $package -PathType Leaf) -and [IO.File]::GetLastWriteTimeUtc($package) -gt $ownTime) {
