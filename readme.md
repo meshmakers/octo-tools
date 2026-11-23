@@ -230,7 +230,10 @@ Get-OctoTestLock
 
 - **No full rebuild.** A project whose build is current runs with `--no-build`. Otherwise `dotnet test` builds it
   incrementally first and the output says why (a source file changed, a referenced project or a lane package was
-  rebuilt, no build output). `-build Always` / `-build Never` override the check.
+  rebuilt, no build output). `-build Always` / `-build Never` override the check. The build output is the
+  project's `<AssemblyName>.dll` below `<project>/bin/<configuration>` or, in repositories that build every project
+  into one folder at the repository root, `<repo>/bin/<configuration>` (the newest of both counts; each project only
+  by its own assembly name).
 - **Readable result.** The failed tests come first: full name, first line of the error message, first stack frame.
   `-Json` returns per test project the totals, the duration, up to 50 failed tests (`-maxFailures`, `truncated`) and
   the paths of the TRX files and the log. Everything is kept in

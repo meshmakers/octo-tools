@@ -848,16 +848,22 @@ function Resolve-OctoTestProject {
 }
 
 function Get-OctoTestOutputTime {
-    # Newest <AssemblyName>.dll below <project>/bin/<configuration> (UTC), or $null without a build output. The newest,
-    # not the oldest: folders of a target framework the project no longer builds stay behind after an upgrade.
+    # Newest <AssemblyName>.dll below <project>/bin/<configuration> or, for repositories whose Directory.Build.props put
+    # every project's output into one folder at the repository root (AB#9659), <repository>/bin/<configuration> (UTC), or
+    # $null without a build output. Only the project's own assembly name counts, so test projects that share the
+    # repository folder are never judged by each other's dll. The newest, not the oldest: folders of a target framework
+    # the project no longer builds (or of the other layout) stay behind after an upgrade.
     param(
         [Parameter(Mandatory = $true)] [string]$projectDirectory,
         [Parameter(Mandatory = $true)] [string]$assemblyName,
-        [Parameter(Mandatory = $true)] [string]$configuration
+        [Parameter(Mandatory = $true)] [string]$configuration,
+        [string]$repositoryPath = ''
     )
-    $bin = Join-Path $projectDirectory "bin/$configuration"
-    if (-not (Test-Path -LiteralPath $bin -PathType Container)) { return $null }
-    $newest = Get-ChildItem -LiteralPath $bin -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue |
+    $bins = @(Join-Path $projectDirectory "bin/$configuration")
+    if ($repositoryPath) { $bins += Join-Path $repositoryPath "bin/$configuration" }
+    $bins = @($bins | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+    if ($bins.Count -eq 0) { return $null }
+    $newest = $bins | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$assemblyName.dll" -ErrorAction SilentlyContinue } |
         Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $newest) { return $null }
     return $newest.LastWriteTimeUtc
@@ -879,7 +885,8 @@ function Get-OctoTestNewestSource {
 function Get-OctoTestBuildState {
     <#
         Is the build of a test project current, so `dotnet test --no-build` runs what the sources say?
-        Not current when: there is no <AssemblyName>.dll below bin/<configuration>; a source file of the repository is
+        Not current when: there is no <AssemblyName>.dll below <project>/bin/<configuration> or
+        <repository>/bin/<configuration>; a source file of the repository is
         newer than it; the output of a referenced project is newer (a src-only build ran after the tests were built);
         or (DebugL) the lane feed holds a newer build of a 999.0.0 package the project restored (an upstream library
         was rebuilt). Returns { Current; Reason }.
@@ -892,7 +899,7 @@ function Get-OctoTestBuildState {
         # Get-OctoTestNewestSource of the repository, computed once per run.
         $newestSource = $null
     )
-    $output = Get-OctoTestOutputTime -projectDirectory $project.Directory -assemblyName $project.AssemblyName -configuration $configuration
+    $output = Get-OctoTestOutputTime -projectDirectory $project.Directory -assemblyName $project.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
     if ($null -eq $output) {
         # A build with -verifyTests compiles the solution's projects: one that is not in the solution stays unbuilt.
         $hint = ''
@@ -911,7 +918,7 @@ function Get-OctoTestBuildState {
         return [pscustomobject]@{ Current = $false; Reason = "source changed after the last build ($relative)" }
     }
     foreach ($reference in @($project.ProjectReferences)) {
-        $referenceOutput = Get-OctoTestOutputTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration
+        $referenceOutput = Get-OctoTestOutputTime -projectDirectory $reference.Directory -assemblyName $reference.AssemblyName -configuration $configuration -repositoryPath $repositoryPath
         if ($null -ne $referenceOutput -and $referenceOutput -gt $output) {
             return [pscustomobject]@{ Current = $false; Reason = "$([IO.Path]::GetFileNameWithoutExtension($reference.Path)) was built after $($project.Name)" }
         }

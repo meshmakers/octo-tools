@@ -593,6 +593,40 @@ Describe 'Build state of a test project' {
         }
     }
 
+    It 'finds the output in <repo>/bin/<configuration> (AB#9659): each project by its own assembly, still stale after a source change' {
+        InModuleScope OctoTests -Parameters @{ repo = $ws.Repo; built = $built } {
+            param($repo, $built)
+            Remove-Item (Join-Path $repo 'tests/Sample.UnitTests/bin') -Recurse -Force
+            $projects = @(Get-OctoTestProjects -repositoryPath $repo)
+            $unit = $projects | Where-Object Name -eq 'Sample.UnitTests'
+            $integration = $projects | Where-Object Name -eq 'Sample.IntegrationTests'
+            $check = { param($project) Get-OctoTestBuildState -project $project -repositoryPath $repo -configuration DebugL -newestSource (Get-OctoTestNewestSource -repositoryPath $repo) }
+
+            # the shared repository folder holds only the unit test project's assembly
+            $repoBin = Join-Path $repo 'bin/DebugL/net10.0'
+            New-Item -ItemType Directory -Force -Path $repoBin | Out-Null
+            Set-Content -Path (Join-Path $repoBin 'Sample.UnitTests.dll') -Value 'repo-level'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Sample.UnitTests.dll'), $built)
+            (& $check $unit).Current | Should -BeTrue
+            # the other test project in the same folder is judged by its own assembly name, never by Sample.UnitTests.dll
+            (& $check $integration).Reason | Should -Be 'no DebugL build output of Sample.IntegrationTests'
+            Set-Content -Path (Join-Path $repoBin 'Meshmakers.Sample.IntegrationTests.dll') -Value 'repo-level'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Meshmakers.Sample.IntegrationTests.dll'), $built.AddHours(-2))
+            (& $check $integration).Reason | Should -Be 'source changed after the last build (src/Sample/Order.cs)'
+            (& $check $unit).Current | Should -BeTrue
+
+            # no false reuse: a source file newer than the found assembly
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddMinutes(2))
+            (& $check $unit).Reason | Should -Be 'source changed after the last build (src/Sample/Order.cs)'
+
+            # a referenced project in the repository folder, rebuilt after the tests
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddHours(-1))
+            Set-Content -Path (Join-Path $repoBin 'Sample.dll') -Value 'src'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Sample.dll'), $built.AddMinutes(1))
+            (& $check $unit).Reason | Should -Be 'Sample was built after Sample.UnitTests'
+        }
+    }
+
     It 'is stale without a build output, after a source change, after a referenced project was rebuilt and after a newer lane package' {
         InModuleScope OctoTests -Parameters @{ repo = $ws.Repo; feed = (Join-Path $ws.Main 'nuget'); built = $built } {
             param($repo, $feed, $built)
@@ -795,6 +829,17 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.lock.required | Should -BeFalse
             $doc.data.lock.acquired | Should -BeFalse
             @($doc.data.projects).Count | Should -Be 1
+        }
+
+        It 'reuses a current build in a repository that builds into <repo>/bin/<configuration> (-build Auto passes --no-build, AB#9659)' {
+            Remove-Item (Join-Path $ws.Repo 'tests/Sample.UnitTests/bin') -Recurse -Force
+            $repoBin = Join-Path $ws.Repo 'bin/DebugL/net10.0'
+            New-Item -ItemType Directory -Force -Path $repoBin | Out-Null
+            Set-Content -Path (Join-Path $repoBin 'Sample.UnitTests.dll') -Value 'repo-level'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Sample.UnitTests.dll'), $built)
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.UnitTests -build Auto -lockPath $script:LockPath -Json)
+            $script:Calls[0].NoBuild | Should -BeTrue
+            $doc.data.projects[0].noBuild | Should -BeTrue
         }
 
         It 'builds when the build is not current and says why; -build overrides' {
