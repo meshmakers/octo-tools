@@ -51,6 +51,21 @@ Mock -ModuleName OctoEnvironment Get-OctoGlobalPackageCachePath { Join-Path $Tes
 Mock -ModuleName OctoCkCatalogRefresh Resolve-OctoCkc { $null }
 # AB#8953: Remove-OctoEnvironment may ask gh for a merged pull request - never the real gh (network, the developer's login).
 Mock -ModuleName OctoEnvironment Invoke-OctoEnvironmentGh { [pscustomobject]@{ ExitCode = -1; Output = @('gh is not installed') } }
+# AB#9660: Invoke-KillDotnet (Invoke-BuildEnvironment, Remove-OctoEnvironment) never sees or stops a real process. The
+# process table is $script:FakeDotnet.Processes (empty unless a test adds { Process; Cwd; Unkillable }), a stop only
+# records the pid in $script:FakeDotnet.Stopped; Remove-OctoEnvironment's wait and liveness check read the same table.
+$script:FakeDotnet = @{ Processes = [System.Collections.Generic.List[object]]::new(); Stopped = [System.Collections.Generic.List[int]]::new() }
+function Test-FakeDotnetAlive([int]$id) {
+    return @($script:FakeDotnet.Processes | Where-Object { $_.Process.Id -eq $id -and ($_.Unkillable -or -not $script:FakeDotnet.Stopped.Contains($id)) }).Count -gt 0
+}
+Mock -ModuleName Invoke-KillDotnet Get-Process { @($script:FakeDotnet.Processes | ForEach-Object { $_.Process }) }
+Mock -ModuleName Invoke-KillDotnet Get-Process { @($script:FakeDotnet.Processes | ForEach-Object { $_.Process } | Where-Object { $_.Name -eq 'dotnet' }) } -ParameterFilter { $Name -eq 'dotnet' }
+Mock -ModuleName Invoke-KillDotnet Get-Process { if (Test-FakeDotnetAlive $Id[0]) { [pscustomobject]@{ Id = $Id[0] } } } -ParameterFilter { $null -ne $Id }
+Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { $null }
+Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords { foreach ($entry in $script:FakeDotnet.Processes) { if ($entry.Cwd) { "p$($entry.Process.Id)"; "n$($entry.Cwd)" } } }
+Mock -ModuleName Invoke-KillDotnet Stop-Process { foreach ($one in @($Id)) { $script:FakeDotnet.Stopped.Add([int]$one) } }
+Mock -ModuleName OctoEnvironment Get-Process { if (Test-FakeDotnetAlive $Id[0]) { [pscustomobject]@{ Id = $Id[0] } } } -ParameterFilter { $null -ne $Id }
+Mock -ModuleName OctoEnvironment Wait-Process { }
 $script:PreviousCkCacheDirectory = $env:OCTO_CK_CACHE_DIRECTORY
 $env:OCTO_CK_CACHE_DIRECTORY = Join-Path $TestDrive 'ck-cache'
 New-Item -ItemType Directory -Force -Path $env:OCTO_CK_CACHE_DIRECTORY | Out-Null

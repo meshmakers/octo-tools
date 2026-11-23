@@ -588,8 +588,116 @@ Describe 'Build state of a test project' {
         InModuleScope OctoTests -Parameters @{ repo = $ws.Repo; feed = (Join-Path $ws.Main 'nuget') } {
             param($repo, $feed)
             $project = Get-OctoTestProjects -repositoryPath $repo | Where-Object Name -eq 'Sample.UnitTests'
-            $state = Get-OctoTestBuildState -project $project -repositoryPath $repo -configuration DebugL -laneFeed $feed -newestSource (Get-OctoTestNewestSource -repositoryPath $repo)
+            $state = Get-OctoTestBuildState -project $project -repositoryPath $repo -configuration DebugL -laneFeed $feed
             $state.Current | Should -BeTrue
+        }
+    }
+
+    It 'finds the output in the repository-level bin folder (AB#9659): each project by its own assembly, still stale after a source change' {
+        InModuleScope OctoTests -Parameters @{ repo = $ws.Repo; built = $built } {
+            param($repo, $built)
+            Remove-Item (Join-Path $repo 'tests/Sample.UnitTests/bin') -Recurse -Force
+            $projects = @(Get-OctoTestProjects -repositoryPath $repo)
+            $unit = $projects | Where-Object Name -eq 'Sample.UnitTests'
+            $integration = $projects | Where-Object Name -eq 'Sample.IntegrationTests'
+            $check = { param($project) Get-OctoTestBuildState -project $project -repositoryPath $repo -configuration DebugL }
+
+            # the shared repository folder holds only the unit test project's assembly
+            $repoBin = Join-Path $repo 'bin/DebugL/net10.0'
+            New-Item -ItemType Directory -Force -Path $repoBin | Out-Null
+            Set-Content -Path (Join-Path $repoBin 'Sample.UnitTests.dll') -Value 'repo-level'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Sample.UnitTests.dll'), $built)
+            (& $check $unit).Current | Should -BeTrue
+            # the other test project in the same folder is judged by its own assembly name, never by Sample.UnitTests.dll
+            (& $check $integration).Reason | Should -Be 'no DebugL build output of Sample.IntegrationTests'
+            Set-Content -Path (Join-Path $repoBin 'Meshmakers.Sample.IntegrationTests.dll') -Value 'repo-level'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Meshmakers.Sample.IntegrationTests.dll'), $built.AddHours(-2))
+            (& $check $integration).Reason | Should -Be 'source changed after the last build (tests/Sample.IntegrationTests/Sample.IntegrationTests.csproj)'
+            (& $check $unit).Current | Should -BeTrue
+
+            # no false reuse: a source file newer than the found assembly
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddMinutes(2))
+            (& $check $unit).Reason | Should -Be 'source changed after the last build (src/Sample/Order.cs)'
+
+            # a referenced project in the repository folder, rebuilt after the tests
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddHours(-1))
+            Set-Content -Path (Join-Path $repoBin 'Sample.dll') -Value 'src'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Sample.dll'), $built.AddMinutes(1))
+            (& $check $unit).Reason | Should -Be 'Sample was built after Sample.UnitTests'
+        }
+    }
+
+    It 'stays current after a full build that changed a referenced project only inside (MSBuild keeps the test dll), in both layouts' {
+        InModuleScope OctoTests -Parameters @{ repo = $ws.Repo; built = $built } {
+            param($repo, $built)
+            $unit = Get-OctoTestProjects -repositoryPath $repo | Where-Object Name -eq 'Sample.UnitTests'
+            $check = { Get-OctoTestBuildState -project $unit -repositoryPath $repo -configuration DebugL }
+            $touch = { param([string]$path, [DateTime]$time) New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null; Set-Content -Path $path -Value 'x'; [IO.File]::SetLastWriteTimeUtc($path, $time) }
+
+            # Project-level layout. Order.cs edited after the test build; the full build rebuilt Sample.dll and copied it
+            # next to the test dll; the reference assembly (obj/<cfg>/<tfm>/ref) stayed, so the test dll was not
+            # rewritten. The compiler writes refint/ on every compile - it must not count as an API change.
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddMinutes(2))
+            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll') $built.AddHours(-2)
+            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/net10.0/refint/Sample.dll') $built.AddMinutes(5)
+            & $touch (Join-Path $repo 'src/Sample/bin/DebugL/net10.0/Sample.dll') $built.AddMinutes(5)
+            & $touch (Join-Path $repo 'tests/Sample.UnitTests/bin/DebugL/net10.0/Sample.dll') $built.AddMinutes(5)
+            (& $check).Current | Should -BeTrue
+
+            # a src-only build (the copy next to the test dll is older than Sample's output): stale
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/bin/DebugL/net10.0/Sample.dll'), $built)
+            (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/bin/DebugL/net10.0/Sample.dll'), $built.AddMinutes(5))
+
+            # the public API changed (reference assembly newer than the test dll): the test project must recompile
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddMinutes(5))
+            (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddHours(-2))
+
+            # a multi-targeted reference: its netstandard2.0 build finished last - only the test's framework counts
+            & $touch (Join-Path $repo 'src/Sample/bin/DebugL/netstandard2.0/Sample.dll') $built.AddMinutes(8)
+            & $touch (Join-Path $repo 'src/Sample/obj/DebugL/netstandard2.0/ref/Sample.dll') $built.AddMinutes(8)
+            (& $check).Current | Should -BeTrue
+            Remove-Item (Join-Path $repo 'src/Sample/bin/DebugL/netstandard2.0'), (Join-Path $repo 'src/Sample/obj/DebugL/netstandard2.0') -Recurse -Force
+
+            # no false reuse: the referenced project's source is newer than its own output, or the test's own source
+            # newer than the test dll (a rebuild of Sample does not cover it)
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddMinutes(6))
+            (& $check).Reason | Should -Be 'source changed after the last build (src/Sample/Order.cs)'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/Order.cs'), $built.AddMinutes(2))
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj'), $built.AddMinutes(1))
+            (& $check).Reason | Should -Be 'source changed after the last build (tests/Sample.UnitTests/Sample.UnitTests.csproj)'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj'), $built.AddHours(-1))
+
+            # a project the test project does not reference does not count
+            & $touch (Join-Path $repo 'src/Unrelated/Unrelated.cs') $built.AddMinutes(30)
+            (& $check).Current | Should -BeTrue
+
+            # a Directory.Build.props between the repository root and the referenced project (not above the test project)
+            & $touch (Join-Path $repo 'src/Directory.Build.props') $built.AddMinutes(6)
+            (& $check).Reason | Should -Be 'source changed after the last build (src/Directory.Build.props)'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Directory.Build.props'), $built.AddMinutes(4))
+            (& $check).Current | Should -BeTrue   # older than Sample's output: that build covered it
+
+            # Repository-level layout: one folder for everything; Sample.dll there is the rebuilt one.
+            Remove-Item (Join-Path $repo 'tests/Sample.UnitTests/bin'), (Join-Path $repo 'src/Sample/bin') -Recurse -Force
+            & $touch (Join-Path $repo 'bin/DebugL/net10.0/Sample.UnitTests.dll') $built
+            & $touch (Join-Path $repo 'bin/DebugL/net10.0/Sample.dll') $built.AddMinutes(5)
+            (& $check).Current | Should -BeTrue
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddMinutes(5))
+            (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'src/Sample/obj/DebugL/net10.0/ref/Sample.dll'), $built.AddHours(-2))
+
+            # ProduceReferenceAssemblyInOutDir: bin/<cfg>/<tfm>/ref holds reference assemblies, never a project's output -
+            # the test project's own one (newer than its dll) must not hide a source change
+            & $touch (Join-Path $repo 'bin/DebugL/net10.0/ref/Sample.UnitTests.dll') $built.AddMinutes(30)
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj'), $built.AddMinutes(10))
+            (& $check).Reason | Should -Be 'source changed after the last build (tests/Sample.UnitTests/Sample.UnitTests.csproj)'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj'), $built.AddHours(-1))
+            (& $check).Current | Should -BeTrue
+            # ... and a reference's one there counts as its reference assembly (API change)
+            & $touch (Join-Path $repo 'bin/DebugL/net10.0/ref/Sample.dll') $built.AddMinutes(6)
+            (& $check).Reason | Should -Be 'Sample was built after Sample.UnitTests'
         }
     }
 
@@ -598,7 +706,7 @@ Describe 'Build state of a test project' {
             param($repo, $feed, $built)
             $projects = @(Get-OctoTestProjects -repositoryPath $repo)
             $unit = $projects | Where-Object Name -eq 'Sample.UnitTests'
-            $check = { Get-OctoTestBuildState -project $unit -repositoryPath $repo -configuration DebugL -laneFeed $feed -newestSource (Get-OctoTestNewestSource -repositoryPath $repo) }
+            $check = { Get-OctoTestBuildState -project $unit -repositoryPath $repo -configuration DebugL -laneFeed $feed }
 
             # no output: the integration project was never built; a Release run of the unit project neither
             $integration = $projects | Where-Object Name -eq 'Sample.IntegrationTests'
@@ -618,12 +726,20 @@ Describe 'Build state of a test project' {
 
             # a lane package the project restored, rebuilt after the test build
             New-Item -ItemType Directory -Force -Path $feed, (Join-Path $repo 'tests/Sample.UnitTests/obj') | Out-Null
-            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value '{ "libraries": { "Meshmakers.Octo.Sdk/999.0.0": {}, "Newtonsoft.Json/13.0.3": {} } }'
+            # Meshmakers.Sample is a project reference of the same repository (type "project"), which its own build packs
+            # into the lane feed right after the test build: it must not count.
+            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value '{ "libraries": { "Meshmakers.Octo.Sdk/999.0.0": { "type": "package" }, "Meshmakers.Sample/999.0.0": { "type": "project", "path": "../../src/Sample/Sample.csproj" }, "Newtonsoft.Json/13.0.3": { "type": "package" } } }'
             Set-Content -Path (Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg') -Value 'sdk'
             Set-Content -Path (Join-Path $feed 'Meshmakers.Unrelated.999.0.0.nupkg') -Value 'unrelated'
+            Set-Content -Path (Join-Path $feed 'Meshmakers.Sample.999.0.0.nupkg') -Value 'own project'
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(-5))
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Unrelated.999.0.0.nupkg'), $built.AddMinutes(5))
-            (& $check).Current | Should -BeTrue   # only packages the project uses count
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Sample.999.0.0.nupkg'), $built.AddSeconds(1))
+            (& $check).Current | Should -BeTrue   # only packages the project restored count, no project references
+            $assetsText = Get-Content -Raw -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json')
+            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value '{ "libraries": { "Meshmakers.Octo.Sdk/999.0.0": '
+            (& $check).Reason | Should -Be 'obj/project.assets.json is unreadable (a restore may be writing it)'
+            Set-Content -Path (Join-Path $repo 'tests/Sample.UnitTests/obj/project.assets.json') -Value $assetsText -NoNewline
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(5))
             (& $check).Reason | Should -Be 'the lane feed holds a newer Meshmakers.Octo.Sdk.999.0.0.nupkg'
             [IO.File]::SetLastWriteTimeUtc((Join-Path $feed 'Meshmakers.Octo.Sdk.999.0.0.nupkg'), $built.AddMinutes(-5))
@@ -795,6 +911,17 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.lock.required | Should -BeFalse
             $doc.data.lock.acquired | Should -BeFalse
             @($doc.data.projects).Count | Should -Be 1
+        }
+
+        It 'reuses a current build in a repository that builds into one repository-level bin folder (-build Auto passes --no-build, AB#9659)' {
+            Remove-Item (Join-Path $ws.Repo 'tests/Sample.UnitTests/bin') -Recurse -Force
+            $repoBin = Join-Path $ws.Repo 'bin/DebugL/net10.0'
+            New-Item -ItemType Directory -Force -Path $repoBin | Out-Null
+            Set-Content -Path (Join-Path $repoBin 'Sample.UnitTests.dll') -Value 'repo-level'
+            [IO.File]::SetLastWriteTimeUtc((Join-Path $repoBin 'Sample.UnitTests.dll'), $built)
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.UnitTests -build Auto -lockPath $script:LockPath -Json)
+            $script:Calls[0].NoBuild | Should -BeTrue
+            $doc.data.projects[0].noBuild | Should -BeTrue
         }
 
         It 'builds when the build is not current and says why; -build overrides' {

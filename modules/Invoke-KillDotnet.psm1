@@ -22,6 +22,7 @@
         is NOT run: the compiler server is shared by every build of the user.
       - macOS/Linux: nothing is stopped (still no file locks there), the matched processes are only
         reported.
+      - -action stop stops them on every OS, -action list stops nothing on any OS (Remove-OctoEnvironment, AB#9660).
     Returns the matched processes ({ pid, name, reason }, reason = cwd | commandLine | module).
 
 .PARAMETER branchRootPath
@@ -31,6 +32,10 @@
     Lane mode only: further folders whose processes belong to the same scope, e.g. the in-place worktrees of a feature
     environment (Invoke-BuildEnvironment). Each must exist and be a git repository or worktree (hold .git); they need
     no Octo.User.props. Matched with the same rule as the lane folder.
+
+.PARAMETER action
+    Lane mode only: auto (default) stops the matched processes on Windows and only lists them on macOS/Linux; stop
+    stops them on every OS; list never stops anything.
 
 .PARAMETER Json
     Legacy mode: { success, exitCode, killedCount[, skipped] }. Lane mode:
@@ -46,11 +51,12 @@ function Invoke-KillDotnet {
     param(
         [string]$branchRootPath = '',
         [string[]]$additionalRoots = @(),
+        [ValidateSet('auto', 'stop', 'list')] [string]$action = 'auto',
         [switch]$Json
     )
 
-    if ([string]::IsNullOrWhiteSpace($branchRootPath) -and @($additionalRoots | Where-Object { $_ }).Count -gt 0) {
-        Write-Error "Invoke-KillDotnet: -additionalRoots needs -branchRootPath (lane mode)."
+    if ([string]::IsNullOrWhiteSpace($branchRootPath) -and (@($additionalRoots | Where-Object { $_ }).Count -gt 0 -or $action -ne 'auto')) {
+        Write-Error "Invoke-KillDotnet: $(if ($action -ne 'auto') { '-action' } else { '-additionalRoots' }) needs -branchRootPath (lane mode)."
         $global:LASTEXITCODE = 1
         return
     }
@@ -80,7 +86,8 @@ function Invoke-KillDotnet {
         $processes = @(Get-OctoLaneDotnetProcesses -branchRootPath $roots)
         $killedCount = 0
         $failed = @()
-        if (Test-OctoKillDotnetWindows) {
+        $stop = switch ($action) { 'stop' { $true } 'list' { $false } default { Test-OctoKillDotnetWindows } }
+        if ($stop) {
             foreach ($process in $processes) {
                 if (-not $Json) { Write-Host "Stop dotnet process $($process.pid) of the lane ($($process.reason))" -ForegroundColor Yellow }
                 try {
@@ -98,7 +105,8 @@ function Invoke-KillDotnet {
             }
         }
         elseif (-not $Json -and $processes.Count -gt 0) {
-            Write-Host "$($processes.Count) dotnet process(es) of the lane found; not stopped (no file locks on this OS)" -ForegroundColor DarkGray
+            $why = if ($action -eq 'list') { '-action list' } else { 'no file locks on this OS' }
+            Write-Host "$($processes.Count) dotnet process(es) of the lane found; not stopped ($why)" -ForegroundColor DarkGray
         }
         $exitCode = if ($failed.Count -gt 0) { 1 } else { 0 }
         $global:LASTEXITCODE = $exitCode
@@ -154,14 +162,16 @@ function Get-OctoLaneDotnetProcesses {
     param([Parameter(Mandatory = $true)] [string[]]$branchRootPath)
 
     $windows = Test-OctoKillDotnetWindows
+    $processes = @(Get-Process -Name 'dotnet' -ErrorAction SilentlyContinue)
+    $commandLines = if ($windows -and $processes.Count -gt 0) { Get-OctoProcessCommandLines } else { $null }
     $candidates = @()
-    foreach ($process in @(Get-Process -Name 'dotnet' -ErrorAction SilentlyContinue)) {
+    foreach ($process in $processes) {
         $modules = @()
         if ($windows) {
             # Access to the modules of another user's / elevated process is denied - skip those.
             try { $modules = @($process.Modules | ForEach-Object { $_.FileName } | Where-Object { $_ }) } catch { $modules = @() }
         }
-        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = [string]$process.CommandLine; Cwd = $null; Modules = $modules }
+        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = (Get-OctoCandidateCommandLine -process $process -commandLines $commandLines); Cwd = $null; Modules = $modules }
     }
 
     # macOS/Linux: the services run as `dotnet X.dll` with cwd <lane>/<repo>/bin/<cfg>/<tfm>, so the
@@ -178,6 +188,30 @@ function Get-OctoLaneDotnetProcesses {
     }
 
     return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $branchRootPath)
+}
+
+function Get-OctoProcessCommandLines {
+    # Windows: the command lines of all processes from ONE Win32_Process query, as a hashtable pid -> command line
+    # (AB#9661). Process.CommandLine asks WMI once per process (about 1.3 s each, minutes for a few hundred processes).
+    # A process CIM cannot read (another user's, elevated) has an empty CommandLine; one that started after the query is
+    # missing - both mean "no command line", as before. $null when the query fails: the caller then falls back to
+    # Process.CommandLine per process. Separate so tests can mock it.
+    try {
+        $map = @{}
+        foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, CommandLine -ErrorAction Stop)) {
+            $map[[int]$entry.ProcessId] = [string]$entry.CommandLine
+        }
+        return $map
+    }
+    catch { return $null }
+}
+
+function Get-OctoCandidateCommandLine {
+    # The command line of a process: from the one CIM query (Get-OctoProcessCommandLines) when there is one - a pid it
+    # does not list has none - otherwise Process.CommandLine (macOS/Linux read it from the process table cheaply).
+    param($process, [hashtable]$commandLines)
+    if ($null -ne $commandLines) { return [string]$commandLines[[int]$process.Id] }
+    return [string]$process.CommandLine
 }
 
 function Get-OctoProcessCwdRecords {
@@ -325,13 +359,15 @@ function Get-OctoProcessesUnderFolder {
     param([Parameter(Mandatory = $true)] [string]$path)
     $folder = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path))
     $windows = Test-OctoKillDotnetWindows
+    $processes = @(Get-Process -ErrorAction SilentlyContinue)
+    $commandLines = if ($windows -and $processes.Count -gt 0) { Get-OctoProcessCommandLines } else { $null }
     $candidates = @()
-    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+    foreach ($process in $processes) {
         $modules = @()
         if ($windows -and $process.Name -eq 'dotnet') {
             try { $modules = @($process.Modules | ForEach-Object { $_.FileName } | Where-Object { $_ }) } catch { $modules = @() }
         }
-        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = [string]$process.CommandLine; Cwd = $null; Modules = $modules }
+        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = (Get-OctoCandidateCommandLine -process $process -commandLines $commandLines); Cwd = $null; Modules = $modules }
     }
     if (-not $windows -and $candidates.Count -gt 0) {
         $currentPid = $null
