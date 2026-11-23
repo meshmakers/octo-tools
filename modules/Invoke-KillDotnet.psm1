@@ -154,14 +154,16 @@ function Get-OctoLaneDotnetProcesses {
     param([Parameter(Mandatory = $true)] [string[]]$branchRootPath)
 
     $windows = Test-OctoKillDotnetWindows
+    $processes = @(Get-Process -Name 'dotnet' -ErrorAction SilentlyContinue)
+    $commandLines = if ($windows -and $processes.Count -gt 0) { Get-OctoProcessCommandLines } else { $null }
     $candidates = @()
-    foreach ($process in @(Get-Process -Name 'dotnet' -ErrorAction SilentlyContinue)) {
+    foreach ($process in $processes) {
         $modules = @()
         if ($windows) {
             # Access to the modules of another user's / elevated process is denied - skip those.
             try { $modules = @($process.Modules | ForEach-Object { $_.FileName } | Where-Object { $_ }) } catch { $modules = @() }
         }
-        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = [string]$process.CommandLine; Cwd = $null; Modules = $modules }
+        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = (Get-OctoCandidateCommandLine -process $process -commandLines $commandLines); Cwd = $null; Modules = $modules }
     }
 
     # macOS/Linux: the services run as `dotnet X.dll` with cwd <lane>/<repo>/bin/<cfg>/<tfm>, so the
@@ -178,6 +180,30 @@ function Get-OctoLaneDotnetProcesses {
     }
 
     return @(Select-OctoLaneProcesses -candidates $candidates -branchRootPath $branchRootPath)
+}
+
+function Get-OctoProcessCommandLines {
+    # Windows: the command lines of all processes from ONE Win32_Process query, as a hashtable pid -> command line
+    # (AB#9661). Process.CommandLine asks WMI once per process (about 1.3 s each, minutes for a few hundred processes).
+    # A process CIM cannot read (another user's, elevated) has an empty CommandLine; one that started after the query is
+    # missing - both mean "no command line", as before. $null when the query fails: the caller then falls back to
+    # Process.CommandLine per process. Separate so tests can mock it.
+    try {
+        $map = @{}
+        foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, CommandLine -ErrorAction Stop)) {
+            $map[[int]$entry.ProcessId] = [string]$entry.CommandLine
+        }
+        return $map
+    }
+    catch { return $null }
+}
+
+function Get-OctoCandidateCommandLine {
+    # The command line of a process: from the one CIM query (Get-OctoProcessCommandLines) when there is one - a pid it
+    # does not list has none - otherwise Process.CommandLine (macOS/Linux read it from the process table cheaply).
+    param($process, [hashtable]$commandLines)
+    if ($null -ne $commandLines) { return [string]$commandLines[[int]$process.Id] }
+    return [string]$process.CommandLine
 }
 
 function Get-OctoProcessCwdRecords {
@@ -325,13 +351,15 @@ function Get-OctoProcessesUnderFolder {
     param([Parameter(Mandatory = $true)] [string]$path)
     $folder = [IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path))
     $windows = Test-OctoKillDotnetWindows
+    $processes = @(Get-Process -ErrorAction SilentlyContinue)
+    $commandLines = if ($windows -and $processes.Count -gt 0) { Get-OctoProcessCommandLines } else { $null }
     $candidates = @()
-    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+    foreach ($process in $processes) {
         $modules = @()
         if ($windows -and $process.Name -eq 'dotnet') {
             try { $modules = @($process.Modules | ForEach-Object { $_.FileName } | Where-Object { $_ }) } catch { $modules = @() }
         }
-        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = [string]$process.CommandLine; Cwd = $null; Modules = $modules }
+        $candidates += [pscustomobject]@{ Pid = [int]$process.Id; Name = [string]$process.Name; Command = (Get-OctoCandidateCommandLine -process $process -commandLines $commandLines); Cwd = $null; Modules = $modules }
     }
     if (-not $windows -and $candidates.Count -gt 0) {
         $currentPid = $null

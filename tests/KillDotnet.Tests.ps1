@@ -154,6 +154,8 @@ Describe 'Invoke-KillDotnet on Windows' {
         Mock -ModuleName Invoke-KillDotnet Stop-Process { }
         Mock -ModuleName Invoke-KillDotnet dotnet { }
         Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords { }
+        # Never the real CIM query: $null takes the fallback (Process.CommandLine of the fake processes).
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { $null }
     }
 
     It 'lane mode stops only processes with a module or command line under the lane, without build-server shutdown' {
@@ -221,6 +223,75 @@ Describe 'Invoke-KillDotnet on Windows' {
         $json.data.killedCount | Should -Be 2
         Should -Invoke -ModuleName Invoke-KillDotnet dotnet -Times 1 -Exactly
         Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process
+    }
+}
+
+Describe 'Windows command lines from one CIM query (AB#9661)' {
+    BeforeAll {
+        # The same process set twice: once with Process.CommandLine (the per-process WMI path), once with the
+        # command lines only in the CIM answer (Process.CommandLine empty), so the result can only come from it.
+        $script:CimFolder = Join-Path $TestDrive 'wt-cim-octo-sdk'
+        $script:CimSet = @(
+            @{ Id = 401; Name = 'dotnet'; Command = 'dotnet Meshmakers.Octo.Sdk.dll'; Modules = @((Join-Path $script:Lane 'octo-sdk/bin/DebugL/net10.0/Meshmakers.Octo.Sdk.dll')) },
+            @{ Id = 402; Name = 'dotnet'; Command = "dotnet $(Join-Path $script:Daemon 'octo-devstack.dll')"; Modules = @() },
+            @{ Id = 403; Name = 'dotnet'; Command = "dotnet $(Join-Path $script:Lane 'octo-cli/bin/DebugL/net10.0/octo-cli.dll')"; Modules = @() },
+            @{ Id = 404; Name = 'dotnet'; Command = "dotnet $(Join-Path $script:OtherLane 'octo-sdk/bin/x.dll')"; Modules = @() },
+            @{ Id = 405; Name = 'dotnet'; Command = "dotnet $(Join-Path $script:Lane 'wt-feat/octo-sdk/bin/y.dll')"; Modules = @() },
+            @{ Id = 406; Name = 'dotnet'; Command = "dotnet $(Join-Path $script:CimFolder 'bin/DebugL/net10.0/Svc.dll')"; Modules = @() },
+            @{ Id = 407; Name = 'pwsh'; Command = "pwsh -File $(Join-Path $script:CimFolder 'build.ps1')"; Modules = @() }
+        )
+        function Get-CimFakeProcesses([switch]$withCommandLine) {
+            @($script:CimSet | ForEach-Object { New-FakeProcess $_.Id -name $_.Name -command $(if ($withCommandLine) { $_.Command } else { '' }) -modules $_.Modules })
+        }
+        function Get-CimFakeMap {
+            $map = @{}
+            foreach ($entry in $script:CimSet) { $map[[int]$entry.Id] = $entry.Command }
+            $map
+        }
+    }
+    BeforeEach {
+        Mock -ModuleName Invoke-KillDotnet Test-OctoKillDotnetWindows { $true }
+        Mock -ModuleName Invoke-KillDotnet Stop-Process { }
+        Mock -ModuleName Invoke-KillDotnet dotnet { }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCwdRecords { }
+    }
+
+    It 'Invoke-KillDotnet -branchRootPath matches the same processes (pid, name, reason) from the CIM answer as from Process.CommandLine' {
+        Mock -ModuleName Invoke-KillDotnet Get-Process { Get-CimFakeProcesses -withCommandLine } -ParameterFilter { $Name -eq 'dotnet' }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { $null }
+        $before = (Invoke-KillDotnet -branchRootPath $script:Lane -Json | ConvertFrom-Json).data.processes
+
+        Mock -ModuleName Invoke-KillDotnet Get-Process { Get-CimFakeProcesses } -ParameterFilter { $Name -eq 'dotnet' }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { Get-CimFakeMap }
+        $after = (Invoke-KillDotnet -branchRootPath $script:Lane -Json | ConvertFrom-Json).data.processes
+
+        @($after | ForEach-Object { "$($_.pid):$($_.name):$($_.reason)" }) | Should -Be @($before | ForEach-Object { "$($_.pid):$($_.name):$($_.reason)" })
+        @($after | ForEach-Object { "$($_.pid):$($_.reason)" }) | Should -Be @('401:module', '403:commandLine')
+        Should -Invoke -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines -Times 2 -Exactly   # one query per call
+    }
+
+    It 'Get-OctoProcessesUnderFolder matches the same processes from the CIM answer as from Process.CommandLine' {
+        Mock -ModuleName Invoke-KillDotnet Get-Process { Get-CimFakeProcesses -withCommandLine }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { $null }
+        $before = @(Get-OctoProcessesUnderFolder -path $script:CimFolder)
+
+        Mock -ModuleName Invoke-KillDotnet Get-Process { Get-CimFakeProcesses }
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { Get-CimFakeMap }
+        $after = @(Get-OctoProcessesUnderFolder -path $script:CimFolder)
+
+        @($after | ForEach-Object { "$($_.pid):$($_.name):$($_.reason)" }) | Should -Be @($before | ForEach-Object { "$($_.pid):$($_.name):$($_.reason)" })
+        @($after.pid) | Should -Be @(406)
+        Should -Invoke -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines -Times 2 -Exactly   # one query per call
+        Should -Invoke -ModuleName Invoke-KillDotnet Stop-Process -Times 0
+    }
+
+    It 'a process the CIM answer has no command line for (other user, started or exited meanwhile) has none, without an error' {
+        Mock -ModuleName Invoke-KillDotnet Get-Process { Get-CimFakeProcesses -withCommandLine } -ParameterFilter { $Name -eq 'dotnet' }
+        # 403 missing, 401 unreadable (empty): only the module match of 401 remains; the per-process value is not used.
+        Mock -ModuleName Invoke-KillDotnet Get-OctoProcessCommandLines { $map = Get-CimFakeMap; $map.Remove(403); $map[401] = ''; $map }
+        $json = Invoke-KillDotnet -branchRootPath $script:Lane -Json | ConvertFrom-Json
+        $json.data.success | Should -BeTrue
+        @($json.data.processes | ForEach-Object { "$($_.pid):$($_.reason)" }) | Should -Be @('401:module')
     }
 }
 
