@@ -1,0 +1,38 @@
+name: devstack
+
+# The octo-devstack daemon (devstack/, AB#9711): its .NET tests on every pull request and every push to main that
+# changes the folder. Build and test only; nothing is published. The tests start pwsh processes (the runner has it).
+on:
+  pull_request:
+    paths:
+      - 'devstack/**'
+      - '.github/workflows/devstack.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'devstack/**'
+      - '.github/workflows/devstack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devstack-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout octo-tools
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run the tests
+        run: dotnet test devstack/Octo.DevStack.sln -c Release
