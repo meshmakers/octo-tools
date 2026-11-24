@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout octo-tools
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -52,7 +52,7 @@ jobs:
           permission-contents: write
 
       - name: Checkout octo-metrics
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: meshmakers/octo-metrics
           token: ${{ steps.app-token-metrics.outputs.token }}
