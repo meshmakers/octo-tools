@@ -76,7 +76,7 @@ jobs:
           cp "octo-metrics/reports/history-$MONTH.html" octo-metrics/reports/history-latest.html
 
       - name: Upload history artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: history-report-${{ env.MONTH }}
           path: |
