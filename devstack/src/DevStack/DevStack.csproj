@@ -21,7 +21,7 @@
         <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.4.0" />
         <PackageReference Include="YamlDotNet" Version="18.1.0" />
         <!-- slot_verify reads the local MongoDB (database names, tenant registry, ownership markers); read-only. -->
-        <PackageReference Include="MongoDB.Driver" Version="3.9.0" />
+        <PackageReference Include="MongoDB.Driver" Version="3.14.1" />
     </ItemGroup>
 
     <ItemGroup>
