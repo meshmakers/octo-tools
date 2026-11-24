@@ -41,7 +41,7 @@ jobs:
       run: cp octo-tools/typescript/.eslintrc-global.json other-repo/${{ matrix.repo.path }}.eslintrc-global.json
 
     - name: Create Pull Request
-      uses: peter-evans/create-pull-request@v3
+      uses: peter-evans/create-pull-request@v8
       with:
         token: ${{ steps.app-token.outputs.token }}
         path: other-repo
