@@ -8,8 +8,8 @@
     daemon is a separate process that Claude Code sessions talk to (MCP at http://127.0.0.1:<port>/mcp,
     status page at http://127.0.0.1:<port>/); it starts and stops the OctoMesh services itself.
 
-    Getting it uses the existing cmdlets: `Invoke-CloneMainRepos -devTools` clones meshmakers/octo-devstack
-    next to octo-tools, and Start-OctoDevStackDaemon builds it with Invoke-Build when the build is missing.
+    The daemon is the folder devstack/ of this octo-tools checkout (AB#9711; formerly the repository
+    meshmakers/octo-devstack); Start-OctoDevStackDaemon builds it with Invoke-Build when the build is missing.
     Stopping the daemon never stops the stack services it started; the next daemon adopts them. Builds go on
     too (the next daemon re-attaches to them), but other sessions poll them: Stop-OctoDevStackDaemon and
     Start-OctoDevStackDaemon -Restart ask the daemon first (GET /api/daemon, restart.safe) and refuse while a
@@ -25,13 +25,8 @@ $script:DllRelativePath = 'bin/Release/net10.0/octo-devstack.dll'
 function Test-OctoDevStackWindows { return [bool]$IsWindows }
 
 function Get-OctoDevStackDefaultPath {
-    # <parent of the octo-tools checkout>/octo-devstack - where `Invoke-CloneMainRepos -devTools` clones it. A
-    # worktree of octo-tools (<octo-tools>/.claude/worktrees/<name>) resolves to the main checkout first.
-    $toolsRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-    $marker = [regex]::Match($toolsRoot, '[\\/]\.claude[\\/]worktrees[\\/]')
-    if ($marker.Success) { $toolsRoot = $toolsRoot.Substring(0, $marker.Index) }
-    $toolsRoot = [IO.Path]::TrimEndingDirectorySeparator($toolsRoot)
-    return Join-Path (Split-Path -Parent $toolsRoot) 'octo-devstack'
+    # <octo-tools checkout>/devstack - the daemon is part of octo-tools (AB#9711).
+    return Join-Path (Get-OctoDevStackToolsPath) 'devstack'
 }
 
 function Get-OctoDevStackToolsPath {
@@ -190,8 +185,8 @@ function Test-OctoDevStackSamePath([string]$A, [string]$B) {
 }
 
 function Test-OctoDevStackTrustedDll([string]$Dll) {
-    # The CTRL_BREAK helper runs code from the dll a listener's command line names: only a dll inside the octo-devstack
-    # checkout this octo-tools resolves (any bin/<configuration>), never one another process points at - a copy of that
+    # The CTRL_BREAK helper runs code from the dll a listener's command line names: only a dll inside the devstack folder
+    # this octo-tools resolves (any bin/<configuration>), never one another process points at - a copy of that
     # name elsewhere, or an octo-devstack of another account.
     if ([string]::IsNullOrWhiteSpace($Dll)) { return $false }
     try {
@@ -288,7 +283,7 @@ function Start-OctoDevStackDaemon {
         - -Rebuild: builds Release again before the start. Only together with -Restart or when no daemon runs
           on the port: the build replaces the binaries the running daemon was loaded from.
         - Another program holds the port: refused, the process is named.
-        - No checkout: `Invoke-CloneMainRepos -devTools` clones it next to octo-tools (or pass -Path).
+        - No sources: the daemon is the folder devstack/ of octo-tools (or pass -Path).
         - No build: built with Invoke-Build -configuration Release.
         - Background start: macOS/Linux in its own process group (neither Ctrl+C nor closing the window stops
           it), output appended to <state>/daemon.log; Windows: hidden window, the previous log kept as
@@ -374,7 +369,7 @@ function Start-OctoDevStackDaemon {
             $data.pid = $ours.pid
             $health = Get-OctoDevStackHealth -Port $Port
             if ($health) { $data.version = $health.version; $data.commit = $health.commit }
-            Write-OctoDevStackResult $command $Json $false $data "Not restarted: no octo-devstack checkout in $repoPath - the running daemon (PID $($ours.pid)) was left alone. Run Invoke-CloneMainRepos -devTools (clones it next to octo-tools) or pass -Path."
+            Write-OctoDevStackResult $command $Json $false $data "Not restarted: no octo-devstack sources in $repoPath - the running daemon (PID $($ours.pid)) was left alone. The daemon is the folder devstack/ of octo-tools; pull octo-tools or pass -Path."
             return
         }
         # A daemon its service manager runs (launchd, systemd; AB#9377) is restarted by it: a second daemon of our own would
@@ -521,7 +516,7 @@ function Start-OctoDevStackDaemon {
         return
     }
     if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src'))) {
-        Write-OctoDevStackResult $command $Json $false $data "No octo-devstack checkout in $repoPath. Run Invoke-CloneMainRepos -devTools (clones it next to octo-tools) or pass -Path."
+        Write-OctoDevStackResult $command $Json $false $data "No octo-devstack sources in $repoPath. The daemon is the folder devstack/ of octo-tools; pull octo-tools or pass -Path."
         return
     }
     if ($Rebuild -or -not (Test-Path -LiteralPath $dll)) {
@@ -1194,7 +1189,7 @@ function Install-OctoDevStackDaemonService {
     $data = @{ platform = $platform; kind = $null; name = $script:ServiceName; path = $null; started = $false; alreadyRunning = $false; mcpUrl = "$url/mcp"; built = $false }
 
     if (-not (Test-Path -LiteralPath (Join-Path $repoPath 'src'))) {
-        Write-OctoDevStackResult $command $Json $false $data "No octo-devstack checkout in $repoPath. Run Invoke-CloneMainRepos -devTools (clones it next to octo-tools) or pass -Path."
+        Write-OctoDevStackResult $command $Json $false $data "No octo-devstack sources in $repoPath. The daemon is the folder devstack/ of octo-tools; pull octo-tools or pass -Path."
         return
     }
     if (-not (Test-Path -LiteralPath $dll)) {

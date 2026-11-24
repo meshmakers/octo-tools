@@ -151,8 +151,9 @@ build fails on locked files.
 The build order (`mm-*` -> pinned `octo-*` -> remaining `octo-*` alphabetically) lives in
 `modules/OctoBuildOrder.psm1` (`Get-OctoBuildOrder`) and is shared with `Invoke-BuildAll`.
 `Get-OctoBuildOrder -branchRootPath <checkout> | Format-Table Name, Group` shows it. Developer tool
-repositories are never part of it, by one rule (`$script:OctoToolRepoPatterns`): `octo-tools`,
-`octo-devstack` and the Claude Code plugin repositories `octo-claude-*` (`octo-claude-pm`,
+repositories are never part of it, by one rule (`$script:OctoToolRepoPatterns`): `octo-tools` (with the
+octo-devstack daemon in `devstack/`), a leftover clone of the retired `octo-devstack` repository and the Claude Code
+plugin repositories `octo-claude-*` (`octo-claude-pm`,
 `octo-claude-skills`, `octo-claude-meshify`), whether they are lane folders or `-additionalRepos`.
 
 `Copy-AllNuGetPackages -branch main` (also used by `Sync-NuGetPackages`) copies the newest file per
@@ -396,8 +397,9 @@ Remove-OctoEnvironment -env ab8625-enum-null
 - **Consumers** are detached worktrees; treat them as read-only. A library
   change reaches a service only if every repository between them is rebuilt in the environment, otherwise main's
   prebuilt packages bind to the new library at runtime (`MissingMethodException`).
-- **Developer tools** (`octo-tools`, `octo-devstack`) live next to the lanes (`<rootPath>/<repo>`), not in the base
-  lane; `-repos octo-tools` / `Add-OctoEnvironmentRepo -repo octo-devstack` add a worktree of them all the same.
+- **Developer tools** (`octo-tools`, which holds octo-devstack in `devstack/`) live next to the lanes
+  (`<rootPath>/<repo>`), not in the base lane; `-repos octo-tools` / `Add-OctoEnvironmentRepo -repo octo-tools` add a
+  worktree of it all the same.
   `Invoke-BuildEnvironment` does not build them (`-Json`: `environment.toolRepos`); an environment that holds only
   tools builds nothing and succeeds.
 - **Atomic creation.** A `New-OctoEnvironment` that fails (a worktree, the seeding, `-addAffected`) rolls back what
@@ -535,11 +537,13 @@ Details and examples: [docs/tenant-sweep.md](docs/tenant-sweep.md).
 
 # octo-devstack (local stack daemon)
 
-[octo-devstack](https://github.com/meshmakers/octo-devstack) (private) is a background service that runs the local
-OctoMesh stack for several Claude Code sessions and exposes it as an MCP server. Get it, start it, register it once:
+octo-devstack is a background service that runs the local OctoMesh stack for several Claude Code sessions and
+exposes it as an MCP server. Its sources are the folder [`devstack/`](devstack/README.md) of this repository (until
+AB#9711 the separate repository meshmakers/octo-devstack, now retired); build and test it there with
+`dotnet build Octo.DevStack.sln` / `dotnet test Octo.DevStack.sln` (see [devstack/CLAUDE.md](devstack/CLAUDE.md)).
+Start it and register it once:
 
 ```powershell
-Invoke-CloneMainRepos -devTools         # clone next to octo-tools (e.g. ~/dev/meshmakers/octo-devstack)
 Start-OctoDevStackDaemon                # builds it on first use (Invoke-Build), starts it in the background, waits for /health
 claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:5090/mcp
 ```
@@ -548,7 +552,7 @@ claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:5090
 Other sessions use the daemon, so a stop asks it first (`GET /api/daemon`): while a build runs or waits,
 `Stop-OctoDevStackDaemon` and `Start-OctoDevStackDaemon -Restart` stop nothing and name the builds and their owners;
 `-Force` overrides (the builds go on and the next daemon re-attaches to them). Sessions holding a stack lease are listed
-as a warning. A new octo-devstack commit is deployed with `Start-OctoDevStackDaemon -Restart -Rebuild` (stop, build
+as a warning. A new octo-devstack version (a `git pull` of octo-tools) is deployed with `Start-OctoDevStackDaemon -Restart -Rebuild` (stop, build
 Release, start; `-Rebuild` alone is refused while the daemon runs from those binaries).
 On macOS both cmdlets need `lsof` to find the process on the port. On Linux without `lsof` the daemon names its own
 pid (`GET /api/daemon`) - so a daemon that does not answer (an older version, one that hangs) is not found there:
@@ -568,13 +572,28 @@ the unit is only enabled while a daemon runs and takes over at the next login.
 Under launchd and systemd `Start-OctoDevStackDaemon -Restart` goes through the service manager, and a start of an
 installed service that does not run starts it through the service manager too - never a second daemon next to it. The
 Windows logon task supervises nothing: it runs `Start-OctoDevStackDaemon` every 15 minutes, which does nothing while the
-daemon answers. Details: `Get-Help Install-OctoDevStackDaemonService -Full` and the octo-devstack README.
+daemon answers. Details: `Get-Help Install-OctoDevStackDaemonService -Full` and [devstack/README.md](devstack/README.md).
 
 From then on OctoMesh is managed through the daemon: MCP `http://127.0.0.1:5090/mcp`, status page
 `http://127.0.0.1:5090/`, log `~/.local/state/octo-devstack/daemon.log` (Windows: also `daemon.err.log`),
 configuration `devstack.yaml` in the octo-tools config folder (`~/.config/octo-tools/`, next to `installations.json`;
 `Get-OctoWorkspace` names it), written on the first start. A `~/.config/octo-devstack/devstack.yaml` of an older
 daemon is copied there once and left as it is.
+
+**One-time migration from the octo-devstack clone (AB#9711).** An installed daemon service (`Install-OctoDevStackDaemonService`)
+still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`). On macOS and Linux `Start-OctoDevStackDaemon`
+without `-Path` uses the path of the installed LaunchAgent or systemd unit; on Windows the logon task holds the old path
+(it runs `Start-OctoDevStackDaemon -Path <old clone>`). Move it once:
+
+1. Once `daemon_status` reports `restart.safe: true` (no build runs or waits): `Uninstall-OctoDevStackDaemonService`
+   (macOS and Linux: the service manager stops the daemon; the stack services keep running). On Windows also run
+   `Stop-OctoDevStackDaemon`: uninstalling the logon task leaves the daemon running there, and the stop ends the old
+   daemon hard (Stop-Process - its dll lies outside this octo-tools; the stack services keep running).
+2. `Install-OctoDevStackDaemonService` without `-Path` (the new default is `<octo-tools>/devstack`): it builds Release
+   when that build is missing and starts the daemon.
+3. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
+
+A daemon that ran a build from before AB#9657 comes back with renamed tools (`env_*` -> `lane_*`, `build_*` -> `job_*`).
 
 # Tests
 

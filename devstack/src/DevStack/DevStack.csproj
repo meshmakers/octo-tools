@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <AssemblyName>octo-devstack</AssemblyName>
+        <RootNamespace>Meshmakers.Octo.DevStack</RootNamespace>
+        <Description>Local MCP daemon that runs, stops and builds the OctoMesh dev stack for several Claude Code sessions.</Description>
+        <OutputType>Exe</OutputType>
+        <OutputPath>..\..\bin\$(Configuration)\</OutputPath>
+        <Configurations>Debug;Release;DebugL</Configurations>
+        <Platforms>AnyCPU</Platforms>
+        <IsPackable>false</IsPackable>
+        <NoWarn>1701;1702;CS8002</NoWarn>
+        <InvariantGlobalization>true</InvariantGlobalization>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="DevStack.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.4.0" />
+        <PackageReference Include="YamlDotNet" Version="18.1.0" />
+        <!-- slot_verify reads the local MongoDB (database names, tenant registry, ownership markers); read-only. -->
+        <PackageReference Include="MongoDB.Driver" Version="3.9.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <EmbeddedResource Include="Configuration\devstack.default.yaml" LogicalName="devstack.default.yaml" />
+        <EmbeddedResource Include="Configuration\identity-overlay.template.yaml" LogicalName="identity-overlay.template.yaml" />
+        <EmbeddedResource Include="Ui\index.html;Ui\app.css;Ui\app.js" LogicalName="ui/%(Filename)%(Extension)" />
+    </ItemGroup>
+
+</Project>
