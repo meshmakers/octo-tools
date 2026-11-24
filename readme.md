@@ -580,6 +580,17 @@ configuration `devstack.yaml` in the octo-tools config folder (`~/.config/octo-t
 `Get-OctoWorkspace` names it), written on the first start. A `~/.config/octo-devstack/devstack.yaml` of an older
 daemon is copied there once and left as it is.
 
+**One-time migration from the octo-devstack clone (AB#9711).** An installed daemon service (`Install-OctoDevStackDaemonService`)
+still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`), and `Start-OctoDevStackDaemon` without `-Path`
+uses the path of the installed service. Move it once:
+
+1. `Stop-OctoDevStackDaemon` - only when `daemon_status` reports `restart.safe: true` (no build runs or waits).
+2. `Install-OctoDevStackDaemonService` without `-Path` (the new default is `<octo-tools>/devstack`).
+3. `Start-OctoDevStackDaemon -Rebuild`.
+4. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
+
+A daemon that ran a build from before AB#9657 comes back with renamed tools (`env_*` -> `lane_*`, `build_*` -> `job_*`).
+
 # Tests
 
 Pester tests for the build tooling live in `tests/` (they run against a fake checkout in `TestDrive`

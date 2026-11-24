@@ -25,8 +25,8 @@ server:
 # Where things are comes from octo-tools (Get-OctoWorkspace): rootPath is the folder that holds octo-tools,
 # defaultCheckout its default lane (branches/main in the lanes layout, the root itself in the flat layout,
 # or $env:OCTO_ENVIRONMENT_BASE). The octo-tools asked is $OCTO_TOOLS_PATH (Start-OctoDevStackDaemon sets it)
-# or the one next to the octo-devstack checkout. Set these only to override what octo-tools says - the file
-# then no longer fits another machine:
+# or the octo-tools checkout that holds the daemon's devstack/ folder. Set these only to override what
+# octo-tools says - the file then no longer fits another machine:
 # rootPath: ~/dev/meshmakers
 # defaultCheckout: branches/main
 # Start-Octo defaults to Release; local builds (Invoke-BuildAll / Invoke-BuildRange) produce DebugL.

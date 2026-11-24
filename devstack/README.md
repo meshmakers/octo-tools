@@ -3,6 +3,17 @@
 The folder `devstack/` of octo-tools (AB#9711; formerly the repository meshmakers/octo-devstack, now retired). Commands
 below run in this folder.
 
+**One-time migration from the octo-devstack clone (AB#9711).** An installed daemon service (`Install-OctoDevStackDaemonService`)
+still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`), and `Start-OctoDevStackDaemon` without `-Path`
+uses the path of the installed service. Move it once:
+
+1. `Stop-OctoDevStackDaemon` - only when `daemon_status` reports `restart.safe: true` (no build runs or waits).
+2. `Install-OctoDevStackDaemonService` without `-Path` (the new default is `<octo-tools>/devstack`).
+3. `Start-OctoDevStackDaemon -Rebuild`.
+4. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
+
+A daemon that ran a build from before AB#9657 comes back with renamed tools (`env_*` -> `lane_*`, `build_*` -> `job_*`).
+
 A local MCP server (daemon) that runs, stops and builds the **one** OctoMesh dev stack of a machine for several
 Claude Code sessions at once. Instead of every session calling `Start-Octo` / `Stop-Octo` in its own shell, all
 sessions talk to this daemon. It owns the service processes, knows which checkout or worktree each one runs from, and

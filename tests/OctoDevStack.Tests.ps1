@@ -686,7 +686,7 @@ Describe 'Stop-OctoDevStackDaemon' {
             Should -Invoke -ModuleName OctoDevStack Stop-Process -Times 1
         }
 
-        It 'never runs a dll outside the octo-devstack checkout of this octo-tools: Stop-Process instead' {
+        It 'never runs a dll outside the devstack folder of this octo-tools: Stop-Process instead' {
             # Another account, or a copy of that name elsewhere: the stop must not run its code.
             $foreign = Join-Path $TestDrive 'elsewhere/octo-devstack.dll'
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $foreign) | Out-Null
