@@ -1,0 +1,614 @@
+# octo-devstack configuration.
+#
+# Written to devstack.yaml in the octo-tools config folder (~/.config/octo-tools, next to installations.json;
+# the folder of $OCTO_TOOLS_CONFIG when set) on the first start of the daemon. Edit it by hand
+# or through the MCP tools (admin_service_define, admin_service_remove, admin_envvar_set). The tools rewrite the whole
+# file and keep the previous version as devstack.yaml.bak; comments do not survive a rewrite.
+#
+# Placeholders, expanded when a service starts:
+#   ${rootPath}       the workspace root (see below; ~ expanded)
+#   ${checkout}       the lane the stack runs from, e.g. <rootPath>/branches/main or <rootPath> itself
+#   ${repoPath}       the folder a service runs from: <checkout>/<repo>, or the worktree of an override
+#   ${configuration}  build configuration of the stack (Release, DebugL, Debug)
+#   ${tfm}            targetFramework below
+#   ${service}        name of the service
+#   ${home}           the user's home folder
+#   ${env:NAME}       an environment variable of the daemon
+#   ${<variable>}     a value from the service's `variables` (overridable per start)
+#
+# Quote values with placeholders inside [ ... ] lists: { and } are YAML flow characters there.
+
+server:
+  # Loopback only: the daemon starts processes with your user's rights.
+  url: http://127.0.0.1:5090
+
+# Where things are comes from octo-tools (Get-OctoWorkspace): rootPath is the folder that holds octo-tools,
+# defaultCheckout its default lane (branches/main in the lanes layout, the root itself in the flat layout,
+# or $env:OCTO_ENVIRONMENT_BASE). The octo-tools asked is $OCTO_TOOLS_PATH (Start-OctoDevStackDaemon sets it)
+# or the one next to the octo-devstack checkout. Set these only to override what octo-tools says - the file
+# then no longer fits another machine:
+# rootPath: ~/dev/meshmakers
+# defaultCheckout: branches/main
+# Start-Octo defaults to Release; local builds (Invoke-BuildAll / Invoke-BuildRange) produce DebugL.
+configuration: DebugL
+targetFramework: net10.0
+# Relative to the checkout; the same folder Start-Octo writes to.
+logDirectory: logFiles
+# Seconds a service gets between SIGTERM (CTRL_BREAK on Windows) and the kill.
+stopTimeoutSeconds: 15
+# A Docker VM (docker info) below these is called small for test runs that start containers while the kind cluster runs
+# in it: lane_test, base_test, job_status and daemon_status then warn (nothing is refused).
+dockerVm:
+  minMemoryGb: 12
+  minCpus: 6
+
+# Environment variables builds need, by name only (setup_check names a missing one; AB#9464). Never put a value here:
+# set it in your private PowerShell profile, which octo-tools' profile.ps1 loads for every build the daemon runs
+# (setup_check names the file). A daemon a LaunchAgent, systemd unit or logon task starts does not read ~/.zshrc or
+# ~/.bashrc. This list always applies; one of your own adds to it. `repos`: checked only when the default lane has one.
+buildVariables:
+  - name: TELERIK_LICENSE
+    repos: [octo-frontend-libraries, octo-frontend-refinery-studio]
+    why: the Kendo UI license the frontend builds activate (scripts/setup-license.js of octo-frontend-libraries)
+
+# Environment of every service (same values as Start-Octo).
+environment:
+  ASPNETCORE_ENVIRONMENT: Development
+  OCTO_SYSTEM__SYSTEMDATABASENAME: OctoSystem
+  OCTO_SYSTEM__ADMINUSERPASSWORD: OctoAdmin1
+  OCTO_SYSTEM__DATABASEUSERPASSWORD: OctoUser1
+  OCTO_SYSTEM__USEDIRECTCONNECTION: "true"
+  OCTO_LocalFileSystemCatalog__RootPath: ${checkout}/.octo/local-catalog
+  OCTO_LocalFileSystemBlueprintCatalog__RootPath: ${checkout}/.octo/local-blueprint-catalog
+  OCTO_STREAMDATA__ENABLED: "true"
+  OCTO_COMMUNICATIONCONTROLLER__ACTIVATORENABLED: "false"
+
+# PowerShell snippets that run once per stack start (in one pwsh session with the octo-tools profile
+# loaded) and return a hashtable of environment variables for the services. Use them for values
+# octo-tools owns, so they are not copied here. `whenServices`: only run when one of these services
+# is part of the start. Values are never returned by any tool.
+envProviders:
+  # OCTO_* variables of the octo-tools session, including the ones your private profile sets (license
+  # keys such as OCTO_IDENTITY__IdentityServerLicenseKey). Start-Octo hands them on through the shell it
+  # runs in; a daemon started by launchd has no such shell, so they come from here. First, so the
+  # providers below win.
+  profileEnv:
+    enabled: true
+    script: |
+      $h = @{}
+      Get-ChildItem env: | Where-Object { $_.Name -like 'OCTO_*' -and $_.Name -notlike 'OCTO_DEVSTACK_*' } | ForEach-Object { $h[$_.Name] = $_.Value }
+      $h
+  devInstanceKey:
+    enabled: true
+    script: |
+      $k = Get-OctoDevInstanceSecretKey
+      @{
+        OCTO_AIENCRYPTION__INSTANCESECRETKEY             = $k
+        OCTO_COMMUNICATIONCONTROLLER__INSTANCESECRETKEY  = $k
+        OCTO_SECRETENCRYPTION__KEYS__k1                  = $k
+        OCTO_SECRETENCRYPTION__ACTIVEKEYID               = 'k1'
+        OCTO_SECRETENCRYPTION__LEGACYV1KEY               = $k
+      }
+  s3Store:
+    enabled: true
+    whenServices: [botServices]
+    script: |
+      $h = @{}
+      if (Set-OctoLocalS3StoreEnvironment) {
+        Get-ChildItem env: | Where-Object { $_.Name -like 'OCTO_ARTIFACTSTORAGE__*' } | ForEach-Object { $h[$_.Name] = $_.Value }
+      }
+      $h
+
+# Services. `enabled`: part of a stack start without an explicit service list. `exclusive`: runs in the
+# default slot only (see "Stack slots" below). `optional`: skipped
+# with a note (instead of an error) when its working directory does not exist, i.e. it is not built.
+# `announceEnv`: set for ALL services of a start in which this service runs (platform-services
+# advertises reporting/AI/MCP only when their URL is announced). `ports`: checked before the start
+# and used for the health probe when no healthUrl is set. `startAfter`: services that must be healthy
+# before this one starts, when they run or are started in the same start (a start that names its
+# services brings the dependencies that do not run yet); a service whose dependency
+# exits or is not healthy within the start's timeoutSeconds is not started (the result says why). The
+# backend services start after identityServices: in a fresh slot identity creates the system database the
+# asset repository needs. The startAfter of this default is always kept; an own list adds to it.
+#
+# Apps (frontends of consumer repositories, see energyCommunityApp / voestApp below) are services too. What
+# they need on top, for every service:
+#   slot             what replaces command / args / workingDirectory / healthUrl / env in a non-default slot.
+#                    Slot placeholders: {port.<service>.<n|https|http>} (shifted), {shift:<port>}, {filesDir},
+#                    {slotDir}, {slot.name|index|prefix|offset}; ${daemon} is the daemon's own assembly, whose
+#                    --serve-app mode serves a built single-page app with an overlay folder laid over it
+#   files            files generated for the service in a non-default slot into {filesDir} (the slot's folder in
+#                    the state directory, never the repository): `from` a JSON file of the repository, `set`
+#                    top-level keys to slot values - e.g. the app's runtime config with the slot's backend URLs
+#   identityClients  OIDC clients whose URIs follow the service's port; they go into the slot's identity overlay
+#                    (`tenant`: the tenant that holds the client, default the system tenant)
+#   requiresRepos    repositories that must be in a feature environment together with the service's repo
+services:
+  identityServices:
+    description: Identity server (OIDC issuer https://localhost:5003/)
+    repo: octo-identity-services
+    args: [Meshmakers.Octo.Backend.IdentityServices.dll, "--urls=https://0.0.0.0:5003;http://0.0.0.0:5002"]
+    ports: [5003, 5002]
+    logName: IdentityServices
+
+  assetRepoServices:
+    description: Asset repository (GraphQL, CK, tenants)
+    repo: octo-asset-repo-services
+    args: [Meshmakers.Octo.Backend.AssetRepositoryServices.dll, "--urls=http://0.0.0.0:5000;https://0.0.0.0:5001"]
+    ports: [5001, 5000]
+    logName: AssetRepositoryServices
+    startAfter: [identityServices]
+
+  meshAdapter:
+    description: Mesh adapter of the dev tenant
+    repo: octo-mesh-adapter
+    variables:
+      tenantId: meshtest
+      adapterId: "670000000000000000000002"
+    args:
+      - Meshmakers.Octo.MeshAdapter.dll
+      - "--urls=https://0.0.0.0:5020;http://0.0.0.0:5021"
+      - --Adapter:DedicatedTenantId=${tenantId}
+      - --Adapter:AdapterRtId=${adapterId}
+      - --Adapter:AdapterCkTypeId=System.Communication/Adapter
+    ports: [5020, 5021]
+    logName: MeshAdapter
+    startAfter: [identityServices]
+
+  botServices:
+    description: Bot service (jobs, archive, artifact store)
+    repo: octo-bot-services
+    args: [Meshmakers.Octo.Backend.BotServices.dll, "--urls=https://0.0.0.0:5009;http://0.0.0.0:5008"]
+    ports: [5009, 5008]
+    logName: BotServices
+    startAfter: [identityServices]
+
+  communicationControllerServices:
+    description: Communication controller (adapters, pipelines, workloads)
+    repo: octo-communication-controller-services
+    args: [Meshmakers.Octo.Backend.CommunicationControllerServices.dll, "--urls=https://0.0.0.0:5015;http://0.0.0.0:5014"]
+    ports: [5015, 5014]
+    logName: CommunicationControllerServices
+    # Also after the asset repository (AB#9377): at its start the controller checks its CK method handlers against the
+    # system tenant's CK cache, and a check while the asset repository still sets up that tenant fails ("no such method").
+    startAfter: [identityServices, assetRepoServices]
+
+  platformServices:
+    description: Platform services (tenant _configuration discovery)
+    repo: octo-platform-services
+    args: [Meshmakers.Octo.Backend.PlatformServices.dll, "--urls=https://0.0.0.0:5025;http://0.0.0.0:5024"]
+    ports: [5025, 5024]
+    logName: PlatformServices
+    startAfter: [identityServices]
+
+  reportingServices:
+    description: Reporting service
+    repo: octo-report-services
+    enabled: false
+    optional: true
+    args: [Meshmakers.Octo.Backend.ReportingServices.dll, "--urls=https://0.0.0.0:5007;http://0.0.0.0:5006"]
+    ports: [5007, 5006]
+    logName: ReportingServices
+    startAfter: [identityServices]
+    announceEnv:
+      OCTO_PLATFORMSERVICES__REPORTINGSERVICEURL: https://localhost:5007
+
+  mcpServices:
+    description: OctoMesh MCP service (platform tools for AI assistants)
+    repo: octo-mcp-service
+    optional: true
+    args: [Meshmakers.Octo.Backend.McpServices.dll, "--urls=https://0.0.0.0:5017;http://0.0.0.0:5016"]
+    ports: [5017, 5016]
+    logName: McpServices
+    startAfter: [identityServices]
+    announceEnv:
+      OCTO_PLATFORMSERVICES__MCPSERVICEURL: https://localhost:5017
+
+  aiServices:
+    description: AI service (agent runtime, SignalR hub)
+    repo: octo-ai-services
+    optional: true
+    args: [Meshmakers.Octo.Backend.AiServices.dll, "--urls=https://0.0.0.0:5019;http://0.0.0.0:5018"]
+    ports: [5019, 5018]
+    logName: AiServices
+    startAfter: [identityServices]
+    announceEnv:
+      OCTO_PLATFORMSERVICES__AISERVICESURL: https://localhost:5019
+
+  aiWorker:
+    description: Standalone AI worker (only for AiWorker:Mode=Remote)
+    repo: octo-ai-services
+    enabled: false
+    optional: true
+    args: [Meshmakers.Octo.Backend.AiWorker.dll, "--urls=https://0.0.0.0:5023;http://0.0.0.0:5022"]
+    ports: [5023, 5022]
+    logName: AiWorker
+    startAfter: [identityServices]
+
+  simulationAdapter:
+    description: Simulation adapter
+    repo: octo-communication-sdk
+    enabled: false
+    workingDirectory: src/Sdk.Plug.Simulation/bin/${configuration}/${tfm}
+    variables:
+      tenantId: meshtest
+      adapterId: 65d5c447b420da3fb12381bc
+    args: [Sdk.Plug.Simulation.dll, "--Adapter:TenantId=${tenantId}", "--Adapter:AdapterRtId=${adapterId}"]
+    logName: SimulationAdapter
+    startAfter: [identityServices]
+
+  refineryStudio:
+    description: Data Refinery Studio dev server (ng serve, http://localhost:4200)
+    repo: octo-frontend-refinery-studio
+    exclusive: true
+    workingDirectory: .
+    command: pwsh
+    args: [-NoLogo, -NoProfile, -File, octo-start.ps1, -configuration, "${configuration}"]
+    logName: octo-frontend-refinery-studio
+
+  frontendLibraries:
+    description: Frontend libraries dev servers (ng serve on 4201/4202)
+    repo: octo-frontend-libraries
+    exclusive: true
+    workingDirectory: .
+    command: pwsh
+    args: [-NoLogo, -NoProfile, -File, octo-start.ps1, -configuration, "${configuration}"]
+    logName: octo-frontend-libraries
+
+  # ---- adapters an app brings ----
+  # An app often needs its own adapter next to the mesh adapter. Such an adapter is a service like every other
+  # (or a profile instance of one); a profile of the app switches it on and sets its tenant and adapter entity.
+  edaAdapter:
+    description: >-
+      EDA adapter of a tenant (octo-adapter-eda, https://localhost:5022). It uses the market communication credentials
+      in the tenant's adapter configuration: started on a copy of a tenant with real credentials it talks to the LIVE
+      market communication (see energy-community/docs/runbooks). Shares 5022/5023 with aiWorker.
+    repo: octo-adapter-eda
+    enabled: false
+    optional: true
+    variables:
+      tenantId: voestalpine
+      adapterId: "686e0f17196fcd3c42ed8c77"
+    args: [Meshmakers.Octo.Communication.EdaAdapter.dll, "--urls=https://0.0.0.0:5022;http://0.0.0.0:5023"]
+    env:
+      OCTO_ADAPTER__TENANTID: ${tenantId}
+      OCTO_ADAPTER__ADAPTERRTID: ${adapterId}
+    ports: [5022, 5023]
+    logName: EdaAdapter
+    startAfter: [identityServices]
+
+  # ---- apps of consumer repositories ----
+  # Default slot: the app's own dev server (octo-start.ps1: npm ci when needed, dev certificate, npm start) with
+  # the backend URLs of its tracked config. In a lane stack: its build output (what
+  # lane_build built) on the shifted port, with a generated config.json that names the slot's services.
+  # Another app is another block like these; nothing is needed inside the app's repository.
+  energyCommunityApp:
+    description: Energy Community app (https://localhost:44486)
+    repo: energy-community
+    enabled: false
+    optional: true
+    workingDirectory: .
+    command: pwsh
+    args: [-NoLogo, -NoProfile, -File, octo-start.ps1]
+    ports: [44486]
+    healthUrl: https://localhost:44486/
+    logName: energy-community
+    requiresRepos: [octo-frontend-libraries]
+    slot:
+      command: dotnet
+      args:
+        - "${daemon}"
+        - --serve-app
+        - --root
+        - "${repoPath}/src/energy-community/dist"
+        - --overlay
+        - "{filesDir}"
+        - --url
+        - "https://localhost:{port.energyCommunityApp.0}"
+        # What nginx.conf / proxy.conf.js forward: the public membership application of a tenant.
+        - --proxy
+        - "^/[A-Za-z0-9_-]+/public-api/member-registration(-community)?$=https://localhost:{port.meshAdapter.https}|/public-api/=>/"
+      healthUrl: "https://localhost:{port.energyCommunityApp.0}/"
+    files:
+      - path: assets/config.json
+        from: src/energy-community/src/dev/config.json
+        set:
+          assetServices: "https://localhost:{port.assetRepoServices.https}"
+          authorityUrl: "https://localhost:{port.identityServices.https}"
+          reportingUrl: "https://localhost:{port.reportingServices.https}"
+          meshAdapterUrl: "https://localhost:{port.meshAdapter.https}"
+          communicationServices: "https://localhost:{port.communicationControllerServices.https}"
+          edaAdapterUrl: "https://localhost:{port.edaAdapter.https}"
+    identityClients:
+      # Registered by the app's install-apphost-local.ps1 in the app-host tenant.
+      - clientId: energy-community-app-debug
+        tenant: energycommunitymanagement
+        redirectUris: ["https://localhost:{port.energyCommunityApp.0}/", "https://localhost:{port.energyCommunityApp.0}/silent-refresh.html"]
+        postLogoutRedirectUris: ["https://localhost:{port.energyCommunityApp.0}/"]
+        allowedCorsOrigins: ["https://localhost:{port.energyCommunityApp.0}"]
+
+  voestApp:
+    description: voestalpine app (https://localhost:4300)
+    repo: voest-app
+    enabled: false
+    optional: true
+    workingDirectory: .
+    command: pwsh
+    args: [-NoLogo, -NoProfile, -File, octo-start.ps1]
+    ports: [4300]
+    healthUrl: https://localhost:4300/
+    logName: voest-app
+    requiresRepos: [octo-frontend-libraries]
+    slot:
+      command: dotnet
+      args:
+        - "${daemon}"
+        - --serve-app
+        - --root
+        - "${repoPath}/src/voestalpine/dist/voestalpine/browser"
+        - --overlay
+        - "{filesDir}"
+        - --url
+        - "https://localhost:{port.voestApp.0}"
+        # proxy.conf.js: /tenant goes to the asset repository.
+        - --proxy
+        - "^/tenant(/.*)?$=https://localhost:{port.assetRepoServices.https}"
+      healthUrl: "https://localhost:{port.voestApp.0}/"
+    files:
+      - path: assets/config.json
+        from: src/voestalpine/src/assets/config.json
+        set:
+          authorityUrl: "https://localhost:{port.identityServices.https}/"
+          assetServicesUrl: "https://localhost:{port.assetRepoServices.https}"
+          edaAdapterUrl: "https://localhost:{port.edaAdapter.https}/"
+    identityClients:
+      # Registered by the app's scripts/om_setupIdentityService_local.ps1.
+      - clientId: voestalpine-frontend-debug
+        redirectUris: ["https://localhost:{port.voestApp.0}/", "https://localhost:{port.voestApp.0}"]
+        postLogoutRedirectUris: ["https://localhost:{port.voestApp.0}/"]
+        allowedCorsOrigins: ["https://localhost:{port.voestApp.0}"]
+
+# Profiles: saved stack starts ("which stack, with which configuration"). Start one with
+# stack_start(owner, profile="core-data"); arguments given to stack_start win over the profile.
+# A profile has the fields of stack_start - checkout, configuration, services (replaces the inherited
+# list), exclude (adds), overrides (per service), environment, envProviders (true/false per provider),
+# requireInfra - plus:
+#   extends     another profile it starts from (its own fields win)
+#   instances   extra processes of a configured service: `of` the base service, own ports, extraArgs
+#               (the last --urls wins), variables; the log name defaults to the instance name
+#   settings    logical settings written into every service section that holds them:
+#               systemDatabase, mongo {host, directConnection, replicaSet},
+#               broker {host, port, vhost, instancePrefix}, authorityUrl,
+#               streamData {enabled, schemaInstancePrefix}, artifactStorage (fileSystem | localS3),
+#               meshAdapter {tenantId, adapterRtId}, httpActivator {enabled, addressTemplate}, logLevel
+# Credentials are not profile fields; they come from the environment and env providers above.
+profiles:
+  core-identity:
+    description: Identity server only (login, clients, overlays)
+    services: [identityServices]
+
+  core-data:
+    description: Identity and asset repository (GraphQL, CK models, tenants)
+    services: [identityServices, assetRepoServices]
+
+  full-main:
+    description: Every enabled service of branches/main in DebugL (what Start-Octo -configuration DebugL runs)
+    checkout: branches/main
+    configuration: DebugL
+
+  backend-octogrid-studio:
+    description: Backend for the octogrid tenant plus Refinery Studio, without the frontend libraries dev servers
+    extends: full-main
+    exclude: [frontendLibraries]
+    settings:
+      meshAdapter:
+        tenantId: octogrid
+        # The adapter entity of the octogrid tenant in the local database; change it to yours.
+        adapterRtId: 67e10c0bfe3e19891bbfd261
+
+  second-adapter:
+    description: full-main plus a second mesh adapter for another tenant on 5030/5031
+    extends: full-main
+    instances:
+      meshAdapterB:
+        of: meshAdapter
+        ports: [5030, 5031]
+        extraArgs: ["--urls=https://0.0.0.0:5030;http://0.0.0.0:5031"]
+        variables:
+          # The tenant of the second adapter; pass another one with overrides.meshAdapterB.variables.tenantId.
+          tenantId: meshtest2
+
+  reporting-ai:
+    description: Core services with reporting, AI and MCP
+    extends: full-main
+    services: [identityServices, assetRepoServices, meshAdapter, botServices, communicationControllerServices, platformServices,
+               reportingServices, mcpServices, aiServices, refineryStudio]
+
+  lean-backend:
+    description: Core backend without bot, MCP and AI; artifacts on the file system
+    extends: full-main
+    exclude: [botServices, mcpServices, aiServices]
+    settings:
+      artifactStorage: fileSystem
+
+  simulation:
+    description: Core services plus the simulation adapter
+    extends: full-main
+    services: [identityServices, assetRepoServices, meshAdapter, botServices, communicationControllerServices, platformServices,
+               simulationAdapter, refineryStudio]
+
+  energy-community:
+    description: >-
+      Energy Community app with the backend it needs: identity, asset repository, reporting and the mesh adapter of its
+      operating tenant (app host: energycommunitymanagement). Tenants, CK models and blueprints are not provisioned here.
+    services: [identityServices, assetRepoServices, reportingServices, meshAdapter, energyCommunityApp]
+    settings:
+      meshAdapter:
+        # The operating tenant whose pipelines the app calls; set adapterRtId to its adapter entity.
+        tenantId: test_subtenant
+
+  voest-app:
+    description: >-
+      voestalpine app with identity and asset repository (tenant voestalpine), without its EDA adapter: the EDA dialogs
+      do not work. voest-app-eda adds the adapter.
+    services: [identityServices, assetRepoServices, voestApp]
+
+  voest-app-eda:
+    description: >-
+      voest-app plus the EDA adapter of its tenant (https://localhost:5022). The adapter talks to the market
+      communication configured in the tenant: on a tenant copy with real credentials that is the LIVE one (see
+      energy-community/docs/runbooks). Set adapterId to the tenant's EDA adapter entity.
+    extends: voest-app
+    services: [identityServices, assetRepoServices, edaAdapter, voestApp]
+    overrides:
+      edaAdapter:
+        variables:
+          tenantId: voestalpine
+
+  fresh-db:
+    description: >-
+      Identity and asset repository on an empty system database (OctoSystem_fresh). After the start, create the
+      tenants, provision the clients and apply the identity overlay (Invoke-IdentityOverlay) before you use it.
+    extends: core-data
+    settings:
+      systemDatabase: OctoSystem_fresh
+
+  core-data-slot:
+    description: >-
+      Identity, asset repository and a mesh adapter in the slot 'second' (ports +100, system database OctoSystem_s1),
+      next to whatever runs in the default slot. The adapter serves another tenant than the default slot's.
+    extends: core-data
+    slot: second
+    services: [identityServices, assetRepoServices, meshAdapter]
+    settings:
+      meshAdapter:
+        tenantId: meshtest2
+
+# Stack slots: several backend stacks side by side, sharing the kind infrastructure. The default slot runs on the
+# ports above with the data names above. Every other slot (stack_start(slot="second")) shifts every port by its
+# portOffset (default 100 * index) and isolates its data with its prefix (default s<index>): system database
+# OctoSystem_<prefix>, RabbitMQ instance prefix, CrateDB schema prefix, artifact prefix, the bot's and AI service's
+# folders. Frontends (exclusive: true) and the HTTP activator stay in the default slot. A slot not listed here gets
+# the next free index on first use.
+slots:
+  second:
+    index: 1
+    # portOffset: 100
+    # prefix: s1
+
+slotOptions:
+  # Set a slot up by itself once its identity service is healthy after a start (stack_setup runs the same steps): the first
+  # admin of a fresh system database, the octo-cli installation entry local-<slot> and contexts, the login of the contexts
+  # with a client-credentials client, and the identity overlay (redirect URIs on the shifted ports). Every step is
+  # idempotent: a later start only logs the contexts in again. false: the start result names stack_setup instead.
+  autoSetup: true
+  # After a slot start: GET https://localhost:<identity port>/.well-known/openid-configuration and compare the issuer.
+  smokeCheck: true
+
+# >>> built-in slotDerivations
+# How a non-default slot derives its values. The default slot gets none of them. Placeholders: {slot.name},
+# {slot.index}, {slot.prefix}, {slot.offset}, {port.<service>.<n|https|http>} (shifted), {shift:<port>} (port +
+# offset), {slotDir} (<state folder>/slots/<name>), {service} (rows with services). keys: environment keys, "@name"
+# for a shared key list (@instancePrefix, @authority). services: write the value into those services (and their
+# instances) only. isolate: the value names data of the slot and must differ from every other running slot.
+# Explicit values win: settings, profile/stack_start env and service env override a derived value.
+slotDerivations:
+  portShift: true
+  rows:
+    # ---- isolation ----
+    - id: systemDatabase
+      keys: [OCTO_SYSTEM__SYSTEMDATABASENAME]
+      value: "OctoSystem_{slot.prefix}"
+      isolate: true
+    - id: instancePrefix          # RabbitMQ names; the bot's Hangfire database becomes <prefix>-OctoSystemJobs
+      keys: ["@instancePrefix"]
+      value: "{slot.prefix}"
+      isolate: true
+    - id: streamDataSchema
+      keys: [OCTO_STREAMDATA__SCHEMAINSTANCEPREFIX]
+      value: "{slot.prefix}"
+      isolate: true
+    - id: tenantDatabasePrefix    # AB#8797: new tenants get the database <prefix><tenantId>; tenants from before keep their names
+      keys: [OCTO_SYSTEM__TENANTDATABASEPREFIX]
+      value: "{slot.prefix}_"
+      isolate: true
+    - id: artifactStorage
+      keys: [OCTO_ARTIFACTSTORAGE__INSTANCEPREFIX]
+      value: "local-{slot.prefix}"
+      isolate: true
+    - id: botTusStorage
+      keys: [OCTO_BOT__TUSSTORAGEPATH]
+      value: "{slotDir}/bot/tus-uploads"
+      isolate: true
+    - id: botDumpStorage
+      keys: [OCTO_BOT__DUMPSTORAGEPATH]
+      value: "{slotDir}/bot/dumps"
+      isolate: true
+    - id: botScratch
+      keys: [OCTO_BOT__SCRATCHPATH]
+      value: "{slotDir}/bot/scratch"
+      isolate: true
+    - id: botSecretBackups
+      keys: [OCTO_BOT__SECRETSWEEP__BACKUPSTORAGEPATH]
+      value: "{slotDir}/bot/secret-backups"
+      isolate: true
+    - id: aiWorkspaces
+      keys: [OCTO_AIWORKSPACE__BASEPATH]
+      value: "{slotDir}/ai/workspaces"
+      isolate: true
+    - id: edgeBuffer
+      keys: [OCTO_EDGEDATABUFFER__STORAGEPATH]
+      value: "{slotDir}/edge-buffer/{service}"
+      services: [meshAdapter]
+      isolate: true
+    # ---- URLs on the shifted ports ----
+    - id: authority
+      keys: ["@authority"]
+      value: "https://localhost:{port.identityServices.https}"
+    - id: identityServiceUrl
+      keys: [OCTO_COMMUNICATIONCONTROLLER__SERVICEURLS__AUTHORITY, OCTO_OCTOSERVICEURLS__IDENTITYSERVICEURL]
+      value: "https://localhost:{port.identityServices.https}"
+    - id: refineryStudioUrl
+      keys: [OCTO_IDENTITY__REFINERYSTUDIOURL, OCTO_BOT__PUBLICREFINERYSTUDIOURL, OCTO_COMMUNICATIONCONTROLLER__SERVICEURLS__STUDIO]
+      value: "https://localhost:{shift:4200}"
+    - id: assetRepositoryUrl
+      keys: [OCTO_ASSETREPOSITORY__PUBLICURL, OCTO_COMMUNICATIONCONTROLLER__SERVICEURLS__ASSETREPOSITORY, OCTO_PLATFORMSERVICES__ASSETSERVICEURL,
+             OCTO_OCTOSERVICEURLS__ASSETSERVICEURL, OCTO_AI__ASSETSERVICESURL]
+      value: "https://localhost:{port.assetRepoServices.https}"
+    - id: botUrl
+      keys: [OCTO_BOT__PUBLICURL, OCTO_COMMUNICATIONCONTROLLER__SERVICEURLS__BOT, OCTO_PLATFORMSERVICES__BOTSERVICEURL, OCTO_OCTOSERVICEURLS__BOTSERVICEURL]
+      value: "https://localhost:{port.botServices.https}"
+    - id: communicationUrl
+      keys: [OCTO_COMMUNICATIONCONTROLLER__PUBLICURL, OCTO_COMMUNICATIONCONTROLLER__SERVICEURLS__COMMUNICATION,
+             OCTO_PLATFORMSERVICES__COMMUNICATIONSERVICEURL, OCTO_OCTOSERVICEURLS__COMMUNICATIONSERVICEURL,
+             OCTO_ADAPTER__COMMUNICATIONCONTROLLERSERVICESURI]
+      value: "https://localhost:{port.communicationControllerServices.https}"
+    - id: platformUrl
+      keys: [OCTO_IDENTITY__SERVICEPUBLICURLOVERRIDES__PLATFORM]
+      value: "https://localhost:{port.platformServices.https}"
+    - id: meshAdapterUrl
+      keys: [OCTO_PLATFORMSERVICES__MESHADAPTERURL]
+      value: "https://localhost:{port.meshAdapter.https}"
+    - id: reportingUrl
+      keys: [OCTO_REPORTING__PUBLICURL, OCTO_OCTOSERVICEURLS__REPORTINGSERVICEURL, OCTO_ADAPTER__REPORTINGSERVICEURL]
+      value: "https://localhost:{port.reportingServices.https}"
+    - id: mcpUrl
+      keys: [OCTO_IDENTITY__SERVICEPUBLICURLOVERRIDES__MCP, OCTO_MCP__PUBLICURL, OCTO_AI__OCTOMESHMCPSERVICEURL]
+      value: "https://localhost:{port.mcpServices.https}"
+    - id: aiUrl                   # ApiUrl too: the AiOptions constructor copies the default PublicUrl into it
+      keys: [OCTO_AI__PUBLICURL, OCTO_AI__APIURL, OCTO_OCTOSERVICEURLS__AISERVICEURL]
+      value: "https://localhost:{port.aiServices.https}"
+    - id: aiWorkspaceMcpUrl
+      keys: [OCTO_AIWORKSPACE__MCPSERVERURL]
+      value: "http://localhost:{port.mcpServices.http}/mcp"
+    # ---- work-arounds ----
+    # Platform bug: every new slot starts with an empty system database, and nothing installs the CK model
+    # System.Communication (Adapter.DeployUpdate, ...) into its system tenant. The communication controller's CK method
+    # validation at its start (octo-common-services CkMethodHandlerValidationService, Methods:ValidateRegistrations)
+    # then refuses the start. Off in every non-default slot until the platform installs the model; the default slot keeps
+    # the validation.
+    - id: communicationMethodValidation
+      keys: [OCTO_METHODS__VALIDATEREGISTRATIONS]
+      value: "false"
+      services: [communicationControllerServices]
+# <<< built-in slotDerivations

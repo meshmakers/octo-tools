@@ -1,0 +1,36 @@
+# Identity overlay of octo-devstack stack slot '{slot.name}' - generated on every start of the slot, do not edit.
+# Mirrors octo-tools/overlays/identity-local-dev.yaml with the slot's shifted ports (offset {slot.offset}).
+# Apply with Invoke-IdentityOverlay -OverlayFile <this file> against the slot's identity server (octo-cli context
+# local-{slot.name}_<tenant>); octo-devstack does it itself in the setup after a start (slotOptions.autoSetup, stack_setup).
+
+overlayName: local-dev-{slot.name}
+
+clients:
+  # Refinery Studio SPA (runs in the default slot only; listed for a dev server started by hand on the shifted port).
+  - clientId: octo-data-refinery-studio
+    redirectUris:
+      - http://localhost:{shift:4200}/auth-callback
+      - http://localhost:{shift:4200}/silent-renew
+    postLogoutRedirectUris:
+      - http://localhost:{shift:4200}/
+    allowedCorsOrigins:
+      - http://localhost:{shift:4200}
+
+  # OctoTool / octo-cli - device-code flow on localhost (octo-cli's own callback, not a slot port).
+  - clientId: octo-cli
+    redirectUris:
+      - http://localhost:5000/callback
+
+  # Identity Service Swagger UI (the ClientId keeps the upstream typo of the seed data).
+  - clientId: octo-idenityServices-swagger
+    redirectUris:
+      - https://localhost:{port.identityServices.https}/swagger/oauth2-redirect.html
+    allowedCorsOrigins:
+      - https://localhost:{port.identityServices.https}
+
+  # MCP Service Swagger UI.
+  - clientId: octo-mcpServices-swagger
+    redirectUris:
+      - https://localhost:{port.mcpServices.https}/swagger/oauth2-redirect.html
+    allowedCorsOrigins:
+      - https://localhost:{port.mcpServices.https}
