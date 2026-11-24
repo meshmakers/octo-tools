@@ -15,7 +15,7 @@
     prefix with a trailing separator). -branchRootPath is resolved against $PWD and must look like a
     lane (exist and hold Octo.User.props or an octo-*/mm-* folder), otherwise the call is refused. So a
     local daemon outside the lane (e.g. octo-devstack, `dotnet octo-devstack.dll` from
-    ~/dev/meshmakers/octo-devstack) and the processes of other lanes survive. Folders <lane>/wt-* are other
+    ~/dev/meshmakers/octo-tools/devstack) and the processes of other lanes survive. Folders <lane>/wt-* are other
     lanes (feature environments, lane worktrees; in the flat layout every feature environment lies there) and never
     belong to the lane, unless they also lie under one of -additionalRoots (AB#9007).
       - Windows: the matched processes are stopped (Stop-Process -Force). `dotnet build-server shutdown`

@@ -4,12 +4,14 @@ The folder `devstack/` of octo-tools (AB#9711; formerly the repository meshmaker
 below run in this folder.
 
 **One-time migration from the octo-devstack clone (AB#9711).** An installed daemon service (`Install-OctoDevStackDaemonService`)
-still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`), and `Start-OctoDevStackDaemon` without `-Path`
-uses the path of the installed service. Move it once:
+still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`). On macOS and Linux `Start-OctoDevStackDaemon`
+without `-Path` uses the path of the installed LaunchAgent or systemd unit; on Windows the logon task holds the old path
+(it runs `Start-OctoDevStackDaemon -Path <old clone>`). Move it once:
 
 1. Once `daemon_status` reports `restart.safe: true` (no build runs or waits): `Uninstall-OctoDevStackDaemonService`
    (macOS and Linux: the service manager stops the daemon; the stack services keep running). On Windows also run
-   `Stop-OctoDevStackDaemon`: uninstalling the logon task leaves the daemon running there.
+   `Stop-OctoDevStackDaemon`: uninstalling the logon task leaves the daemon running there, and the stop ends the old
+   daemon hard (Stop-Process - its dll lies outside this octo-tools; the stack services keep running).
 2. `Install-OctoDevStackDaemonService` without `-Path` (the new default is `<octo-tools>/devstack`): it builds Release
    when that build is missing and starts the daemon.
 3. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
@@ -132,6 +134,10 @@ with their own data (see "Stack slots").
 
 Requirements: .NET 10 SDK, PowerShell 7 (`pwsh`) and the octo-tools checkout (env providers and builds load its
 profile), `lsof` and `ps` (macOS/Linux). Windows: see "Windows".
+
+Install and run the shared daemon only from the main octo-tools checkout (`Start-OctoDevStackDaemon` and
+`Install-OctoDevStackDaemonService` default to its `devstack/`; `-Path` picks another folder). Never from a worktree
+(`wt-*`, `.claude/worktrees`): a worktree of octo-tools has its own `devstack/`, and `Remove-OctoEnvironment` deletes it.
 
 ```bash
 dotnet build src/DevStack/DevStack.csproj -c Release

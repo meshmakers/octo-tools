@@ -1811,8 +1811,8 @@ function Invoke-OctoEnvironmentPackageCacheSeed {
 
     For every repository in -repos a git worktree <env>/<repo> is added from <base>/<repo> on the feature branch
     (-branchName, default <user>/AB#<id>_<desc>; an existing local or origin branch is checked out instead of
-    created). The developer tools octo-tools and octo-devstack live next to the lanes (<rootPath>/<repo>) and can be
-    named too; Invoke-BuildEnvironment does not build them.
+    created). The developer tools (octo-tools, which contains octo-devstack in devstack/) live next to the lanes
+    (<rootPath>/<repo>) and can be named too; Invoke-BuildEnvironment does not build them.
 
     Base: a new feature branch and every consumer worktree start from the upstream of the base checkout's current
     branch (branches/main: origin/main), fetched first - not from the local checkout, which may be stale. A checkout
@@ -2135,7 +2135,7 @@ function Get-OctoEnvironment {
     (or the default <user>/AB#<id>_<desc>); -role consumer creates a clean detached worktree, rebuilt against the
     environment's packages (read-only by convention). Both start from the upstream of the base checkout's branch
     (origin/main, fetched), -localBase from the local checkout's HEAD - see New-OctoEnvironment (baseDrift,
-    feedSnapshot). octo-tools and octo-devstack (next to the lanes) can be added; they are not built.
+    feedSnapshot). octo-tools (next to the lanes; it contains devstack/) can be added; it is not built.
     Repeatable: worktrees added before a failure stay in the manifest, the same call adds what is missing. -addAffected also adds, as
     consumers, every affected repository on the path from a feature repository to -repo (Get-OctoAffectedRepos -target).
 
@@ -2716,7 +2716,7 @@ function Remove-OctoEnvironment {
     with OctoRefreshRemoteCatalogs=false (OctoCkCatalogRefresh.psm1). -refreshCatalogs lets every CK compile refresh
     them itself, as before. -Json: catalogs { mode, usable, seconds, detail, repo }; per repository catalogSeconds,
     restoreSeconds, compileSeconds and testRestoreSeconds (also on the repoDone event).
-    Developer tools in the environment (octo-tools, octo-devstack) are not built; -Json lists them in
+    Developer tools in the environment (octo-tools, which contains devstack/) are not built; -Json lists them in
     environment.toolRepos, and an environment that holds only tools succeeds with nothing to build.
     -syncMain runs Sync-OctoEnvironment first. Before every hand-off use -verifyTests or -includeTests.
     Before the build the kill scope of the environment is cleared: Invoke-KillDotnet -branchRootPath wt-<env>
