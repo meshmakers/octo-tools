@@ -33,34 +33,8 @@ function Global:Invoke-CloneMainRepos {
 
     if (-not $Json) { Write-Host "Cloning repositories to $branchRootPath" -ForegroundColor Green }
 
-    $repoNames = @(
-        "mm-common"
-        "octo-distributedEventHub"
-        "octo-construction-kit-engine"
-        "octo-construction-kit-engine-mongodb"
-        "octo-sdk"
-        "octo-common-services"
-        # Phase 3 of the YAML migration: adapter/pipeline framework lives here, carved
-        # out of octo-sdk (Sdk.Common/Adapters + EtlDataPipeline + Services + the
-        # Plug.Simulation / SimulationNodes / CommunicationAdapter / Common.Web projects).
-        # Depends on octo-sdk via Meshmakers.Octo.Sdk.Common / .ServiceClient packages.
-        "octo-communication-sdk"
-        "octo-construction-kit"
-        "octo-cli"
-        "octo-identity-services"
-        "octo-asset-repo-services"
-        "octo-bot-services"
-        "octo-mesh-adapter"
-        "octo-communication-controller-services"
-        "octo-communication-operator"
-        "octo-platform-services"
-        # Ships the CRDs + Communication Operator Helm charts; required by the local kind
-        # dev env (Install-OctoKubernetes / Deploy-OctoOperator) which read them from
-        # octo-helm-core/src/. Easy to miss because it isn't a .NET service repo.
-        "octo-helm-core"
-        "octo-frontend-libraries"
-        "octo-frontend-refinery-studio"
-    )
+    # The one repository list, shared with New-/Sync-/Remove-TestBranch (OctoTestBranch.psm1).
+    $repoNames = Get-OctoMainRepoNames
 
     $repoResults = [System.Collections.Generic.List[object]]::new()
     $allOk = $true
