@@ -19,6 +19,18 @@ trigger:
     exclude:
       - '*'
 
+# PR validation only for pull requests that change devstack/ (without it every octo-tools PR would run these tests).
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'devstack/**'
+    exclude:
+      - 'devstack/README.md'
+      - 'devstack/CLAUDE.md'
+
 pool:
   name: meshmakers-ci-agents
 
