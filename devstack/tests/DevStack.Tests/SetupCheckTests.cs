@@ -91,7 +91,7 @@ public sealed class SetupCheckTests : IDisposable
 
         report.Ok.Should().BeFalse();
         Item(report, "octo-tools").Should().BeEquivalentTo(new { State = "fail", Detail = "octo-tools not found" });
-        Item(report, "octo-tools").Fix.Should().Contain("Invoke-CloneMainRepos -devTools");
+        Item(report, "octo-tools").Fix.Should().Contain("devstack folder of an octo-tools checkout");
         Item(report, "pwsh").State.Should().Be("fail");
         Item(report, ".NET SDK").Should().BeEquivalentTo(new { State = "fail", Fix = "install the .NET 10 SDK" });
         Item(report, "process tools").Should().BeEquivalentTo(new { State = "fail", Fix = "install lsof" }, "macOS has no /proc to fall back on");

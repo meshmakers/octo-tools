@@ -94,11 +94,12 @@ Describe 'OctoDevStack module surface' {
             Should -Be @('Install-OctoDevStackDaemonService', 'Start-OctoDevStackDaemon', 'Stop-OctoDevStackDaemon', 'Uninstall-OctoDevStackDaemonService')
     }
 
-    It 'defaults to a folder next to the octo-tools checkout (outside .claude/worktrees)' {
+    It 'defaults to the devstack folder of this octo-tools checkout' {
         InModuleScope OctoDevStack {
             $path = Get-OctoDevStackDefaultPath
-            Split-Path -Leaf $path | Should -Be 'octo-devstack'
-            $path | Should -Not -BeLike '*.claude*worktrees*'
+            Split-Path -Leaf $path | Should -Be 'devstack'
+            Split-Path -Parent $path | Should -Be (Get-OctoDevStackToolsPath)
+            Test-Path -LiteralPath (Join-Path $path 'Octo.DevStack.sln') | Should -BeTrue
         }
     }
 
@@ -161,7 +162,7 @@ Describe 'Start-OctoDevStackDaemon' {
             $json = Start-OctoDevStackDaemon -Path $path -Restart -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
 
             $json.data.success | Should -BeFalse
-            $json.data.error | Should -BeLike '*no octo-devstack checkout*left alone*'
+            $json.data.error | Should -BeLike '*no octo-devstack sources*left alone*'
             $json.data.alreadyRunning | Should -BeTrue
             $json.data.restarted | Should -BeFalse
             $json.data.pid | Should -Be 902
@@ -269,11 +270,11 @@ Describe 'Start-OctoDevStackDaemon' {
         Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
     }
 
-    It 'points to Invoke-CloneMainRepos -devTools when there is no checkout' {
+    It 'points to the devstack folder of octo-tools when there are no sources' {
         $json = Start-OctoDevStackDaemon -Path (Join-Path $TestDrive 'nothing-here') -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
 
         $json.data.success | Should -BeFalse
-        $json.data.error | Should -BeLike '*Invoke-CloneMainRepos -devTools*'
+        $json.data.error | Should -BeLike '*folder devstack/ of octo-tools*'
         Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
     }
 
@@ -739,42 +740,6 @@ Describe 'The CTRL_BREAK helper process (AB#9377)' {
 
         Mock -ModuleName OctoDevStack Get-OctoDevStackNativeCommand { $null } -ParameterFilter { $Name -eq 'dotnet' }
         InModuleScope OctoDevStack { Send-OctoDevStackCtrlBreak -ProcessId 4711 -Dll 'x.dll' } | Should -BeFalse
-    }
-}
-
-Describe 'Invoke-CloneMainRepos -devTools' {
-    BeforeAll {
-        Import-Module (Join-Path $PSScriptRoot '../modules/Invoke-CloneMainRepos.psm1') -Force
-        $script:SavedRootPath = $global:rootPath
-        $global:rootPath = $TestDrive
-    }
-
-    AfterAll {
-        $global:rootPath = $script:SavedRootPath
-    }
-
-    It 'clones only octo-devstack, into the folder that holds the octo-tools main checkout (where the daemon looks)' {
-        Mock -ModuleName Invoke-CloneMainRepos Clone-Repo { $global:LASTEXITCODE = 0 }
-
-        $json = Invoke-CloneMainRepos -devTools -Json | ConvertFrom-Json
-
-        $json.data.success | Should -BeTrue
-        $json.data.repositories.repo | Should -Be @('octo-devstack')
-        $json.data.repositories[0].PSObject.Properties.Name | Should -Contain 'alreadyExists'
-        $expected = InModuleScope OctoDevStack { Split-Path -Parent (Get-OctoDevStackDefaultPath) }
-        Should -Invoke -ModuleName Invoke-CloneMainRepos Clone-Repo -Times 1 -Exactly -ParameterFilter {
-            $repositoryName -eq 'octo-devstack' -and $basePath -eq $expected
-        }
-    }
-
-    It 'refuses -devTools together with -branch, also as a -Json result' {
-        Mock -ModuleName Invoke-CloneMainRepos Clone-Repo { }
-
-        $json = Invoke-CloneMainRepos -devTools -branch main -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
-
-        $json.data.success | Should -BeFalse
-        $json.data.error | Should -BeLike '*-devTools*-branch*'
-        Should -Invoke -ModuleName Invoke-CloneMainRepos Clone-Repo -Times 0
     }
 }
 

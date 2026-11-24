@@ -51,9 +51,10 @@ $script:OctoAdditionalOrderedBuildOrder = @(
     'octo-plug-dilos'
 )
 
-# Developer tooling next to the OctoMesh repositories, never part of the build (AB#9664): octo-tools and
-# octo-devstack (they sit next to octo-tools, and when that folder is used as a lane - Invoke-BuildAll without
-# -branch - they must not be built) and the Claude Code plugin repositories octo-claude-* (no solution, no package).
+# Developer tooling next to the OctoMesh repositories, never part of the build (AB#9664): octo-tools (it holds the
+# octo-devstack daemon in devstack/ since AB#9711), a leftover clone of the retired octo-devstack repository (when that
+# folder is used as a lane - Invoke-BuildAll without -branch - they must not be built) and the Claude Code plugin
+# repositories octo-claude-* (no solution, no package).
 # The one rule both code paths of Get-OctoBuildOrder use; wildcards as in -like.
 $script:OctoToolRepoPatterns = @('octo-tools', 'octo-devstack', 'octo-claude-*')
 

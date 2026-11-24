@@ -39,8 +39,11 @@ Debug build without `--url` is one by default). The shared daemon is restarted o
 `GET /api/daemon` (`daemon_status`) reports `restart.safe: true` or the developer explicitly says so. Never kill it, never
 replace its binaries under it. README "Restarting the daemon" and "Development".
 
-`TreatWarningsAsErrors` is on. The repo lives next to octo-tools (`~/dev/meshmakers/octo-devstack`), **not** inside a
-lane: `Invoke-BuildAll` builds every `octo-*` folder of a lane and kills dotnet processes, which would take the daemon down.
+`TreatWarningsAsErrors` is on. The daemon is the folder `devstack/` of octo-tools (AB#9711; formerly the repository
+meshmakers/octo-devstack, now retired); all paths in this file are relative to that folder. octo-tools lives next to the
+lanes, **not** inside one: `Invoke-BuildAll` builds every `octo-*` folder of a lane and kills dotnet processes, which would
+take the daemon down (`Get-OctoBuildOrder` skips octo-tools, `Invoke-KillDotnet` never stops `octo-devstack.dll`). CI: the
+octo-tools Pester workflow does not run these tests; run `dotnet test Octo.DevStack.sln` before every commit.
 
 ## Structure
 
@@ -192,10 +195,9 @@ lane: `Invoke-BuildAll` builds every `octo-*` folder of a lane and kills dotnet 
   the same; a new read-only tool is a GET endpoint by itself (`ToolBridge`). Logic the page shows (like the attention list)
   is computed in C#, never only in `app.js`. Changing tools stay MCP-only - the HTTP API has no authentication.
 - Everything in English (code, comments, docs, tool descriptions).
-- No folder structure and no copy of an octo-tools rule in the daemon (AB#9377; octo-devstack moves into octo-tools
-  later): the root, the default lane and the config folder come from octo-tools (`Get-OctoWorkspace`, asked once at the
+- No folder structure and no copy of an octo-tools rule in the daemon (AB#9377): the root, the default lane and the config folder come from octo-tools (`Get-OctoWorkspace`, asked once at the
   start; `ConfigStore.PathIn`), `rootPath` / `defaultCheckout` in the file are overrides, `octoToolsPath` is not read.
-  The daemon only locates octo-tools (`--octo-tools`, `OCTO_TOOLS_PATH`, next to its checkout). Without an answer nothing
+  The daemon only locates octo-tools (`--octo-tools`, `OCTO_TOOLS_PATH`, else the octo-tools checkout that holds its `devstack/` folder). Without an answer nothing
   is guessed: empty folders, `FolderProblems` / `setup_check` say why, `CreateContext` refuses. A new layout or config
   rule goes into octo-tools. The one mirror of an octo-tools rule is the build mode of a `kind=repo` step
   (`BuildPlanner.RepoBuildMode`, AB#9417): octo-tools has no public answer for it (`Get-OctoRepoBuildMode` is not exported

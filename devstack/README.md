@@ -1,5 +1,8 @@
 # octo-devstack
 
+The folder `devstack/` of octo-tools (AB#9711; formerly the repository meshmakers/octo-devstack, now retired). Commands
+below run in this folder.
+
 A local MCP server (daemon) that runs, stops and builds the **one** OctoMesh dev stack of a machine for several
 Claude Code sessions at once. Instead of every session calling `Start-Octo` / `Stop-Octo` in its own shell, all
 sessions talk to this daemon. It owns the service processes, knows which checkout or worktree each one runs from, and
@@ -137,8 +140,8 @@ layout, the root itself in the flat layout (repositories directly below it, e.g.
 (`workspace`) and which values the file overrides (`overrides`).
 
 - **Where octo-tools is**: `--octo-tools <path>`, else `$OCTO_TOOLS_PATH` (`Start-OctoDevStackDaemon` and
-  `Install-OctoDevStackDaemonService` set it), else the `octo-tools` folder next to this checkout (where
-  `Invoke-CloneMainRepos -devTools` puts both). That is all the daemon finds by itself.
+  `Install-OctoDevStackDaemonService` set it), else the octo-tools checkout whose `devstack/` folder holds the
+  daemon. That is all the daemon finds by itself.
 - **Nothing is guessed**: the daemon has no layout rule of its own. Without an answer - octo-tools not found, too old
   for `Get-OctoWorkspace`, pwsh missing - it does not start (unless `--config` names a file), and with `--config` the
   folders stay unknown: `setup_check` and the folder problems say why, `git pull` in octo-tools ends it.

@@ -35,10 +35,10 @@ public static class WorkspaceResolver
     public const string ToolsPathVariable = "OCTO_TOOLS_PATH";
 
     /// <summary>
-    ///     The octo-tools checkout the daemon asks: <c>--octo-tools</c>, else $OCTO_TOOLS_PATH, else the octo-tools next to the
-    ///     daemon's own checkout (where <c>Invoke-CloneMainRepos -devTools</c> puts both; a Claude Code worktree of
-    ///     octo-devstack resolves to its main checkout first). Null when none of them holds octo-tools. This is the only
-    ///     thing the daemon finds by itself: everything else about the machine comes from that octo-tools.
+    ///     The octo-tools checkout the daemon asks: <c>--octo-tools</c>, else $OCTO_TOOLS_PATH, else the octo-tools checkout
+    ///     the daemon's own solution lives in (the daemon is the folder <c>devstack/</c> of octo-tools, AB#9711; a worktree
+    ///     of octo-tools uses its own octo-tools). Null when none of them holds octo-tools. This is the only thing the daemon
+    ///     finds by itself: everything else about the machine comes from that octo-tools.
     /// </summary>
     public static string? LocateOctoTools(string? given, string daemonDirectory, Func<string, string?> environment)
     {
@@ -52,11 +52,11 @@ public static class WorkspaceResolver
             return Path.GetFullPath(TemplateExpander.ExpandPath(fromEnvironment));
         }
 
-        return NextToCheckout(daemonDirectory);
+        return ContainingOctoTools(daemonDirectory);
     }
 
-    /// <summary>The octo-tools folder next to the octo-devstack checkout that holds <paramref name="daemonDirectory"/>.</summary>
-    internal static string? NextToCheckout(string daemonDirectory)
+    /// <summary>The octo-tools checkout whose <c>devstack/</c> folder holds <paramref name="daemonDirectory"/>.</summary>
+    internal static string? ContainingOctoTools(string daemonDirectory)
     {
         var directory = new DirectoryInfo(daemonDirectory);
         while (directory != null && !File.Exists(Path.Combine(directory.FullName, "Octo.DevStack.sln")))
@@ -64,26 +64,13 @@ public static class WorkspaceResolver
             directory = directory.Parent;
         }
 
-        if (directory == null)
-        {
-            return null;
-        }
-
-        var checkout = directory.FullName;
-        var marker = checkout.Replace('\\', '/').IndexOf("/.claude/worktrees/", StringComparison.Ordinal);
-        if (marker >= 0)
-        {
-            checkout = checkout[..marker];
-        }
-
-        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(checkout));
-        var tools = parent == null ? null : Path.Combine(parent, "octo-tools");
+        var tools = directory?.Parent?.FullName;
         return tools != null && File.Exists(Path.Combine(tools, "modules", "profile.ps1")) ? tools : null;
     }
 
     /// <summary>octo-tools was not found at all.</summary>
     public static WorkspaceInfo NotFound(string hint) => new("none", null, null, null, null, null, null, null, null,
-        [$"octo-tools not found: clone it next to this octo-devstack checkout (Invoke-CloneMainRepos -devTools), set ${ToolsPathVariable}, or pass --octo-tools. {hint}".TrimEnd()]);
+        [$"octo-tools not found: run the daemon from the devstack folder of an octo-tools checkout, set ${ToolsPathVariable}, or pass --octo-tools. {hint}".TrimEnd()]);
 
     /// <summary>Asks octo-tools for the workspace (Get-OctoWorkspace -Json).</summary>
     public static async Task<WorkspaceInfo> ResolveAsync(IPwshRunner runner, string toolsPath, TimeSpan timeout, CancellationToken cancellationToken)

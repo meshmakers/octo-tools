@@ -59,7 +59,7 @@ for (var i = 0; i < args.Length; i++)
                                 --config <path>          devstack.yaml (default: $OCTO_DEVSTACK_CONFIG, else devstack.yaml in the
                                                          octo-tools config folder that Get-OctoWorkspace names)
                                 --octo-tools <path>      the octo-tools checkout to ask (default: $OCTO_TOOLS_PATH, else the
-                                                         octo-tools next to this checkout)
+                                                         octo-tools checkout that holds this devstack folder)
                                 --url <url>              listen URL, loopback only (default: server.url of the config)
                                 --state <dir>            state folder (default: $OCTO_DEVSTACK_STATE or ~/.local/state/octo-devstack)
                                 --dev                    development daemon next to the shared one: http://127.0.0.1:5190, config
@@ -412,7 +412,7 @@ internal static class ServerInstructions
 /// <summary>Entry point (top-level statements).</summary>
 public partial class Program;
 
-/// <summary>The workspace at the daemon's start (AB#9377): octo-tools located (--octo-tools, OCTO_TOOLS_PATH, next to this checkout), then asked.</summary>
+/// <summary>The workspace at the daemon's start (AB#9377): octo-tools located (--octo-tools, OCTO_TOOLS_PATH, else the octo-tools checkout holding devstack/), then asked.</summary>
 internal static class StartupWorkspace
 {
     public static async Task<WorkspaceInfo> ResolveAsync(string? givenOctoTools)

@@ -45,12 +45,12 @@ public sealed class WorkspaceTests : IDisposable
     private static string WorkspaceDocument(object data) =>
         "Loading profile...\n" + JsonSerializer.Serialize(new { schemaVersion = 1, command = "Get-OctoWorkspace", timestamp = "2026-11-19T09:00:00Z", data }) + "\n";
 
-    /// <summary>A machine: &lt;root&gt;/octo-tools with its profile and &lt;root&gt;/octo-devstack with the solution.</summary>
+    /// <summary>A machine: &lt;root&gt;/octo-tools with its profile and the solution in its devstack folder.</summary>
     private (string Root, string Tools, string DevStack) Machine(string name)
     {
         var root = Path.Combine(_checkout.Root, name);
         var tools = Path.Combine(root, "octo-tools");
-        var devstack = Path.Combine(root, "octo-devstack");
+        var devstack = Path.Combine(tools, "devstack");
         Directory.CreateDirectory(Path.Combine(tools, "modules"));
         File.WriteAllText(Path.Combine(tools, "modules", "profile.ps1"), "# fake");
         Directory.CreateDirectory(Path.Combine(devstack, "bin", "Release", "net10.0"));
@@ -90,14 +90,14 @@ public sealed class WorkspaceTests : IDisposable
     // ---------- finding octo-tools ----------
 
     [Fact]
-    public void Octo_tools_is_found_from_the_argument_the_environment_or_next_to_the_daemon_checkout()
+    public void Octo_tools_is_found_from_the_argument_the_environment_or_as_the_checkout_holding_the_daemon()
     {
         var (_, tools, devstack) = Machine("m1");
         var daemonDirectory = Path.Combine(devstack, "bin", "Release", "net10.0");
         var other = Path.Combine(_checkout.Root, "other-tools");
         var third = Path.Combine(_checkout.Root, "third-tools");
 
-        WorkspaceResolver.LocateOctoTools(null, daemonDirectory, _ => null).Should().Be(tools, "Invoke-CloneMainRepos -devTools puts both next to each other");
+        WorkspaceResolver.LocateOctoTools(null, daemonDirectory, _ => null).Should().Be(tools, "the daemon is the devstack folder of octo-tools");
         WorkspaceResolver.LocateOctoTools(null, daemonDirectory, n => n == WorkspaceResolver.ToolsPathVariable ? other : null).Should().Be(Path.GetFullPath(other));
         WorkspaceResolver.LocateOctoTools(third, daemonDirectory, n => n == WorkspaceResolver.ToolsPathVariable ? other : null)
             .Should().Be(Path.GetFullPath(third), "--octo-tools wins");
@@ -105,15 +105,27 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Fact]
-    public void A_Claude_Code_worktree_of_octo_devstack_finds_the_octo_tools_of_its_main_checkout()
+    public void A_worktree_of_octo_tools_finds_its_own_octo_tools()
     {
-        var (_, tools, devstack) = Machine("m2");
-        var worktree = Path.Combine(devstack, ".claude", "worktrees", "feature");
-        Directory.CreateDirectory(Path.Combine(worktree, "bin", "Debug", "net10.0"));
-        File.WriteAllText(Path.Combine(worktree, "Octo.DevStack.sln"), "");
+        var (_, tools, _) = Machine("m2");
+        var worktree = Path.Combine(tools, ".claude", "worktrees", "feature");
+        Directory.CreateDirectory(Path.Combine(worktree, "modules"));
+        File.WriteAllText(Path.Combine(worktree, "modules", "profile.ps1"), "# fake");
+        Directory.CreateDirectory(Path.Combine(worktree, "devstack", "bin", "Debug", "net10.0"));
+        File.WriteAllText(Path.Combine(worktree, "devstack", "Octo.DevStack.sln"), "");
 
-        WorkspaceResolver.NextToCheckout(Path.Combine(worktree, "bin", "Debug", "net10.0")).Should().Be(tools);
-        WorkspaceResolver.NextToCheckout(Path.Combine(_checkout.Root, "no-checkout-here")).Should().BeNull();
+        WorkspaceResolver.ContainingOctoTools(Path.Combine(worktree, "devstack", "bin", "Debug", "net10.0")).Should().Be(worktree);
+        WorkspaceResolver.ContainingOctoTools(Path.Combine(_checkout.Root, "no-checkout-here")).Should().BeNull();
+    }
+
+    [Fact]
+    public void A_solution_outside_an_octo_tools_checkout_finds_no_octo_tools()
+    {
+        var loose = Path.Combine(_checkout.Root, "loose-devstack");
+        Directory.CreateDirectory(Path.Combine(loose, "bin"));
+        File.WriteAllText(Path.Combine(loose, "Octo.DevStack.sln"), "");
+
+        WorkspaceResolver.ContainingOctoTools(Path.Combine(loose, "bin")).Should().BeNull("its parent holds no modules/profile.ps1");
     }
 
     // ---------- asking octo-tools ----------
@@ -178,7 +190,7 @@ public sealed class WorkspaceTests : IDisposable
         var workspace = WorkspaceResolver.NotFound("");
 
         workspace.Source.Should().Be("none");
-        workspace.Problems.Single().Should().Contain("Invoke-CloneMainRepos -devTools").And.Contain("OCTO_TOOLS_PATH").And.Contain("--octo-tools");
+        workspace.Problems.Single().Should().Contain("devstack folder of an octo-tools checkout").And.Contain("OCTO_TOOLS_PATH").And.Contain("--octo-tools");
     }
 
     // ---------- taking over the old file ----------

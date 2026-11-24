@@ -202,7 +202,7 @@ public sealed class SetupCheck(ConfigStore store, SetupProbes probes, Func<Persi
                     ? $"git pull in {workspace.ToolsPath} (Get-OctoWorkspace) and make sure pwsh runs, then restart the daemon"
                     : $"run pwsh -Command \". {Common.PwshRunner.Quote(Path.Combine(workspace.ToolsPath ?? "octo-tools", "modules", "profile.ps1"))}; Get-OctoWorkspace -Json\" to see what fails, fix it, then restart the daemon"),
             _ => new SetupItem("octo-tools", "fail", workspace?.Problems.FirstOrDefault() ?? "octo-tools was not found",
-                "Invoke-CloneMainRepos -devTools (clones octo-tools and octo-devstack next to each other), or set OCTO_TOOLS_PATH")
+                "run the daemon from the devstack folder of an octo-tools checkout (Start-OctoDevStackDaemon), or set OCTO_TOOLS_PATH")
         });
 
         const string laneFix = "clone the repositories (Invoke-CloneMainRepos) into the octo-tools root or branches/main, or set $env:OCTO_ENVIRONMENT_BASE";

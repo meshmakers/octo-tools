@@ -15,3 +15,44 @@ updates:
       actions:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+  - package-ecosystem: "nuget"
+    directory: "/devstack"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      runtime-aligned:
+        patterns: ["Microsoft.Extensions.*", "Microsoft.AspNetCore.*", "System.Text.Json", "System.Composition.*", "System.IdentityModel.Tokens.Jwt"]
+        update-types: ["minor", "patch"]
+      test-tooling:
+        patterns: ["xunit*", "TUnit*", "Microsoft.NET.Test.Sdk", "coverlet.*", "Moq", "NSubstitute", "FakeItEasy", "FluentAssertions"]
+        update-types: ["minor", "patch"]
+      meshmakers:
+        patterns: ["Meshmakers.*"]
+        update-types: ["minor", "patch"]
+      nuget-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # AB#9580
+      - dependency-name: "Microsoft.Extensions.*"
+        update-types: ["version-update:semver-major"]
+      # AB#9580
+      - dependency-name: "Microsoft.AspNetCore.*"
+        update-types: ["version-update:semver-major"]
+      # AB#9580
+      - dependency-name: "System.Text.Json"
+        update-types: ["version-update:semver-major"]
+      # AB#9580
+      - dependency-name: "System.Composition.*"
+        update-types: ["version-update:semver-major"]
+      # MassTransit 9 is held on purpose
+      - dependency-name: "MassTransit*"
+        update-types: ["version-update:semver-major"]
+      # Telerik majors follow a licensed upgrade
+      - dependency-name: "Telerik.*"
+        update-types: ["version-update:semver-major"]
+      # KubeOps majors are planned migrations
+      - dependency-name: "KubeOps.*"
+        update-types: ["version-update:semver-major"]

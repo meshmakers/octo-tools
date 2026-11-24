@@ -2978,7 +2978,8 @@ function Get-OctoWorkspace {
         The one place that knows how a developer's machine is laid out; octo-devstack asks it instead of keeping path
         assumptions of its own. rootPath is the folder that holds the octo-tools checkout (profile.ps1). Supported
         layouts (AB#9007):
-          - lanes: <rootPath>/branches/main holds the repositories; octo-tools and octo-devstack lie next to the lanes;
+          - lanes: <rootPath>/branches/main holds the repositories; octo-tools (with octo-devstack in devstack/) lies
+            next to the lanes;
           - flat: rootPath itself holds the repositories (e.g. C:\dev\meshmakers, ~/RiderProjects/meshmakers/main).
         The default lane follows Resolve-OctoEnvironmentDefaultBase: $env:OCTO_ENVIRONMENT_BASE, else branches/main when
         it holds a lane, else rootPath itself. Feature environments lie in <rootPath>/wt-<env>. The config folder is the
