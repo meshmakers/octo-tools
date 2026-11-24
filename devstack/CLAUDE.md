@@ -43,8 +43,8 @@ replace its binaries under it. README "Restarting the daemon" and "Development".
 meshmakers/octo-devstack, now retired); all paths in this file are relative to that folder. octo-tools lives next to the
 lanes, **not** inside one: `Invoke-BuildAll` builds every `octo-*` folder of a lane and kills dotnet processes, which would
 take the daemon down (`Get-OctoBuildOrder` skips octo-tools, `Invoke-KillDotnet` never stops `octo-devstack.dll`). CI: the
-GitHub workflow `.github/workflows/devstack.yml` of octo-tools runs these tests on every pull request and push to main that
-changes `devstack/`; run `dotnet test Octo.DevStack.sln` before every commit.
+Azure Pipelines definition `devstack/azure-pipelines.yml` runs these tests on every push to main or `dev/*` that changes
+`devstack/`; run `dotnet test Octo.DevStack.sln` before every commit.
 
 ## Structure
 

@@ -1,0 +1,63 @@
+# CI of octo-devstack (the folder devstack/ of octo-tools, AB#9711): build and test only.
+# The daemon is a local developer tool; nothing is published
+# (no NuGet package, no image), and it references no Octo package, so it needs neither the private feed
+# nor a version from the release trains. Not part of the cascade (no pipeline resource).
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - dev/*
+      - main
+  paths:
+    include:
+      - 'devstack/**'
+    exclude:
+      - 'devstack/README.md'
+      - 'devstack/CLAUDE.md'
+  tags:
+    exclude:
+      - '*'
+
+pool:
+  name: meshmakers-ci-agents
+
+variables:
+  # The tests' processes are pwsh (AB#9377); an agent without it gets this release in its temp folder, checked against
+  # these SHA256 sums (the release's own, pinned here; update them together with the version).
+  pwshVersion: '7.7.0'
+  pwshSha256X64: 'c89d9c682d2c403dfe726f3df948e359675235a5bd6fab535776de69729ca0cb'
+  pwshSha256Arm64: 'e59c89776eaa59790d44b3edd14277435225ab08b6e7603763101b89de83d935'
+
+steps:
+  - checkout: self
+    clean: true
+  - bash: |
+      set -e
+      if command -v pwsh >/dev/null 2>&1; then
+        echo "pwsh $(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()') is installed"
+        exit 0
+      fi
+      case "$(uname -m)" in
+        x86_64|amd64) arch=x64; sum='$(pwshSha256X64)' ;;
+        aarch64|arm64) arch=arm64; sum='$(pwshSha256Arm64)' ;;
+        *) echo "##vso[task.logissue type=error]no pwsh release for the architecture $(uname -m)"; exit 1 ;;
+      esac
+      target="$(Agent.TempDirectory)/pwsh"
+      archive="powershell-$(pwshVersion)-linux-$arch.tar.gz"
+      mkdir -p "$target"
+      curl -sSfL -o "$target/$archive" "https://github.com/PowerShell/PowerShell/releases/download/v$(pwshVersion)/$archive"
+      echo "$sum  $target/$archive" | sha256sum -c -
+      tar -xzf "$target/$archive" -C "$target"
+      rm "$target/$archive"
+      chmod +x "$target/pwsh"
+      "$target/pwsh" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+      echo "##vso[task.prependpath]$target"
+    displayName: 'Ensure pwsh for the test processes'
+  - task: DotNetCoreCLI@2
+    retryCountOnTaskFailure: 1
+    displayName: 'Run tests'
+    inputs:
+      command: 'test'
+      projects: 'devstack/Octo.DevStack.sln'
+      arguments: '-c Release'
