@@ -584,10 +584,12 @@ daemon is copied there once and left as it is.
 still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`), and `Start-OctoDevStackDaemon` without `-Path`
 uses the path of the installed service. Move it once:
 
-1. `Stop-OctoDevStackDaemon` - only when `daemon_status` reports `restart.safe: true` (no build runs or waits).
-2. `Install-OctoDevStackDaemonService` without `-Path` (the new default is `<octo-tools>/devstack`).
-3. `Start-OctoDevStackDaemon -Rebuild`.
-4. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
+1. Once `daemon_status` reports `restart.safe: true` (no build runs or waits): `Uninstall-OctoDevStackDaemonService`
+   (macOS and Linux: the service manager stops the daemon; the stack services keep running). On Windows also run
+   `Stop-OctoDevStackDaemon`: uninstalling the logon task leaves the daemon running there.
+2. `Install-OctoDevStackDaemonService` without `-Path` (the new default is `<octo-tools>/devstack`): it builds Release
+   when that build is missing and starts the daemon.
+3. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
 
 A daemon that ran a build from before AB#9657 comes back with renamed tools (`env_*` -> `lane_*`, `build_*` -> `job_*`).
 
