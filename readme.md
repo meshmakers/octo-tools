@@ -531,8 +531,11 @@ repositories included; a repository the directory does not hold is skipped).
   `-branch <folder>` (relative to `$rootPath`) is used as given, so existing lines such as `dev` or `demo` keep working.
 - **Fresh main as base.** `New-TestBranch` runs `git fetch origin` and branches explicitly from `origin/main`, never from
   what the checkout has. A repository with uncommitted changes to tracked files is not branched: it is listed with its
-  reason (console and `-Json`, `status: Dirty`) and the cmdlet sets a non-zero exit code. A branch that already exists is
-  switched to. Pushes unless `-NoPush`.
+  reason (console and `-Json`, `status: Dirty`) and the cmdlet sets a non-zero exit code; a repository already on the line
+  branch is not refused. A branch that already exists is switched to. Pushes unless `-NoPush`; a later run without
+  `-NoPush` publishes a branch that was never pushed. A local line branch that was published and deleted on origin since
+  is not pushed again (`status: Stale`, non-zero exit code): delete it locally and run again to branch from `origin/main`.
+- **Preview.** `-WhatIf` changes nothing in `New-TestBranch` and `Sync-TestBranch` (`status: Skipped`); both still fetch.
 
 ```powershell
 Invoke-CloneMainRepos -branch ../0.3-demo

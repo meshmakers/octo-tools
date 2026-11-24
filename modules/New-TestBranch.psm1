@@ -101,9 +101,10 @@ function New-TestBranch {
             }
 
             # Tracked changes would be carried onto the new branch (or block the switch): report, do not branch
+            # A repository already on the line branch needs no switch: its edits stay where they are (rerun to publish)
+            $current = git -C $path branch --show-current 2>$null
             $dirty = @(git -C $path status --porcelain --untracked-files=no 2>$null)
-            if ($dirty.Count -gt 0) {
-                $current = git -C $path branch --show-current 2>$null
+            if ($dirty.Count -gt 0 -and $current -ne $branchName) {
                 if (-not $Json) { Write-Host "  Uncommitted changes on '$current' - not branched" -ForegroundColor Red }
                 $status[$directoryName] = @{ Success = $false; Existed = $false; Status = 'Dirty'; Reason = "uncommitted changes ($($dirty.Count) file(s)) on branch '$current'" }
                 continue
@@ -116,6 +117,17 @@ function New-TestBranch {
 
             $remoteBranchExists = [bool](git -C $path ls-remote --heads origin $branchName 2>$null)
             $localBranchExists = [bool](git -C $path branch --list $branchName 2>$null)
+
+            if ($localBranchExists -and -not $remoteBranchExists) {
+                # Published once (it has an upstream) and deleted on origin since: republishing would recreate the line
+                # on an outdated base instead of a fresh origin/main. Only a -NoPush branch (never published) is pushed.
+                $upstreamRemote = git -C $path config --get "branch.$branchName.remote" 2>$null
+                if ($upstreamRemote) {
+                    if (-not $Json) { Write-Host "  Local '$branchName' was published and deleted on origin - not republished" -ForegroundColor Red }
+                    $status[$directoryName] = @{ Success = $false; Existed = $true; Status = 'Stale'; Reason = "local branch '$branchName' tracks '$upstreamRemote' but no longer exists there; delete it (git branch -D $branchName) and run again to branch from origin/main" }
+                    continue
+                }
+            }
 
             if ($remoteBranchExists -or $localBranchExists) {
                 if (-not $localBranchExists) {

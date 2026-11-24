@@ -114,6 +114,17 @@ function Sync-TestBranch {
                     continue
                 }
 
+                # -WhatIf (and -Confirm) skip every change of the repository: checkout, pull, merge, push
+                if (-not $PSCmdlet.ShouldProcess($directoryName, "Merge origin/main into '$branchName'" + $(if ($NoPush) { '' } else { ' and push it' }))) {
+                    Pop-Location
+                    $status.Add($directoryName, @{
+                        Success = $true
+                        Status = "Skipped"
+                        Message = "WhatIf"
+                    })
+                    continue
+                }
+
                 # Save current branch to return later
                 $originalBranch = git branch --show-current 2>$null
 
@@ -270,6 +281,7 @@ function Sync-TestBranch {
     $syncedCount = 0
     $upToDateCount = 0
     $notFoundCount = 0
+    $skippedCount = 0
     $failedCount = 0
 
     if (-not $Json) {
@@ -294,6 +306,10 @@ function Sync-TestBranch {
             "BranchNotFound" {
                 if (-not $Json) { Write-Host "  [--] $key - Branch not found" -ForegroundColor Gray }
                 $notFoundCount++
+            }
+            "Skipped" {
+                if (-not $Json) { Write-Host "  [--] $key - Skipped ($($repoStatus.Message))" -ForegroundColor Gray }
+                $skippedCount++
             }
             "MergeConflict" {
                 if (-not $Json) { Write-Host "  [!!] $key - MERGE CONFLICT" -ForegroundColor Red }
@@ -360,6 +376,7 @@ function Sync-TestBranch {
             Synced = $syncedCount
             UpToDate = $upToDateCount
             NotFound = $notFoundCount
+            Skipped = $skippedCount
             Failed = $failedCount
         }
     }

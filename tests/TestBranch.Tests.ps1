@@ -193,6 +193,36 @@ Describe 'New-TestBranch' {
         }
     }
 
+    It 'does not republish a local line branch that was deleted on origin, reports it Stale' {
+        New-TestBranch -MinorVersion 3 -Description 'demo' | Out-Null
+        foreach ($name in $script:Repos) {
+            Invoke-TestGit (Join-Path $script:Line $name) @('checkout', 'main') | Out-Null
+            Invoke-TestGit (Join-Path $script:Ws "remotes/$name.git") @('branch', '-D', 'test/0.3-demo') | Out-Null
+        }
+
+        $out = [System.Collections.Generic.List[object]]::new()
+        { New-TestBranch -MinorVersion 3 -Description 'demo' -Json 2>$null | ForEach-Object { $out.Add($_) } } | Should -Throw
+        $json = $out | ConvertFrom-Json
+
+        $LASTEXITCODE | Should -Be 1
+        foreach ($name in $script:Repos) {
+            ($json.data.repositories | Where-Object repo -eq $name).status | Should -Be 'Stale'
+            (Invoke-TestGit (Join-Path $script:Ws "remotes/$name.git") @('branch', '--list', 'test/0.3-demo')) | Should -BeNullOrEmpty
+            (Invoke-TestGit (Join-Path $script:Line $name) @('branch', '--show-current')) | Should -Be 'main'
+        }
+    }
+
+    It 'publishes a -NoPush branch with uncommitted edits while it is checked out' {
+        New-TestBranch -MinorVersion 3 -Description 'demo' -NoPush | Out-Null
+        Set-Content -Path (Join-Path $script:Line 'octo-cli/file.txt') -Value 'local edit'
+
+        New-TestBranch -MinorVersion 3 -Description 'demo' | Out-Null
+
+        $LASTEXITCODE | Should -Be 0
+        (Invoke-TestGit (Join-Path $script:Ws 'remotes/octo-cli.git') @('branch', '--list', 'test/0.3-demo')) | Should -Not -BeNullOrEmpty
+        (Get-Content (Join-Path $script:Line 'octo-cli/file.txt')) | Should -Be 'local edit'
+    }
+
     It 'switches to a branch that exists only on origin (created by another clone)' {
         New-TestBranch -MinorVersion 3 -Description 'demo' | Out-Null
         foreach ($name in $script:Repos) {
@@ -248,6 +278,22 @@ Describe 'Sync-TestBranch and Remove-TestBranch' {
             $LASTEXITCODE | Should -Be 0
         }
         ($result.Status.Repository | Sort-Object) | Should -Be ($script:Repos | Sort-Object)
+    }
+
+    It 'Sync changes nothing under -WhatIf' {
+        $heads = @{}
+        foreach ($name in $script:Repos) {
+            Add-OriginCommit $script:Ws $name 'two' | Out-Null
+            $heads[$name] = Invoke-TestGit (Join-Path $script:Line $name) @('rev-parse', 'HEAD') | Select-Object -First 1
+        }
+
+        $result = Sync-TestBranch -MinorVersion 3 -Description 'demo' -WhatIf 6>$null
+
+        $result.Summary.Skipped | Should -Be 3
+        $result.Summary.Synced | Should -Be 0
+        foreach ($name in $script:Repos) {
+            (Invoke-TestGit (Join-Path $script:Line $name) @('rev-parse', 'HEAD')) | Select-Object -First 1 | Should -Be $heads[$name]
+        }
     }
 
     It 'Remove deletes the branch in the default directory, mm-common included' {
