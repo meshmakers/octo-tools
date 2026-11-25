@@ -1488,6 +1488,19 @@ public sealed class TestRunTests : IDisposable
     }
 
     [Fact]
+    public void A_short_id_names_exactly_one_sequence_and_an_ambiguous_one_is_refused()
+    {
+        (string, long)[] jobs = [("b351-081503", 351), ("b35-070000", 35), ("b7-090000", 7), ("b7-100000", 7)];
+
+        BuildQueue.ShortIdOf("b351", jobs).Should().Be("b351-081503");
+        BuildQueue.ShortIdOf("35", jobs).Should().Be("b35-070000", "never the prefix of b351");
+        BuildQueue.ShortIdOf("b36", jobs).Should().BeNull();
+        BuildQueue.ShortIdOf("b351-08", jobs).Should().BeNull("not a short id");
+        var ambiguous = () => BuildQueue.ShortIdOf("b7", jobs);
+        ambiguous.Should().Throw<InvalidOperationException>().WithMessage("Job id 'b7' is ambiguous: b7-090000, b7-100000 - pass the full id.");
+    }
+
+    [Fact]
     public async Task Job_status_waits_at_most_the_cap_and_resolves_a_short_id()
     {
         var (release, _) = Block();
@@ -1501,6 +1514,10 @@ public sealed class TestRunTests : IDisposable
 
         waited.TimedOut.Should().BeTrue();
         watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "waitSeconds=900 is cut to the cap");
+        waited.Notes.Should().ContainSingle(n => n.StartsWith("waitSeconds=900 was capped at", StringComparison.Ordinal) &&
+                                                 n.Contains($"call job_status(\"{job.Id}\", waitSeconds=50) again"), "the caller is told to loop");
+        (await BuildTools.WaitAsync(queue, job.Id, 1, () => queue.Get(job.Id), Ct, TimeSpan.FromMilliseconds(20), maxWait: TimeSpan.FromSeconds(5)))
+            .Notes.Should().NotContain(n => n.Contains("capped"), "a wait within the cap was not capped");
         release.SetResult();
         (await BuildTools.WaitAsync(queue, job.Id, 30, () => queue.Get(job.Id), Ct, TimeSpan.FromMilliseconds(20))).TimedOut.Should().BeFalse();
     }

@@ -170,7 +170,8 @@ public sealed class BuildTools(BuildQueue queue)
     [Description("Builds a lane (octo-tools Invoke-BuildEnvironment) into its own feed as a queued job: its feature repos and the consumer " +
                  "repos rebuilt against them, with the test projects compiled (verifyTests=true by default; no test runs - lane_test runs " +
                  "them). Only the repos that changed since their last build are built (job_status shows the others as skipped with the " +
-                 "reason; notes starting with 'stale:' name what a skipped repo may leave outdated); repos / skip narrow it, buildUnchanged=true " +
+                 "reason; notes starting with 'stale:' name what a skipped repo may leave outdated; warnings name stale base-lane packages (fix: " +
+                 "lane_add_repo role=consumer) and a stale-package check that failed); repos / skip narrow it, buildUnchanged=true " +
                  "builds everything. Returns the job at once - wait with job_status(id, waitSeconds). Lane builds run next to each other (one " +
                  "per lane, at most 2) and need no developer's go; nothing changes for the base lane or other lanes. When services of the " +
                  "lane's stack run from a repo it builds, pass stopServices=true (restartServices=true starts them again). syncMain=true first " +
@@ -208,7 +209,7 @@ public sealed class BuildTools(BuildQueue queue)
     [Description("Shows a job - a build (base_build, lane_build) or a test run (base_test, lane_test) - in a compact shape (normally < 2 KB); " +
                  "waitSeconds=N waits until the job ends or N seconds passed (max 50 - a longer value is cut to 50, so the answer comes " +
                  "before the MCP call timeout of about 60 s an in-process teammate has) and then answers, with timedOut saying which " +
-                 "happened - wait this way instead of polling: call again while timedOut is true. id: the full id ('b351-081503') or the " +
+                 "happened (a note says when the wait was capped) - wait this way instead of polling: call again while timedOut is true. id: the full id ('b351-081503') or the " +
                  "short one ('b351'). state queued|running|succeeded|failed|canceled, success, kind " +
                  "repo|range|all|profile|lane|test, lane, queue position and what a queued job waits for, times (local) with elapsedSeconds " +
                  "and etaSeconds, progress (phase stopping|catalogs|build|tests|packages|restarting, or lock while a test run waits for the " +
@@ -268,7 +269,8 @@ public sealed class BuildTools(BuildQueue queue)
     {
         var cap = maxWait ?? TimeSpan.FromSeconds(MaxWaitSeconds);
         var wait = TimeSpan.FromSeconds(Math.Max(waitSeconds, 0));
-        wait = wait > cap ? cap : wait;
+        var capped = wait > cap;
+        wait = capped ? cap : wait;
         if (wait == TimeSpan.Zero)
         {
             return answer();
@@ -282,7 +284,15 @@ public sealed class BuildTools(BuildQueue queue)
             var left = wait - waited.Elapsed;
             if (left <= TimeSpan.Zero)
             {
-                return answer() with { TimedOut = true };
+                var timedOut = answer() with { TimedOut = true };
+                // Said in the answer, so a caller that asked for more loops instead of taking the job for stuck.
+                return capped
+                    ? timedOut with
+                    {
+                        Notes = [..timedOut.Notes, $"waitSeconds={waitSeconds} was capped at {cap.TotalSeconds:0} s (the MCP call of an in-process " +
+                                                   $"teammate times out after about 60 s); the job still runs - call job_status(\"{id}\", waitSeconds={MaxWaitSeconds}) again."]
+                    }
+                    : timedOut;
             }
 
             await Task.Delay(left < poll ? left : poll, cancellationToken);

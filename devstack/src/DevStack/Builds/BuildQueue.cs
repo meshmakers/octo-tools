@@ -603,13 +603,32 @@ public sealed partial class BuildQueue : IBuildGuard
             return job;
         }
 
-        if (ShortId().Match(key) is { Success: true } m && long.TryParse(m.Groups[1].Value, out var sequence) &&
-            _jobs.Values.FirstOrDefault(j => j.Sequence == sequence) is { } bySequence)
+        if (ShortIdOf(key, _jobs.Values.Select(j => (j.Id, j.Sequence))) is { } full && _jobs.TryGetValue(full, out var bySequence))
         {
             return bySequence;
         }
 
         throw new InvalidOperationException(UnknownJob(id));
+    }
+
+    /// <summary>
+    ///     The full id a short one ('b351', '351') names: only exactly that sequence ('b35' is never b351). Two jobs with one
+    ///     sequence (an old daemon's history) are named, never guessed. Null when none has it or the id is no short id.
+    /// </summary>
+    internal static string? ShortIdOf(string id, IEnumerable<(string Id, long Sequence)> jobs)
+    {
+        if (ShortId().Match(id.Trim()) is not { Success: true } m || !long.TryParse(m.Groups[1].Value, out var sequence))
+        {
+            return null;
+        }
+
+        var matches = jobs.Where(j => j.Sequence == sequence).Select(j => j.Id).Order(StringComparer.Ordinal).ToList();
+        return matches.Count switch
+        {
+            0 => null,
+            1 => matches[0],
+            _ => throw new InvalidOperationException($"Job id '{id}' is ambiguous: {string.Join(", ", matches)} - pass the full id.")
+        };
     }
 
     [System.Text.RegularExpressions.GeneratedRegex(@"^[bB]?(\d+)$")]
@@ -641,7 +660,8 @@ public sealed partial class BuildQueue : IBuildGuard
     internal static string JobLine(BuildStatus s)
     {
         var at = s.Times.QueuedAt;
-        var what = s.Kind == "test" ? s.Target[(s.Target.IndexOf(": ", StringComparison.Ordinal) is var i and >= 0 ? i + 2 : 0)..] : s.Target;
+        // A lane's test run names the lane in lane=, so its target starts at "tests of"; a base lane run keeps its folder.
+        var what = s.Kind == "test" && s.Env != null ? s.Target[(s.Target.IndexOf(": ", StringComparison.Ordinal) is var i and >= 0 ? i + 2 : 0)..] : s.Target;
         var lane = s.Env != null ? $" lane={s.Env}" : "";
         var summary = s.Outcome?.Summary is { Length: > 0 } text ? " | " + (text.Length > 160 ? text[..157] + "..." : text) : "";
         var seconds = s.Times.ElapsedSeconds is { } elapsed ? $", {elapsed:0} s" : "";
