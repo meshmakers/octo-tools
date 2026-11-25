@@ -54,9 +54,11 @@ public sealed class LaneTools(EnvironmentManager environments)
     [Description("Adds a repo to a lane with octo-tools Add-OctoEnvironmentRepo: 'repo' creates a feature worktree (or a consumer one, detached at " +
                  "the base commit, with role=consumer; addAffected also adds the repos that consume it), 'path' adopts an existing worktree (a " +
                  "flat wt-<lane>-<repo> or <repo>/.claude/worktrees/<name>; inPlace keeps it where it is). While a build or test run of the lane " +
-                 "runs or waits, the call waits for it (up to 10 minutes, a note says how long) instead of being refused; refused while a " +
-                 "service of that repo runs in the lane's stack (stop it first). Notes name stale base-lane packages as lane_create does. " +
-                 "Build afterwards with lane_build.")]
+                 "runs or waits, the call waits for it up to 45 s (a note says how long); a job still running then is named in " +
+                 "retryAfterJob - nothing was added, call again after job_status(<id>, waitSeconds) ended. Refused while a service of that " +
+                 "repo runs in the lane's stack (stop it first). The added repo's obj/project.nuget.cache files are deleted, so the next " +
+                 "lane_build restores it against the lane feed. Notes name stale base-lane packages as lane_create does. Build afterwards " +
+                 "with lane_build.")]
     public Task<EnvironmentCommandResult> AddRepo(
         [Description(StackTools.OwnerDescription)] string owner,
         [Description(LaneName)] string lane,

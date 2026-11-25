@@ -122,7 +122,7 @@ public sealed partial class EnvironmentTests
     }
 
     [Fact]
-    public async Task Lane_add_repo_is_refused_when_the_lanes_job_does_not_end_within_the_wait()
+    public async Task Lane_add_repo_answers_with_the_job_to_wait_for_when_the_lanes_job_does_not_end_within_the_wait()
     {
         var (queue, supervisor, store) = CreateQueue();
         Env("ab1-one", ["octo-a"]);
@@ -139,8 +139,11 @@ public sealed partial class EnvironmentTests
         var job = await queue.Enqueue(new BuildRequest { Owner = "a", Kind = BuildKind.Env, Environment = "ab1-one" });
         try
         {
-            var add = () => manager.AddRepoAsync("agent-1", "ab1-one", "octo-b", null, "consumer", false, false, Ct);
-            await add.Should().ThrowAsync<InvalidOperationException>().WithMessage($"*still run or wait after*{job.Id}*job_cancel*");
+            var answer = await manager.AddRepoAsync("agent-1", "ab1-one", "octo-b", null, "consumer", false, false, Ct);
+            answer.Success.Should().BeFalse("nothing was added");
+            answer.RetryAfterJob.Should().Be(job.Id);
+            answer.Notes.Should().ContainSingle().Which.Should().Contain("Nothing was added yet").And.Contain($"job_status(\"{job.Id}\", waitSeconds)");
+            Manager(queue, supervisor, store).AddRepoJobWait.Should().BeLessThan(TimeSpan.FromSeconds(60), "below the MCP call timeout of an agent");
             _fake.BuildCalls.Should().NotContain(c => c.StartsWith("Add-OctoEnvironmentRepo", StringComparison.Ordinal));
         }
         finally

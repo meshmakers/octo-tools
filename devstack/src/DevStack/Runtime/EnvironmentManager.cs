@@ -87,6 +87,13 @@ public sealed record EnvironmentCommandResult(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SlotDataDrop? DataDrop { get; init; }
 
+    /// <summary>
+    ///     lane_add_repo that did not run because a job of the lane still ran after the in-call wait (AB#9808): the job to wait for
+    ///     with job_status before calling again.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RetryAfterJob { get; init; }
+
     /// <summary>lane_remove: the lane's feature branches - deleted when they held nothing, else kept with the reason and the command.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<LaneBranch>? Branches { get; init; }
@@ -132,8 +139,8 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
 
     /// <summary>
     ///     Add-OctoEnvironmentRepo: a repo as a new feature/consumer worktree (repo), or an existing worktree adopted (path,
-    ///     inPlace keeps it where it is). Waits for the lane's running or queued jobs (at most <see cref="AddRepoJobWait" />);
-    ///     refused while a service of that repo runs in its slot.
+    ///     inPlace keeps it where it is). Waits for the lane's running or queued jobs (at most <see cref="AddRepoJobWait" />), and
+    ///     answers with retryAfterJob when one still runs then; refused while a service of that repo runs in its slot.
     /// </summary>
     public async Task<EnvironmentCommandResult> AddRepoAsync(string owner, string env, string? repo, string? path, string? role, bool addAffected, bool inPlace,
         CancellationToken cancellationToken)
@@ -178,7 +185,18 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             throw new InvalidOperationException($"Add-OctoEnvironmentRepo of the daemon's octo-tools takes no -{(role != null && !caps.AddRepoRole ? "role" : "addAffected")}.");
         }
 
-        var waited = await WaitForJobsAsync(env, cancellationToken);
+        var (waited, waitedFor, stillActive) = await WaitForJobsAsync(env, cancellationToken);
+        if (stillActive.Count > 0)
+        {
+            // AB#9808: no bare refusal - the answer names the jobs to wait for; nothing was added.
+            var first = stillActive[0].Id;
+            return new EnvironmentCommandResult(false, 0, "Add-OctoEnvironmentRepo (not run: the lane's jobs still run)", null, null,
+            [
+                $"Nothing was added yet: job(s) of lane '{env}' still run or wait after {waited:0} s ({string.Join(", ", stillActive.Select(b => $"{b.Id} {b.State}"))}). " +
+                $"Retry lane_add_repo after job_status(\"{first}\", waitSeconds) ended (or job_cancel(owner, \"{first}\", lane=\"{env}\") it)."
+            ], null) { RetryAfterJob = first };
+        }
+
         var repoName = repo ?? (Common.PathScope.IsWorktree(fullPath!) ? CheckoutDiscovery.ReadWorktree(Path.Combine(fullPath!, ".git")).Repo : null) ?? Path.GetFileName(fullPath!);
         var services = config.Services.Where(s => string.Equals(s.Value.Repo, repoName, StringComparison.OrdinalIgnoreCase)).Select(s => s.Key).ToHashSet();
         if (supervisor.Registry.Known().Any(k => k.Slot.Name == info.Slot))
@@ -213,9 +231,9 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
         logger?.LogInformation("{Owner} added {Repo} to environment {Env}: {Result}", owner, repoName, env, success ? "ok" : $"failed ({exitCode})");
         var row = success ? (await ListAsync(null, cancellationToken)).FirstOrDefault(r => r.Name == env) : null;
         var notes = FeedSnapshot.Notes((data as JsonObject)?["feedSnapshot"], env);
-        if (waited != null)
+        if (waitedFor.Count > 0)
         {
-            notes.Insert(0, waited);
+            notes.Insert(0, $"Waited {waited:0} s for the lane's job(s) {string.Join(", ", waitedFor)} to end before adding the repo.");
         }
 
         if (success)
@@ -265,46 +283,38 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
         return new EnvironmentCommandResult(success, exitCode, command, null, data, [], success ? null : tail);
     }
 
-    /// <summary>How long lane_add_repo waits for the lane's running or queued jobs before it refuses (AB#9808).</summary>
-    public TimeSpan AddRepoJobWait { get; set; } = TimeSpan.FromMinutes(10);
+    /// <summary>
+    ///     How long lane_add_repo waits in the call for the lane's running or queued jobs (AB#9808): below the ~60 s after which an
+    ///     agent's MCP call times out.
+    /// </summary>
+    public TimeSpan AddRepoJobWait { get; set; } = TimeSpan.FromSeconds(45);
 
     /// <summary>How often the wait looks at the lane's jobs again (tests shorten it).</summary>
     public TimeSpan JobPollInterval { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>
-    ///     lane_add_repo while a build or test run of the lane runs or waits: wait for them to end (at most <see cref="AddRepoJobWait" />),
-    ///     instead of refusing at once (AB#9808); still refused when they did not end by then, or the lane is being removed. Returns the
-    ///     note for the answer when it waited, else null.
+    ///     lane_add_repo while a build or test run of the lane runs or waits: wait for them to end, at most <see cref="AddRepoJobWait" />
+    ///     (AB#9808). Returns the seconds waited, the jobs waited for, and the jobs that still run or wait (empty: go on). Refused when
+    ///     the lane is being removed.
     /// </summary>
-    private async Task<string?> WaitForJobsAsync(string env, CancellationToken cancellationToken)
+    private async Task<(double Seconds, List<string> WaitedFor, List<BuildStatus> StillActive)> WaitForJobsAsync(string env, CancellationToken cancellationToken)
     {
         supervisor.Removals.Refuse(env); // AB#9673: a lane that is being removed takes no change
-        var waitedFor = queue.ActiveFor(env).Select(b => b.Id).ToList();
-        if (waitedFor.Count == 0)
-        {
-            return null;
-        }
-
+        var waitedFor = new List<string>();
         var clock = System.Diagnostics.Stopwatch.StartNew();
         while (queue.ActiveFor(env) is { Count: > 0 } active)
         {
-            foreach (var id in active.Select(b => b.Id).Where(id => !waitedFor.Contains(id)))
-            {
-                waitedFor.Add(id);
-            }
-
+            waitedFor.AddRange(active.Select(b => b.Id).Where(id => !waitedFor.Contains(id)));
             if (clock.Elapsed >= AddRepoJobWait)
             {
-                throw new InvalidOperationException($"Jobs of lane '{env}' still run or wait after {clock.Elapsed.TotalSeconds:0} s " +
-                                                    $"({string.Join(", ", active.Select(b => $"{b.Id} {b.State}"))}); wait for them " +
-                                                    "(job_status(id, waitSeconds)) and call lane_add_repo again, or job_cancel(owner, id, lane) them first.");
+                return (clock.Elapsed.TotalSeconds, waitedFor, active);
             }
 
             await Task.Delay(JobPollInterval, cancellationToken);
         }
 
         supervisor.Removals.Refuse(env);
-        return $"Waited {clock.Elapsed.TotalSeconds:0} s for the lane's job(s) {string.Join(", ", waitedFor)} to end before adding the repo.";
+        return (waitedFor.Count == 0 ? 0 : clock.Elapsed.TotalSeconds, waitedFor, []);
     }
 
     private void RefuseWhileJobs(string env)
