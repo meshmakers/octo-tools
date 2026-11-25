@@ -81,6 +81,19 @@ function Get-OctoChainPackageIndex {
     return [pscustomobject]@{ ProducedBy = $producedBy; IdCase = $idCase; References = $references }
 }
 
+function Get-OctoChainLaneArgument {
+    # "-branch <lane>" for an Invoke-BuildRange command when the checked lane is not the profile's own checkout;
+    # '' for the default lane, and for a -LaneRoot outside $rootPath (Invoke-BuildRange cannot name it).
+    param([string]$branch, [string]$laneRoot, [bool]$laneRootGiven)
+    if ($branch -ne '') { return "-branch $branch" }
+    if (-not $laneRootGiven -or [string]::IsNullOrWhiteSpace([string]$global:rootPath)) { return '' }
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([string]$global:rootPath))
+    if ($laneRoot.Equals($root, [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    if ($laneRoot.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return '-branch ' + $laneRoot.Substring($prefix.Length).Replace('\', '/') }
+    return ''
+}
+
 function Test-OctoChainRepoBuildable {
     # A repository the build order really builds: a solution or a build.ps1 in its root (octo-mesh-deployment and
     # octo-pipeline-templates are in the order but build nothing).
@@ -96,7 +109,7 @@ function Get-OctoChainRange {
         [Parameter(Mandatory = $true)] [string[]]$producers,
         [Parameter(Mandatory = $true)] [object[]]$order,
         [Parameter(Mandatory = $true)] [object]$index,
-        [string]$consumer = '',
+        [string[]]$consumer = @(),
         [switch]$consumers
     )
 
@@ -117,14 +130,17 @@ function Get-OctoChainRange {
             }
         } while ($added)
     }
-    if ($consumer -and $position.ContainsKey($consumer) -and $position[$consumer] -ge $position[$from]) { [void]$set.Add($consumer) }
+    foreach ($name in @($consumer | Where-Object { $_ })) {
+        if ($position.ContainsKey($name) -and $position[$name] -ge $position[$from]) { [void]$set.Add($name) }
+    }
     $to = ($set | Sort-Object { $position[$_] } | Select-Object -Last 1)
     return [pscustomobject]@{ From = $from; To = $to }
 }
 
 function Format-OctoChainRangeCommand {
-    param([Parameter(Mandatory = $true)] [object]$range, [switch]$purgeStaleCache)
+    param([Parameter(Mandatory = $true)] [object]$range, [switch]$purgeStaleCache, [string]$laneArgument = '')
     $command = "Invoke-BuildRange -from $($range.From) -to $($range.To)"
+    if ($laneArgument) { $command += " $laneArgument" }
     if ($purgeStaleCache) { $command += ' -purgeStaleCache' }
     return $command
 }
@@ -137,7 +153,7 @@ function Read-OctoChainBuildLog {
     $result = [System.Collections.Generic.List[object]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($line in [IO.File]::ReadLines($path)) {
-        if ($line -notmatch 'error\s+(?<code>NU110[123])\s*:\s*Unable to find package\s+(?<id>[A-Za-z0-9_.\-]+)') { continue }
+        if ($line -notmatch 'error\s+(?<code>NU110[123])\s*:\s*Unable to find (?:a stable )?package\s+(?<id>[A-Za-z0-9_.\-]+)') { continue }
         $id = $Matches['id'].TrimEnd('.')
         $code = $Matches['code']
         $consumer = ''
@@ -162,7 +178,8 @@ function Test-OctoBuildChain {
         variable except the lane paths (checkout, nuget feed, package cache). The fixes are only printed, never run.
 
         Checks (finding "check" values):
-          branch         a chain repository is not on main (feature branch or detached HEAD). Blocking.
+          branch         a chain repository is not on main (feature branch or detached HEAD). Blocking. Skipped in a
+                         feature environment (<lane>/.octo/environment.json): its repositories are on feature branches by design.
           dirty          a chain repository has uncommitted changes (the build uses them). Warning.
           missingPackage a package a chain repository produces is not in <lane>/nuget (the NU1101 case). Blocking.
           outdatedPackage the package in <lane>/nuget is older than the last commit of its repository. Warning.
@@ -178,6 +195,8 @@ function Test-OctoBuildChain {
 
     .PARAMETER branch
         Lane folder relative to $rootPath, like Invoke-BuildRange -branch. Default: the checkout the profile runs in.
+        The printed Invoke-BuildRange commands then carry -branch <lane> (also for a -LaneRoot below $rootPath; a -LaneRoot
+        elsewhere cannot be named by Invoke-BuildRange: run the command from that checkout's profile).
 
     .PARAMETER LaneRoot
         Absolute checkout root to check instead of -branch.
@@ -214,6 +233,7 @@ function Test-OctoBuildChain {
     $branchRootPath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
     if (-not (Test-Path -LiteralPath $branchRootPath -PathType Container)) { throw "Test-OctoBuildChain: lane root $branchRootPath does not exist." }
 
+    $laneArgument = Get-OctoChainLaneArgument -branch $branch -laneRoot $branchRootPath -laneRootGiven ($LaneRoot -ne '')
     $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $branchRootPath
     $feed = Join-Path $branchRootPath 'nuget'
     $caches = if ($GlobalPackagesPath.Count -gt 0) { @($GlobalPackagesPath) } else { @(Get-OctoRangePackageCaches -laneSettings $laneSettings) }
@@ -221,6 +241,8 @@ function Test-OctoBuildChain {
     $order = @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $true)
     $states = @($order | ForEach-Object { Get-OctoChainRepoState -repo $_ })
     $index = Get-OctoChainPackageIndex -repos $order
+    # A feature environment (<lane>/.octo/environment.json) holds its feature branches by design: no branch check there.
+    $isEnvironment = Test-Path -LiteralPath (Join-Path (Join-Path $branchRootPath '.octo') 'environment.json') -PathType Leaf
     $findings = [System.Collections.Generic.List[object]]::new()
     $add = {
         param([string]$check, [string]$severity, [string]$repo, [string]$package, [string]$reason, [string]$message, [string]$fix, [string]$fixWithConsumers, [string[]]$packages = @())
@@ -231,12 +253,12 @@ function Test-OctoBuildChain {
             })
     }
     $rangeFixes = {
-        param([string[]]$producers, [string]$consumer = '', [switch]$purge)
+        param([string[]]$producers, [string[]]$consumer = @(), [switch]$purge)
         $small = Get-OctoChainRange -producers $producers -order $order -index $index -consumer $consumer
         $large = Get-OctoChainRange -producers $producers -order $order -index $index -consumer $consumer -consumers
         [pscustomobject]@{
-            Small = if ($small) { Format-OctoChainRangeCommand -range $small -purgeStaleCache:$purge } else { '' }
-            Large = if ($large) { Format-OctoChainRangeCommand -range $large -purgeStaleCache:$purge } else { '' }
+            Small = if ($small) { Format-OctoChainRangeCommand -range $small -purgeStaleCache:$purge -laneArgument $laneArgument } else { '' }
+            Large = if ($large) { Format-OctoChainRangeCommand -range $large -purgeStaleCache:$purge -laneArgument $laneArgument } else { '' }
             Range = $small
         }
     }
@@ -248,7 +270,7 @@ function Test-OctoBuildChain {
             & $add 'notGit' 'warning' $state.name '' '' "$($state.name) is not a git checkout; branch and age cannot be checked." ''  ''
             continue
         }
-        if ($state.detached -or $state.branch -ne 'main') {
+        if (-not $isEnvironment -and ($state.detached -or $state.branch -ne 'main')) {
             $where = if ($state.detached) { "detached HEAD at $($state.commit)" } else { "branch '$($state.branch)'" }
             $switch = "git -C '$($state.path)' switch main"
             $reason = if ($state.detached) { 'detached' } else { 'featureBranch' }
@@ -335,8 +357,8 @@ function Test-OctoBuildChain {
     $affected = @($findings | Where-Object { $_.repo -and $_.fix -and ($_.check -in 'missingPackage', 'outdatedPackage', 'staleCache', 'buildLog' -or ($_.check -eq 'branch' -and $_.severity -eq 'blocking')) } | ForEach-Object repo | Select-Object -Unique)
     $recommended = ''
     if ($affected.Count -gt 0) {
-        $combined = Get-OctoChainRange -producers $affected -order $order -index $index -consumer ($logConsumers | Select-Object -Last 1)
-        if ($combined) { $recommended = Format-OctoChainRangeCommand -range $combined -purgeStaleCache:(@($findings | Where-Object check -eq 'staleCache').Count -gt 0) }
+        $combined = Get-OctoChainRange -producers $affected -order $order -index $index -consumer @($logConsumers)
+        if ($combined) { $recommended = Format-OctoChainRangeCommand -range $combined -purgeStaleCache:(@($findings | Where-Object check -eq 'staleCache').Count -gt 0) -laneArgument $laneArgument }
     }
 
     $global:LASTEXITCODE = if ($blocking -gt 0) { 1 } else { 0 }

@@ -248,6 +248,20 @@ Describe 'Test-OctoBuildChain: -BuildLog (AC 4)' {
         @($findings | Where-Object package -eq 'Meshmakers.Common.Shared')[0].reason | Should -Be 'NU1101'
     }
 
+    It 'maps NU1103 ("Unable to find a stable package")' {
+        $fake = New-FakeLane
+        $finding = @((Invoke-Doctor $fake @{ BuildLog = (Join-Path $script:Fixtures 'nu1103.buildlog') }).findings | Where-Object check -eq 'buildLog')
+        $finding.Count | Should -Be 1
+        $finding[0].reason | Should -Be 'NU1103'
+        $finding[0].repo | Should -Be 'octo-sdk'
+    }
+
+    It 'ends the combined range at the last failing consumer in build order, not the last one in the log' {
+        $fake = New-FakeLane
+        (Invoke-Doctor $fake @{ BuildLog = (Join-Path $script:Fixtures 'multi.buildlog') }).summary.recommendedFix |
+            Should -Be 'Invoke-BuildRange -from mm-common -to octo-asset-repo-services'
+    }
+
     It 'reports a package no chain repository produces without a fix' {
         $fake = New-FakeLane
         $findings = @((Invoke-Doctor $fake @{ BuildLog = (Join-Path $script:Fixtures 'nu1102.buildlog') }).findings | Where-Object check -eq 'buildLog')
@@ -268,6 +282,46 @@ Describe 'Test-OctoBuildChain: -BuildLog (AC 4)' {
         $fake = New-FakeLane
         $json = Test-OctoBuildChain -LaneRoot $fake.Lane -GlobalPackagesPath @($fake.Cache) -BuildLog (Join-Path $script:Fixtures 'nu1102.buildlog') -Json
         $json | Should -Not -Match 'LOG-SECRET-MARKER'
+    }
+}
+
+Describe 'Test-OctoBuildChain: lane of the printed commands and feature environments' {
+    It 'adds -branch <lane> to every printed Invoke-BuildRange when -branch names the lane' {
+        $savedRoot = $global:rootPath
+        $fake = New-FakeLane
+        $global:rootPath = $TestDrive
+        try {
+            Remove-Item (Join-Path $fake.Nuget 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg')
+            $laneName = Split-Path -Leaf $fake.Lane
+            $data = Invoke-Doctor $fake @{ LaneRoot = ''; branch = $laneName }
+            $data.laneRoot | Should -Be ([IO.Path]::TrimEndingDirectorySeparator($fake.Lane))
+            $finding = @($data.findings | Where-Object check -eq 'missingPackage')
+            $finding[0].fix | Should -Be "Invoke-BuildRange -from octo-sdk -to octo-sdk -branch $laneName"
+            $finding[0].fixWithConsumers | Should -Match "-branch $laneName`$"
+            $data.summary.recommendedFix | Should -Match "-branch $laneName`$"
+        }
+        finally { $global:rootPath = $savedRoot }
+    }
+
+    It 'names a -LaneRoot below $rootPath with -branch and leaves one elsewhere without it' {
+        $savedRoot = $global:rootPath
+        $fake = New-FakeLane
+        try {
+            Remove-Item (Join-Path $fake.Nuget 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg')
+            $global:rootPath = $TestDrive
+            (Invoke-Doctor $fake).findings[0].fix | Should -Be "Invoke-BuildRange -from octo-sdk -to octo-sdk -branch $(Split-Path -Leaf $fake.Lane)"
+            $global:rootPath = Join-Path $TestDrive 'elsewhere'
+            (Invoke-Doctor $fake).findings[0].fix | Should -Be 'Invoke-BuildRange -from octo-sdk -to octo-sdk'
+        }
+        finally { $global:rootPath = $savedRoot }
+    }
+
+    It 'skips the branch check in a feature environment (its repositories are on feature branches by design)' {
+        $fake = New-FakeLane
+        New-Item -ItemType Directory -Path (Join-Path $fake.Lane '.octo') | Out-Null
+        Set-Content -Path (Join-Path $fake.Lane '.octo/environment.json') -Value '{ "name": "ab1", "repos": [] }'
+        & git -C (Join-Path $fake.Lane 'octo-sdk') checkout -q -b 'gerald/AB#1_feature' 2>&1 | Out-Null
+        (Invoke-Doctor $fake).findings | Where-Object check -eq 'branch' | Should -BeNullOrEmpty
     }
 }
 
@@ -298,7 +352,7 @@ Describe 'Test-OctoBuildChain: read-only guarantee (AC 5)' {
         Get-TreeSnapshot $fake.Lane | Should -Be $before
     }
 
-    It 'does not write anywhere outside the temp lane (the real home and the working directory stay untouched)' {
+    It 'does not write into the working directory' {
         $fake = New-FakeLane
         $probe = Join-Path $TestDrive 'cwd'
         New-Item -ItemType Directory -Path $probe | Out-Null
@@ -330,6 +384,7 @@ Describe 'Test-OctoBuildChain: read-only guarantee (AC 5)' {
 
     It 'prints no environment variable value (only lane paths)' {
         $fake = New-FakeLane
+        $savedNuget = [Environment]::GetEnvironmentVariable('NUGET_PACKAGES')
         [Environment]::SetEnvironmentVariable('OCTO_DOCTOR_SENTINEL', 'sentinel-value-12345')
         [Environment]::SetEnvironmentVariable('NUGET_PACKAGES', (Join-Path $fake.Lane 'env-cache'))
         try {
@@ -338,7 +393,7 @@ Describe 'Test-OctoBuildChain: read-only guarantee (AC 5)' {
         }
         finally {
             [Environment]::SetEnvironmentVariable('OCTO_DOCTOR_SENTINEL', $null)
-            [Environment]::SetEnvironmentVariable('NUGET_PACKAGES', $null)
+            [Environment]::SetEnvironmentVariable('NUGET_PACKAGES', $savedNuget)
         }
         ($json + $text) | Should -Not -Match 'sentinel-value-12345'
     }

@@ -1,0 +1,1 @@
+/work/octo-asset-repo-services/src/Asset.Service/Asset.Service.csproj : error NU1103: Unable to find a stable package Meshmakers.Octo.Sdk.Common with version (>= 999.0.0)

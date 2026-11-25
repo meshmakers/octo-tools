@@ -1,0 +1,2 @@
+/work/octo-asset-repo-services/src/Asset.Service/Asset.Service.csproj : error NU1101: Unable to find package Meshmakers.Common.Shared. No packages exist with this id in source(s): /work/nuget
+/work/octo-sdk/src/Sdk.Common/Sdk.Common.csproj : error NU1102: Unable to find package Meshmakers.Octo.Sdk.Common with version (>= 999.0.0) [net10.0]
