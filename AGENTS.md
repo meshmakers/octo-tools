@@ -10,7 +10,7 @@ OctoMesh is a data transformation platform that converts raw data into meaningfu
 
 - **Primary Language**: PowerShell scripting
 - **Platform**: .NET 10.0 microservices
-- **Infrastructure**: a local kind cluster (`Install-OctoKubernetes`) with MongoDB, CrateDB and RabbitMQ is the only supported local infrastructure. The Docker Compose setup is deprecated, removal 2026-12-31 (AB#7141)
+- **Infrastructure**: a local kind cluster (`Install-OctoKubernetes`) with MongoDB, CrateDB and RabbitMQ is the only supported local infrastructure. The Docker Compose setup is deprecated, removal 2026-12-31
 - **Frontend**: Angular — Data Refinery Studio (octo-frontend-refinery-studio)
 
 ### Architecture
@@ -26,7 +26,7 @@ The system uses a microservices architecture with:
 - `/modules/` - PowerShell modules for all development commands
 - `/tests/` - Pester 5 tests (`Invoke-Pester ./tests`; install with `Install-Module Pester -MinimumVersion 5.5 -MaximumVersion 5.99 -Scope CurrentUser`, without `-MaximumVersion` you get Pester 6; on Windows with Controlled Folder Access, which blocks Documents\PowerShell\Modules, `New-Item -ItemType Directory -Force ~/.local/share/powershell/Modules`, then `Save-Module ... -Path ~/.local/share/powershell/Modules`, which `profile.ps1` adds to PSModulePath on Windows - load the profile or add the folder to `$env:PSModulePath` yourself; also for powershell-yaml); they use a fake checkout in `TestDrive` and mock the build step - never run real builds or touch the real NuGet folders from tests
   - Faster, same files: `./tests/Invoke-ParallelPester.ps1 [-Path <folder|files>] [-ThrottleLimit <n>] [-PassThru]` runs every `*.Tests.ps1` in its own pwsh process (default: up to 8 at a time, biggest files first) and merges the results; exit code 1 when any file has a failed test, a failed block or container, no result or no test at all (`tests/ParallelPester.Tests.ps1`). `Invoke-Pester ./tests` stays the reference run
-  - Keep the suite fast (AB#8811): fixtures go into `$TestDrive`, never `[IO.Path]::GetTempPath()` (PowerShell's file cmdlets cost 30-150 ms per call below a temp folder with tens of thousands of entries); a fixture that needs many `git` calls is built once per file and copied per test (`New-FakeWorkspace` / `Initialize-FakeWorkspaceTemplate` in `tests/OctoEnvironment.TestHelpers.ps1`: a native process started from pwsh costs 15-30 ms); a test file that grows past about a minute is split (the `OctoEnvironment*.Tests.ps1` files share that helper), because the parallel run is as slow as its slowest file
+  - Keep the suite fast: fixtures go into `$TestDrive`, never `[IO.Path]::GetTempPath()` (PowerShell's file cmdlets cost 30-150 ms per call below a temp folder with tens of thousands of entries); a fixture that needs many `git` calls is built once per file and copied per test (`New-FakeWorkspace` / `Initialize-FakeWorkspaceTemplate` in `tests/OctoEnvironment.TestHelpers.ps1`: a native process started from pwsh costs 15-30 ms); a test file that grows past about a minute is split (the `OctoEnvironment*.Tests.ps1` files share that helper), because the parallel run is as slow as its slowest file
 - `/infrastructure/` - Docker Compose configuration and MongoDB init scripts (deprecated, removal 2026-12-31)
 - `/kubernetes/` - Local kind cluster manifests, Helm values, and the dev-env runbooks (`README.md` / `QUICKSTART.md`)
 - `/assets/` - Terminal profile assets and logos
