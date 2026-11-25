@@ -98,6 +98,22 @@ Describe 'Add-OctoEnvironmentRepo -path (adopting existing worktrees)' {
         (Invoke-TestGit (Join-Path $envPath 'octo-identity-services') rev-parse --abbrev-ref HEAD) | Should -Be 'reimar/feature-x'
     }
 
+    It 'clears the restore no-op caches of an adopted worktree, so the lane build restores against the lane feed (AB#9808)' {
+        # restored earlier against the base lane: obj/project.nuget.cache and project.assets.json of two projects
+        foreach ($project in @('src/Identity/obj', 'tests/Identity.Tests/obj', 'src/web/node_modules/x/obj')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $claude $project) | Out-Null
+            Set-Content -Path (Join-Path $claude "$project/project.nuget.cache") -Value '{"dgSpecHash":"old"}'
+            Set-Content -Path (Join-Path $claude "$project/project.assets.json") -Value '{}'
+        }
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $claude -inPlace -Json)
+        $doc.data.success | Should -BeTrue
+        $doc.data.restoreCachesCleared | Should -Be 2
+        Test-Path (Join-Path $claude 'src/Identity/obj/project.nuget.cache') | Should -BeFalse
+        Test-Path (Join-Path $claude 'tests/Identity.Tests/obj/project.nuget.cache') | Should -BeFalse
+        Test-Path (Join-Path $claude 'src/Identity/obj/project.assets.json') | Should -BeTrue
+        Test-Path (Join-Path $claude 'src/web/node_modules/x/obj/project.nuget.cache') | Should -BeTrue   # node_modules is not entered
+    }
+
     It 'refuses to move a locked worktree or one a process runs from; -WhatIf moves nothing' {
         Invoke-TestGit (Join-Path $ws.Main 'octo-sdk') worktree lock $flat | Out-Null
         $doc = Get-Doc (Add-OctoEnvironmentRepo -env env-a -path $flat -Json)
@@ -370,6 +386,57 @@ Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
         @($doc.data.feedSnapshot.hints).Count | Should -Be 0
         $doc = Get-Doc (New-OctoEnvironment -env 'env-h' -repos octo-sdk -branchName 'feature/h' -localBase -Json)
         @($doc.data.feedSnapshot.staleProducers).Count | Should -Be 0
+        $doc.data.feedSnapshot.checked | Should -BeTrue
+    }
+
+    It 'names a library whose base-lane package was built from an older commit than its pulled checkout, also in Invoke-BuildEnvironment (AB#9808)' {
+        # The base lane packed the engine and the sdk at their first commit; then both checkouts were pulled, not rebuilt.
+        $engine = Join-Path $ws.Main 'octo-construction-kit-engine'
+        $sdk = Join-Path $ws.Main 'octo-sdk'
+        $packedEngine = [string](Invoke-TestGit $engine rev-parse HEAD)
+        $packedSdk = [string](Invoke-TestGit $sdk rev-parse HEAD)
+        foreach ($pair in @(@('Meshmakers.Octo.Runtime.Engine', $packedEngine), @('Meshmakers.Octo.Sdk.Common', $packedSdk))) {
+            $file = Join-Path $ws.Main "nuget/$($pair[0]).999.0.0.nupkg"
+            Remove-Item -LiteralPath $file -Force
+            $zip = [System.IO.Compression.ZipFile]::Open($file, 'Create')
+            try {
+                $writer = [System.IO.StreamWriter]::new($zip.CreateEntry("$($pair[0]).nuspec").Open())
+                $writer.Write("<package><metadata><id>$($pair[0])</id><repository type=""git"" url=""https://example.invalid/x"" commit=""$($pair[1])"" /></metadata></package>")
+                $writer.Dispose()
+            }
+            finally { $zip.Dispose() }
+        }
+        Add-OriginCommit 'octo-construction-kit-engine' | Out-Null
+        Add-OriginCommit 'octo-sdk' | Out-Null
+        foreach ($checkout in @($engine, $sdk)) { Invoke-TestGit $checkout pull -q --ff-only | Out-Null }
+
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-p' -repos octo-sdk -branchName 'feature/p' -Json -WarningAction SilentlyContinue)
+        $doc.data.success | Should -BeTrue
+        @($doc.data.baseDrift).Count | Should -Be 0                                    # the checkouts are in step with origin ...
+        @($doc.data.feedSnapshot.rebuildInEnvironment) | Should -Be @('octo-sdk')      # ... their packages are not
+        $doc.data.feedSnapshot.checked | Should -BeTrue
+        @($doc.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
+        $doc.data.feedSnapshot.staleProducers[0].builtFrom | Should -Be $packedEngine
+        $doc.data.feedSnapshot.staleProducers[0].builtFromSource | Should -Be 'package'
+        $doc.data.feedSnapshot.staleProducers[0].behind | Should -Be 1
+        ($doc.data.feedSnapshot.hints -join ' ') | Should -Match 'Add-OctoEnvironmentRepo -env env-p -repo octo-construction-kit-engine -role consumer'
+
+        $build = Get-Doc (Invoke-BuildEnvironment -env 'env-p' -DryRun -Json -WarningAction SilentlyContinue)
+        @($build.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
+        $build.data.feedSnapshot.checked | Should -BeTrue
+    }
+
+    It 'reports a check that could not be made as failed, not as an empty list (AB#9808)' {
+        Add-OriginCommit 'octo-sdk' | Out-Null
+        New-OctoEnvironment -env 'env-q' -repos octo-sdk -branchName 'feature/q' -Json -WarningAction SilentlyContinue | Out-Null
+        InModuleScope OctoEnvironment -Parameters @{ main = $ws.Main } {
+            $manifest = Read-OctoEnvironmentManifest -env 'env-q'
+            $manifest['repos'][0]['baseCommit'] = '0123456789abcdef0123456789abcdef01234567'   # a commit git does not know
+            $report = Get-OctoEnvironmentFeedSnapshotReport -env 'env-q' -manifest $manifest -basePath $main -noFetch
+            $report.checked | Should -BeFalse
+            ($report.errors -join ' ') | Should -Match 'octo-sdk: git rev-list'
+            ($report.hints -join ' ') | Should -Match 'stale-package check is incomplete'
+        }
     }
 }
 

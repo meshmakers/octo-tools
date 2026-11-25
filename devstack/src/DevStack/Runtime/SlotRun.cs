@@ -1267,7 +1267,7 @@ public sealed class SlotRun
                     throw new InvalidOperationException(
                         $"{name} runs out of {repoPath}, which job {hit.JobId} ({(hit.TestRun ? "a test run" : "a build")} of {hit.Owner}: {hit.Target}) is " +
                         $"working on{(hit.TestRun ? " - the run stopped the services of that repository and starts them again when it ends" : "")}. " +
-                        $"Wait for the job to end (job_status(\"{hit.JobId}\", waitSeconds=600)) and start {name} afterwards.");
+                        $"Wait for the job to end (job_status(\"{hit.JobId}\", waitSeconds=50)) and start {name} afterwards.");
                 }
             }
         }

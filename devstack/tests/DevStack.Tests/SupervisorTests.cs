@@ -80,12 +80,12 @@ public sealed class SupervisorTests : IDisposable
         supervisor.BuildGuard = new Guard(new BuildGuardHit("b7", "alice", "branches/main: octo-a..octo-b"), tools);
         (await FluentActions.Awaiting(Start).Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
             .Be($"sleeper runs out of {Path.Combine(_checkout.Lane, "tools")}, which job b7 (a build of alice: branches/main: octo-a..octo-b) is working on. " +
-                "Wait for the job to end (job_status(\"b7\", waitSeconds=600)) and start sleeper afterwards.");
+                "Wait for the job to end (job_status(\"b7\", waitSeconds=50)) and start sleeper afterwards.");
 
         supervisor.BuildGuard = new Guard(new BuildGuardHit("t3", "bob", "ab1: tests of tools") { TestRun = true }, tools);
         (await FluentActions.Awaiting(Start).Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
             .Contain("which job t3 (a test run of bob: ab1: tests of tools) is working on - the run stopped the services of that repository")
-            .And.Contain("job_status(\"t3\", waitSeconds=600)");
+            .And.Contain("job_status(\"t3\", waitSeconds=50)");
     }
 
     [Fact]

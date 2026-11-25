@@ -726,6 +726,24 @@ Describe 'Package graph scan stays out of node_modules, bin, obj and .git' {
             @((Get-OctoRepoPackageInfo -path $flat).Produces) | Should -Be @('Meshmakers.Tool')
         }
     }
+
+    It 'takes the AssemblyName as package id when no PackageId is set, so the consumers of the library are found (AB#9808)' {
+        InModuleScope OctoEnvironment -Parameters @{ root = (Join-Path $TestDrive 'scan-assembly') } {
+            if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+            # like octo-construction-kit-engine-mongodb: Runtime.Engine.MongoDb.csproj packs Meshmakers.Octo.Runtime.Engine.MongoDb
+            $library = Join-Path $root 'octo-construction-kit-engine-mongodb'
+            $service = Join-Path $root 'octo-asset-repo-services'
+            New-Item -ItemType Directory -Force -Path (Join-Path $library 'src/Runtime.Engine.MongoDb'), (Join-Path $library 'src/Named'), (Join-Path $service 'src/Service') | Out-Null
+            Set-Content -Path (Join-Path $library 'src/Runtime.Engine.MongoDb/Runtime.Engine.MongoDb.csproj') -Value '<Project><PropertyGroup><AssemblyName>Meshmakers.Octo.Runtime.Engine.MongoDb</AssemblyName></PropertyGroup></Project>'
+            Set-Content -Path (Join-Path $library 'src/Named/Named.csproj') -Value '<Project><PropertyGroup><AssemblyName>Other.Name</AssemblyName><PackageId>Meshmakers.Named</PackageId></PropertyGroup></Project>'
+            Set-Content -Path (Join-Path $service 'src/Service/Service.csproj') -Value '<Project><PropertyGroup><IsPackable>false</IsPackable></PropertyGroup><ItemGroup><PackageReference Include="Meshmakers.Octo.Runtime.Engine.MongoDb" Version="1" /></ItemGroup></Project>'
+
+            @((Get-OctoRepoPackageInfo -path $library).Produces) | Should -Be @('Meshmakers.Named', 'Meshmakers.Octo.Runtime.Engine.MongoDb')   # PackageId wins over AssemblyName
+            $graph = Get-OctoAffectedRepoGraph -repos @([pscustomobject]@{ Name = 'octo-construction-kit-engine-mongodb'; Path = $library }, [pscustomobject]@{ Name = 'octo-asset-repo-services'; Path = $service }) -features @('octo-construction-kit-engine-mongodb')
+            @($graph.Affected.repo) | Should -Be @('octo-asset-repo-services')
+            @((Get-OctoUpstreamRepoMap -graph $graph)['octo-asset-repo-services']) | Should -Be @('octo-construction-kit-engine-mongodb')
+        }
+    }
 }
 
 Describe 'Sync reports stay small' {
