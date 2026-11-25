@@ -1399,6 +1399,38 @@ public sealed class TestRunTests : IDisposable
     }
 
     [Fact]
+    public async Task RerunFailed_leaves_failed_Pester_tests_out_and_says_so_or_refuses_when_only_Pester_failed()
+    {
+        // Pester runs whole test files: the cmdlet skips it on -rerunFailed, so a rerun must neither promise nor pretend it.
+        var documents = new Queue<string>([
+            """{"success":false,"exitCode":1,"failedStep":"tests","failedProject":"B.Tests","projects":[{"project":"B.Tests","runner":"vstest","state":"failed","success":false,"total":4,"passed":2,"failed":2,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"B.Tests.X"},{"name":"B.Tests.Y"}]},{"project":"Pester","runner":"pester","state":"failed","success":false,"total":5,"passed":4,"failed":1,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"x.y"}]}]}""",
+            Passed,
+            """{"success":false,"exitCode":1,"failedStep":"tests","failedProject":"Pester","projects":[{"project":"B.Tests","runner":"vstest","state":"passed","success":true,"total":4,"passed":4,"failed":0,"skipped":0,"durationSeconds":1,"failedTests":[]},{"project":"Pester","runner":"pester","state":"failed","success":false,"total":5,"passed":4,"failed":1,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"x.y"}]}]}"""
+        ]);
+        _fake.Build = (body, _, _) =>
+        {
+            Event(body, "plan", "\"repo\":\"octo-a\",\"environment\":null,\"projects\":[{\"project\":\"B.Tests\",\"docker\":false,\"noBuild\":true,\"skip\":false,\"runner\":\"vstest\"},{\"project\":\"Pester\",\"docker\":false,\"noBuild\":true,\"skip\":false,\"runner\":\"pester\"}],\"count\":2");
+            var data = documents.Dequeue();
+            return Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", data, exitCode: data.Contains("\"success\":false", StringComparison.Ordinal) ? 1 : 0));
+        };
+        var queue = Create();
+        var both = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        var rerun = await queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+        await WaitAsync(queue, rerun.Id);
+        _fake.BuildCalls.Last().Should().StartWith("Invoke-OctoTestRun -branch 'branches/main' -repo 'octo-a' -project 'B.Tests' -rerunFailed -Json");
+        rerun.Notes.Should().Contain(n => n.StartsWith($"rerunFailed: runs the 2 failed test(s) of {both.Id} again, in B.Tests.", StringComparison.Ordinal) &&
+                                          n.Contains("Pester failed too but runs whole test files: run it with project=\"Pester\" and without rerunFailed"));
+
+        var onlyPester = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        var refused = () => queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+        (await refused.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .StartWith($"rerunFailed refused, nothing was queued: the failed tests of {onlyPester.Id}").And.Contain("are Pester tests")
+            .And.Contain("project=\"Pester\" and without rerunFailed");
+        _fake.BuildCalls.Should().HaveCount(3, "the refused rerun started nothing");
+    }
+
+    [Fact]
     public async Task A_run_in_which_no_test_ran_is_not_a_success()
     {
         Answer("""{"success":true,"exitCode":0,"repo":"octo-a","totals":{"total":0,"passed":0,"failed":0,"skipped":0},"projects":[{"project":"A.Tests","state":"skipped","success":true,"note":"no failed test in the last result","total":0,"passed":0,"failed":0,"skipped":0,"failedTests":[]}]}""");

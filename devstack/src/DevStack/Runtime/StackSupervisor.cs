@@ -285,6 +285,9 @@ public sealed class StackSupervisor
     /// <summary>The lanes lane_remove is removing right now: nothing new starts on them (AB#9673).</summary>
     public LaneRemovals Removals { get; } = new();
 
+    /// <summary>The lane_create and lane_add_repo calls that run right now: one per lane, no new job of the lane meanwhile (AB#9808).</summary>
+    public LaneChanges Changes { get; } = new();
+
     public SlotRegistry Registry { get; }
 
     internal SlotValidator Validator { get; }

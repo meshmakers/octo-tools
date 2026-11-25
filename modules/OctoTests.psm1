@@ -791,7 +791,8 @@ function Invoke-OctoPesterTest {
         The one place that starts the Pester tests of a repository (tests mock it), in a pwsh of its own - the tests change
         process-wide state: tests/Invoke-ParallelPester.ps1 when the repository has it, else Invoke-Pester. Writes
         { total, passed, failed, skipped, success, failedTests[{ name, message }] } as JSON to $resultFile and every line of
-        output to the log (each finished test file prints one, which the idle watchdog of octo-devstack counts as progress).
+        output to the log. With -PassThru Invoke-ParallelPester.ps1 prints no line per test file, so the log stays quiet until
+        the run ends: a Pester run longer than octo-devstack's idle limit would be stopped by its watchdog.
         Returns the exit code: 0 only when the run succeeded.
     #>
     param(

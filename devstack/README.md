@@ -645,7 +645,8 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
 - **rerunFailed** reruns the failed tests of one job: the newest finished test run of the repository in that lane; only its
   projects with failed tests run, and a note names the job. Refused before a job exists when that run had no failed test
   (the refusal names an earlier run that had), when octo-devstack knows no such run, or while a run of the repository
-  waits or runs. A run in which no test ran is failed, never succeeded.
+  waits or runs. A run in which no test ran is failed, never succeeded. Pester runs whole test files: its failed tests are
+  not run again (the note says so); when only Pester failed, rerunFailed is refused and names `project="Pester"` without it.
 - **Stopped projects**: a project ended by `job_cancel` is `canceled`, one the idle watchdog or the timeout ended
   `terminated` (never `error`); the summary names it and what the finished projects passed before. VSTest projects run
   with `--logger console;verbosity=normal`: a line per test in the project's log, which the idle watchdog counts as
@@ -1020,7 +1021,8 @@ lane_remove(owner, session, lane="ab8625-enum-null")
   away again (`Remove-OctoEnvironment`, its `.octo` folder, its feature branches) and answers with a failure that names why;
   when that roll-back fails too, the notes name the lane folder and branches that are left to remove by hand.
   `lane_create` and `lane_add_repo` run to their end when the caller's MCP call times out (AB#9808): the caller only
-  loses the answer, `lane_list` shows the lane, its repos and its reserved slot.
+  loses the answer, `lane_list` shows the lane, its repos and its reserved slot. While one of them runs, a second
+  `lane_create` / `lane_add_repo` of that lane and a new `lane_build` / `lane_test` of it are refused with who runs what since when.
   A `stack_start` that fails gives back the lease it took for the call when nothing of it runs (a lease held before stays).
   `lane_create` reserves the environment's slot (index, port offset, prefix in the answer); `lane_list` shows the reserved slot or,
   for an environment created outside the daemon, the slot the next start would get. A fresh lane stack sets itself up

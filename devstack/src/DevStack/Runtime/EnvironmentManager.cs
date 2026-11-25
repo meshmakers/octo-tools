@@ -188,6 +188,8 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             throw new InvalidOperationException($"Add-OctoEnvironmentRepo of the daemon's octo-tools takes no -{(role != null && !caps.AddRepoRole ? "role" : "addAffected")}.");
         }
 
+        // AB#9808: one change of a lane at a time; no new job of the lane starts while it runs (it may outlive its caller's call).
+        using var change = supervisor.Changes.Begin(info.Name, "lane_add_repo", owner);
         var (waited, waitedFor, stillActive) = await WaitForJobsAsync(env, cancellationToken);
         if (stillActive.Count > 0)
         {
@@ -454,6 +456,8 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             throw new InvalidOperationException($"lane_create needs the cmdlet {EnvironmentCapabilities.Unavailable(probed, "New-OctoEnvironment")}.");
         }
 
+        // AB#9808: a second lane_create of the same name while the first runs (its caller timed out and asked again) is refused.
+        using var change = supervisor.Changes.Begin(name, "lane_create", owner);
         if (EnvironmentDiscovery.Discover(config).Any(e => e.Name == name))
         {
             throw new InvalidOperationException($"Lane '{name}' exists already (lane_list).");

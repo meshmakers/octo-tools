@@ -454,6 +454,7 @@ public sealed partial class BuildQueue : IBuildGuard
                 ]
             };
         }
+        _supervisor.Changes.Refuse(request.Environment); // AB#9808: no build or test run of a lane that lane_create / lane_add_repo is changing
         var planned = await _planner.PlanAsync(request, forPlanTool: false, cancellationToken);
         string? rerunNote = null;
         if (request.Kind == BuildKind.Test && request.RerunFailed)

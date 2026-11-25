@@ -101,6 +101,45 @@ public sealed partial class EnvironmentTests
     }
 
     [Fact]
+    public async Task A_lane_change_that_outlived_its_caller_refuses_a_second_change_and_new_jobs_of_the_lane_until_it_ended()
+    {
+        var (queue, supervisor, store) = CreateQueue();
+        Env("ab1-one", ["octo-a"]);
+        var release = new TaskCompletionSource();
+        _fake.Build = async (body, _, _) =>
+        {
+            await release.Task;
+            return FakePwsh.Ok(FakePwsh.Command(body), """{"success":true,"exitCode":0}""");
+        };
+        var manager = Manager(queue, supervisor, store);
+
+        var first = manager.AddRepoAsync("agent-1", "ab1-one", "octo-b", null, "consumer", true, false, Ct);
+        await WaitUntilAsync(() => _fake.BuildCalls.Any(c => c.StartsWith("Add-OctoEnvironmentRepo", StringComparison.Ordinal)));
+
+        var again = () => manager.AddRepoAsync("agent-1", "ab1-one", "octo-b", null, "consumer", true, false, Ct);
+        (await again.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .Contain("Lane 'ab1-one' is being changed: lane_add_repo of 'agent-1' runs since").And.Contain("lane_list shows its result");
+        var build = () => queue.EnqueueAsync(new BuildRequest { Owner = "agent-1", Kind = BuildKind.Env, Environment = "ab1-one" }, Ct);
+        (await build.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Contain("is being changed: lane_add_repo");
+        _fake.BuildCalls.Count(c => c.StartsWith("Add-OctoEnvironmentRepo", StringComparison.Ordinal)).Should().Be(1, "the second call started nothing");
+
+        release.SetResult();
+        (await first).Success.Should().BeTrue();
+        supervisor.Changes.Of("ab1-one").Should().BeNull("the mark ends with the call");
+        (await manager.AddRepoAsync("agent-1", "ab1-one", "octo-c", null, "consumer", false, false, Ct)).Success.Should().BeTrue();
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var i = 0; i < 500 && !condition(); i++)
+        {
+            await Task.Delay(10);
+        }
+
+        condition().Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Lane_build_warns_about_stale_base_lane_packages_from_the_dry_run()
     {
         var (queue, _, _) = CreateQueue();

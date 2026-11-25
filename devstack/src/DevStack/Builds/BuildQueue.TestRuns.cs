@@ -64,8 +64,19 @@ public sealed partial class BuildQueue
                 $"{where} (failed there: {string.Join(", ", failed)}).");
         }
 
+        // Pester runs whole test files (the cmdlet skips it on -rerunFailed): its failed tests are not run again, and the answer says so.
+        var pester = (last.Snapshot().Tests ?? []).Where(t => t.Runner == "pester" && chosen.Contains(t.Project)).Select(t => t.Project).ToList();
+        var wholeFiles = pester.Count == 0 ? ""
+            : $" {string.Join(", ", pester)} failed too but runs whole test files: run it with project=\"{pester[0]}\" and without rerunFailed.";
+        chosen = chosen.Except(pester).ToList();
+        if (chosen.Count == 0)
+        {
+            throw new InvalidOperationException($"rerunFailed refused, nothing was queued: the failed tests of {last.Id}, the last test run of {repo} in {where}, " +
+                                                $"are Pester tests.{wholeFiles}");
+        }
+
         var count = FailedCount(last, chosen);
-        return (request with { Projects = chosen }, $"rerunFailed: runs the {count} failed test(s) of {last.Id} again, in {string.Join(", ", chosen)}.");
+        return (request with { Projects = chosen }, $"rerunFailed: runs the {count} failed test(s) of {last.Id} again, in {string.Join(", ", chosen)}.{wholeFiles}");
     }
 
     /// <summary>Whether a job tests the same repository folder in the same lane as <paramref name="planned"/>.</summary>
