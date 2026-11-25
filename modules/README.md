@@ -37,8 +37,8 @@ package-cache folder differs from `<lane>/nuget`; found with `Get-OctoStaleGloba
 Every finding carries `fix` (the smallest `Invoke-BuildRange -from <producer> -to <producer>` or the `git ... switch main`
 command) and `fixWithConsumers` (the range up to the last repository that references what is rebuilt); with `-BuildLog`
 the fix ends at the repository whose restore failed. When the checked lane is not the profile's own checkout (`-branch <lane>`,
-or a `-LaneRoot` below `$rootPath`) the printed commands carry `-branch <lane>`. The branch-name check is skipped in a feature
-environment (`<lane>/.octo/environment.json`, its repositories are on feature branches by design); a detached HEAD is still flagged.
+or a `-LaneRoot` below `$rootPath`) the printed commands carry `-branch <lane>`. The `branch` check is not run in a feature
+environment (`<lane>/.octo/environment.json`): its repositories are on feature branches or detached by design. `-branch` and `-LaneRoot` exclude each other. `-BuildLog` reads the `NU110x` code and the package id, so a translated message text works.
 
 `-Json` writes the standard envelope (`schemaVersion`, `command` = `Test-OctoBuildChain`, `timestamp`, `data`):
 `data` = `{ success, exitCode, laneRoot, laneFeed, packageCaches[], elapsedSeconds, summary{ blocking, warning, recommendedFix },

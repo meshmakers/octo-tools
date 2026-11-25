@@ -153,9 +153,13 @@ function Read-OctoChainBuildLog {
     $result = [System.Collections.Generic.List[object]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($line in [IO.File]::ReadLines($path)) {
-        if ($line -notmatch 'error\s+(?<code>NU110[123])\s*:\s*Unable to find (?:a stable )?package\s+(?<id>[A-Za-z0-9_.\-]+)') { continue }
-        $id = $Matches['id'].TrimEnd('.')
+        # The text of the message is translated with the UI culture of the SDK; the code is not. English text names the
+        # package after "package"; otherwise the first Meshmakers.* token of the line is taken.
+        if ($line -notmatch 'error\s+(?<code>NU110[123])\s*:') { continue }
         $code = $Matches['code']
+        if ($line -match 'Unable to find (?:a stable )?package\s+(?<id>[A-Za-z0-9_.\-]+)') { $id = $Matches['id'].TrimEnd('.') }
+        elseif ($line -match '(?<id>Meshmakers\.[A-Za-z0-9_.\-]*[A-Za-z0-9_])') { $id = $Matches['id'] }
+        else { continue }
         $consumer = ''
         $normalized = $line -replace '\\', '/'
         foreach ($name in $repoNames) {
@@ -178,8 +182,9 @@ function Test-OctoBuildChain {
         variable except the lane paths (checkout, nuget feed, package cache). The fixes are only printed, never run.
 
         Checks (finding "check" values):
-          branch         a chain repository is not on main (feature branch or detached HEAD). Blocking. Skipped for the branch name in a
-                         feature environment (<lane>/.octo/environment.json; detached HEAD is still flagged).
+          branch         a chain repository is not on main (feature branch or detached HEAD). Blocking; a warning for a
+                         repository that builds nothing (no solution, no build.ps1). Not checked in a feature environment
+                         (<lane>/.octo/environment.json): its repositories are on feature branches or detached by design.
           dirty          a chain repository has uncommitted changes (the build uses them). Warning.
           missingPackage a package a chain repository produces is not in <lane>/nuget (the NU1101 case). Blocking.
           outdatedPackage the package in <lane>/nuget is older than the last commit of its repository. Warning.
@@ -210,9 +215,11 @@ function Test-OctoBuildChain {
 
     .PARAMETER Json
         Write one JSON document (envelope of OctoJsonOutput.psm1, command "Test-OctoBuildChain") instead of colored text.
-        data: { success, exitCode, laneRoot, laneFeed, packageCaches[], summary{ blocking, warning, recommendedFix },
+        data: { success, exitCode, laneRoot, laneFeed, packageCaches[], elapsedSeconds,
+        summary{ blocking, warning, recommendedFix },
         repositories[]{ name, group, branch, detached, dirty, dirtyCount, commit },
-        findings[]{ id, check, severity, repo, package, reason, message, fix, fixWithConsumers } }.
+        findings[]{ id, check, severity (blocking|warning), repo, package, packages[], reason, message, fix,
+        fixWithConsumers } }.
 
     .EXAMPLE
         Test-OctoBuildChain
@@ -228,6 +235,7 @@ function Test-OctoBuildChain {
     )
 
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($branch -ne '' -and $LaneRoot -ne '') { throw 'Test-OctoBuildChain: use either -branch or -LaneRoot, not both.' }
     if ($LaneRoot -ne '') { $branchRootPath = [IO.Path]::GetFullPath($LaneRoot) }
     else { $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath }
     $branchRootPath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
@@ -241,7 +249,8 @@ function Test-OctoBuildChain {
     $order = @(Get-OctoBuildOrder -branchRootPath $branchRootPath -excludeFrontend $true)
     $states = @($order | ForEach-Object { Get-OctoChainRepoState -repo $_ })
     $index = Get-OctoChainPackageIndex -repos $order
-    # A feature environment (<lane>/.octo/environment.json) holds its feature branches by design: no branch check there.
+    # A feature environment (<lane>/.octo/environment.json) holds feature branches and detached consumer worktrees by
+    # design (New-OctoEnvironment): no branch check there.
     $isEnvironment = Test-Path -LiteralPath (Join-Path (Join-Path $branchRootPath '.octo') 'environment.json') -PathType Leaf
     $findings = [System.Collections.Generic.List[object]]::new()
     $add = {
@@ -270,7 +279,7 @@ function Test-OctoBuildChain {
             & $add 'notGit' 'warning' $state.name '' '' "$($state.name) is not a git checkout; branch and age cannot be checked." ''  ''
             continue
         }
-        if ($state.detached -or (-not $isEnvironment -and $state.branch -ne 'main')) {
+        if (-not $isEnvironment -and ($state.detached -or $state.branch -ne 'main')) {
             $where = if ($state.detached) { "detached HEAD at $($state.commit)" } else { "branch '$($state.branch)'" }
             $switch = "git -C '$($state.path)' switch main"
             $reason = if ($state.detached) { 'detached' } else { 'featureBranch' }

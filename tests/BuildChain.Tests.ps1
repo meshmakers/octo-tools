@@ -241,6 +241,15 @@ Describe 'Test-OctoBuildChain: -BuildLog (AC 4)' {
         $data.summary.recommendedFix | Should -Be 'Invoke-BuildRange -from octo-sdk -to octo-asset-repo-services'
     }
 
+    It 'maps a build log whose message text is translated (only the NU code and the package id are language independent)' {
+        $fake = New-FakeLane
+        $finding = @((Invoke-Doctor $fake @{ BuildLog = (Join-Path $script:Fixtures 'german.buildlog') }).findings | Where-Object check -eq 'buildLog')
+        $finding.Count | Should -Be 1
+        $finding[0].package | Should -Be 'Meshmakers.Octo.Sdk.Common'
+        $finding[0].reason | Should -Be 'NU1101'
+        $finding[0].repo | Should -Be 'octo-sdk'
+    }
+
     It 'handles NU1101 and reports a repeated line once' {
         $fake = New-FakeLane
         $findings = @((Invoke-Doctor $fake @{ BuildLog = (Join-Path $script:Fixtures 'nu1101.buildlog') }).findings | Where-Object check -eq 'buildLog')
@@ -324,14 +333,17 @@ Describe 'Test-OctoBuildChain: lane of the printed commands and feature environm
         (Invoke-Doctor $fake).findings | Where-Object check -eq 'branch' | Should -BeNullOrEmpty
     }
 
-    It 'still flags a detached HEAD in a feature environment' {
+    It 'does not flag the detached consumer worktrees of a feature environment' {
         $fake = New-FakeLane
         New-Item -ItemType Directory -Path (Join-Path $fake.Lane '.octo') | Out-Null
         Set-Content -Path (Join-Path $fake.Lane '.octo/environment.json') -Value '{ "name": "ab1", "repos": [] }'
         & git -C (Join-Path $fake.Lane 'octo-sdk') checkout -q --detach 2>&1 | Out-Null
-        $finding = @((Invoke-Doctor $fake).findings | Where-Object check -eq 'branch')
-        $finding.Count | Should -Be 1
-        $finding[0].reason | Should -Be 'detached'
+        (Invoke-Doctor $fake).findings | Where-Object check -eq 'branch' | Should -BeNullOrEmpty
+    }
+
+    It 'refuses -branch together with -LaneRoot' {
+        $fake = New-FakeLane
+        { Test-OctoBuildChain -LaneRoot $fake.Lane -branch 'x' -GlobalPackagesPath @($fake.Cache) -Json } | Should -Throw '*either -branch or -LaneRoot*'
     }
 }
 
@@ -394,16 +406,13 @@ Describe 'Test-OctoBuildChain: read-only guarantee (AC 5)' {
 
     It 'prints no environment variable value (only lane paths)' {
         $fake = New-FakeLane
-        $savedNuget = [Environment]::GetEnvironmentVariable('NUGET_PACKAGES')
         [Environment]::SetEnvironmentVariable('OCTO_DOCTOR_SENTINEL', 'sentinel-value-12345')
-        [Environment]::SetEnvironmentVariable('NUGET_PACKAGES', (Join-Path $fake.Lane 'env-cache'))
         try {
             $json = Test-OctoBuildChain -LaneRoot $fake.Lane -GlobalPackagesPath @($fake.Cache) -Json | Out-String
             $text = Test-OctoBuildChain -LaneRoot $fake.Lane -GlobalPackagesPath @($fake.Cache) 6>&1 | Out-String
         }
         finally {
             [Environment]::SetEnvironmentVariable('OCTO_DOCTOR_SENTINEL', $null)
-            [Environment]::SetEnvironmentVariable('NUGET_PACKAGES', $savedNuget)
         }
         ($json + $text) | Should -Not -Match 'sentinel-value-12345'
     }
