@@ -2077,4 +2077,4 @@ function Invoke-OctoBuildRangeCore {
     $global:LASTEXITCODE = 0
 }
 
-Export-ModuleMember -Function @('Invoke-BuildRange', 'Invoke-OctoBuildRangeRepoStep')
+Export-ModuleMember -Function @('Invoke-BuildRange', 'Invoke-OctoBuildRangeRepoStep', 'Get-OctoStaleGlobalPackages')

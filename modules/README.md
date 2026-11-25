@@ -16,6 +16,40 @@ Removes branches from all `octo-*` repositories and switches back to main.
 - `Remove-OctoBranch.psm1` - PowerShell Module
 - `Remove-OctoBranch.psd1` - Module Manifest
 
+### Test-OctoBuildChain
+Read-only "build doctor" for the base lane (AB#6350): why does the DebugL build fail (NU1101/NU1102) and which is the
+smallest `Invoke-BuildRange` that fixes it. It writes nothing, runs only read-only git commands (never a fetch), prints
+no environment variable except lane paths and only prints the fixes, it never runs them.
+
+- `Test-OctoBuildChain.psm1` - PowerShell Module (imported by `profile.ps1`)
+
+```powershell
+Test-OctoBuildChain                                  # base lane of the profile (-branch <lane> or -LaneRoot <path> for another)
+Test-OctoBuildChain -BuildLog ./build.log            # also map NU1101/NU1102/NU1103 of a failed build to the producing repository
+Test-OctoBuildChain -Json | ConvertFrom-Json         # machine-readable; $LASTEXITCODE is 1 when a blocking finding exists
+```
+
+Checks (`findings[].check`): `branch` (a chain repository is not on `main`, or detached; blocking when it builds code),
+`dirty` (uncommitted changes), `missingPackage` (a 999.0.0 package a repository produces is not in `<lane>/nuget`, the
+NU1101 case; blocking), `outdatedPackage` (older than the last commit of its repository), `staleCache` (a 999.0.0
+package-cache folder differs from `<lane>/nuget`; found with `Get-OctoStaleGlobalPackages`, fix carries
+`-purgeStaleCache`), `buildLog` (`-BuildLog`; blocking for a `Meshmakers.*` package), `notGit`.
+Every finding carries `fix` (the smallest `Invoke-BuildRange -from <producer> -to <producer>` or the `git ... switch main`
+command) and `fixWithConsumers` (the range up to the last repository that references what is rebuilt); with `-BuildLog`
+the fix ends at the repository whose restore failed. When the checked lane is not the profile's own checkout (`-branch <lane>`,
+or a `-LaneRoot` below `$rootPath`) the printed commands carry `-branch <lane>`. The `branch` check is not run in a feature
+environment (`<lane>/.octo/environment.json`): its repositories are on feature branches or detached by design. `-branch` and `-LaneRoot` exclude each other. `-BuildLog` reads the `NU110x` code and the package id, so a translated message text works.
+
+`-Json` writes the standard envelope (`schemaVersion`, `command` = `Test-OctoBuildChain`, `timestamp`, `data`):
+`data` = `{ success, exitCode, laneRoot, laneFeed, packageCaches[], elapsedSeconds, summary{ blocking, warning, recommendedFix },
+repositories[]{ name, group, branch, detached, dirty, dirtyCount, commit },
+findings[]{ id, check, severity (blocking|warning), repo, package, packages[], reason, message, fix, fixWithConsumers } }`.
+`summary.recommendedFix` is one `Invoke-BuildRange` slice over every affected producer.
+
+Not duplicated here (octo-devstack, MCP): `build_plan` (predicted build/skip per repository), `stack_attention` (failed
+builds, lane problems, profile drift), `setup_check` (machine prerequisites). Lane conflicts are solved by feature
+environments (AB#8700) and are not checked. Tests: `tests/BuildChain.Tests.ps1`.
+
 ## Installation
 
 Both modules are automatically loaded when you source the Octo profile:
