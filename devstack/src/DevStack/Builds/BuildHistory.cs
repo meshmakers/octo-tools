@@ -40,20 +40,25 @@ public sealed class BuildHistory
         _series = Load(_file, Path.Combine(paths.StateDirectory, LegacyFileName));
     }
 
-    private static string Key(string kind, string repo, string? project, string configuration) =>
-        $"{kind}|{repo.ToLowerInvariant()}|{project?.ToLowerInvariant() ?? ""}|{configuration}";
+    // A test project that compiles first takes far longer than one that runs on its last build: two series, never mixed.
+    private static string Key(string kind, string repo, string? project, string configuration, bool? compilesFirst = null) =>
+        $"{kind}|{repo.ToLowerInvariant()}|{project?.ToLowerInvariant() ?? ""}|{configuration}" +
+        (compilesFirst switch { true => "|compiles", false => "|prebuilt", null => "" });
 
     private static string LaneKey(string lane) => PathScope.Normalize(lane).TrimEnd(Path.DirectorySeparatorChar);
 
     /// <summary>A repository built successfully in <paramref name="lane" />.</summary>
     public void Record(string lane, string repo, string configuration, double seconds, DateTimeOffset? at = null) =>
-        Add(DurationKind.Build, lane, repo, null, configuration, seconds, at);
+        Add(DurationKind.Build, lane, repo, null, configuration, null, seconds, at);
 
-    /// <summary>A test project of <paramref name="repo" /> ran to its end (passed or failed) in an unfiltered test run.</summary>
-    public void RecordTest(string lane, string repo, string project, string configuration, double seconds, DateTimeOffset? at = null) =>
-        Add(DurationKind.Test, lane, repo, project, configuration, seconds, at);
+    /// <summary>
+    ///     A test project of <paramref name="repo" /> ran to its end (passed or failed) in an unfiltered test run;
+    ///     <paramref name="compilesFirst" />: whether it compiled before it ran (null when the cmdlet did not say).
+    /// </summary>
+    public void RecordTest(string lane, string repo, string project, bool? compilesFirst, string configuration, double seconds, DateTimeOffset? at = null) =>
+        Add(DurationKind.Test, lane, repo, project, configuration, compilesFirst, seconds, at);
 
-    private void Add(string kind, string lane, string repo, string? project, string configuration, double seconds, DateTimeOffset? at)
+    private void Add(string kind, string lane, string repo, string? project, string configuration, bool? compilesFirst, double seconds, DateTimeOffset? at)
     {
         if (seconds <= 0 || double.IsNaN(seconds) || string.IsNullOrWhiteSpace(repo))
         {
@@ -62,10 +67,10 @@ public sealed class BuildHistory
 
         lock (_lock)
         {
-            var key = Key(kind, repo, project, configuration);
+            var key = Key(kind, repo, project, configuration, compilesFirst);
             if (!_series.TryGetValue(key, out var series))
             {
-                _series[key] = series = new Series { Kind = kind, Repo = repo, Project = project, Configuration = configuration };
+                _series[key] = series = new Series { Kind = kind, Repo = repo, Project = project, Configuration = configuration, CompilesFirst = compilesFirst };
             }
 
             series.Samples.Add(new Sample { At = at ?? DateTimeOffset.Now, Seconds = Math.Round(seconds, 1), Lane = LaneKey(lane) });
@@ -130,12 +135,15 @@ public sealed class BuildHistory
         return Math.Round(rest);
     }
 
-    /// <summary>What is usual for a repository build (project null) or a test project; null when nothing was recorded.</summary>
-    public DurationStat? Typical(string kind, string repo, string? project, string configuration)
+    /// <summary>
+    ///     What is usual for a repository build (project null) or a test project that compiles first or not
+    ///     (<paramref name="compilesFirst" />); null when nothing was recorded.
+    /// </summary>
+    public DurationStat? Typical(string kind, string repo, string? project, string configuration, bool? compilesFirst = null)
     {
         lock (_lock)
         {
-            return _series.TryGetValue(Key(kind, repo, project, configuration), out var series) && series.Samples.Count > 0 ? Stat(series) : null;
+            return _series.TryGetValue(Key(kind, repo, project, configuration, compilesFirst), out var series) && series.Samples.Count > 0 ? Stat(series) : null;
         }
     }
 
@@ -164,7 +172,7 @@ public sealed class BuildHistory
         var p90 = Percentile(values, 90);
         var last = series.Samples[^1];
         return new DurationStat(series.Kind, series.Repo, series.Project, series.Configuration, values.Count, Math.Round(median, 1), Math.Round(p90, 1),
-            values.Min(), values.Max(), last.Seconds, last.At, Limit(values.Count, median, p90));
+            values.Min(), values.Max(), last.Seconds, last.At, Limit(values.Count, median, p90)) { CompilesFirst = series.CompilesFirst };
     }
 
     /// <summary>Nearest-rank percentile of a non-empty list.</summary>
@@ -182,14 +190,19 @@ public sealed class BuildHistory
             if (File.Exists(file))
             {
                 var stored = JsonSerializer.Deserialize<HistoryFile>(SharedFile.ReadAllText(file), Json)?.Series ?? [];
-                return stored.Where(s => s.Kind is DurationKind.Build or DurationKind.Test && !string.IsNullOrEmpty(s.Repo))
-                    .GroupBy(s => Key(s.Kind, s.Repo, s.Project, s.Configuration)).ToDictionary(g => g.Key, g => g.First());
+                // A damaged or hand-edited file may hold nulls: such entries are dropped, never a reason to fail.
+                var series = stored.OfType<Series>()
+                    .Where(s => s.Kind is DurationKind.Build or DurationKind.Test && !string.IsNullOrEmpty(s.Repo) && s.Configuration != null)
+                    .Select(s => { s.Samples = (s.Samples ?? []).OfType<Sample>().Where(x => x.Seconds > 0).ToList(); return s; })
+                    .ToList();
+                return series.GroupBy(s => Key(s.Kind, s.Repo, s.Project, s.Configuration, s.CompilesFirst)).ToDictionary(g => g.Key, g => g.First());
             }
 
             return File.Exists(legacyFile) ? FromLegacy(legacyFile) : new Dictionary<string, Series>();
         }
-        catch (Exception e) when (e is JsonException or IOException)
+        catch (Exception)
         {
+            // History is a nice-to-have: whatever is wrong with the file, the daemon starts with an empty one.
             return new Dictionary<string, Series>();
         }
     }
@@ -213,7 +226,7 @@ public sealed class BuildHistory
                 result[k] = series = new Series { Kind = DurationKind.Build, Repo = parts[1], Configuration = parts[2] };
             }
 
-            series.Samples.AddRange(values.Where(v => v > 0).Select(v => new Sample { Seconds = v, Lane = LaneKey(parts[0]) }));
+            series.Samples.AddRange((values ?? []).Where(v => v > 0).Select(v => new Sample { Seconds = v, Lane = LaneKey(parts[0]) }));
         }
 
         foreach (var series in result.Values.Where(s => s.Samples.Count > Keep))
@@ -236,6 +249,10 @@ public sealed class BuildHistory
         public string Repo { get; set; } = "";
         public string? Project { get; set; }
         public string Configuration { get; set; } = "";
+
+        /// <summary>A test project: whether its runs compiled it first (null for a build and when the cmdlet did not say).</summary>
+        public bool? CompilesFirst { get; set; }
+
         public List<Sample> Samples { get; set; } = [];
     }
 
@@ -263,7 +280,9 @@ public static class DurationKind
 ///     What a repository build (kind build) or a test project (kind test, project = the test project of repo) usually takes in
 ///     a configuration, from the last durations of every lane: samples, median, p90, min, max, the last one and when it ended
 ///     (lastAt; absent for durations an earlier daemon recorded without a time), and limitSeconds - a running item beyond it is
-///     overdue and probably hangs (twice p90, at least median + 120 s; absent below three samples).
+///     overdue and probably hangs (twice p90, at least median + 120 s; absent below three samples). compilesFirst (test projects):
+///     true for the runs that compiled the project before running it, false for those that ran on its last build - each its
+///     own row, a running project is compared with the row of its own kind (absent when the cmdlet did not say).
 /// </summary>
 public sealed record DurationStat(
     string Kind,
@@ -280,4 +299,8 @@ public sealed record DurationStat(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     DateTimeOffset? LastAt,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    double? LimitSeconds);
+    double? LimitSeconds)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? CompilesFirst { get; init; }
+}

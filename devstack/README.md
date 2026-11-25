@@ -574,8 +574,10 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   (the next build of the repo deletes `Invoke-Build.log`).
 - **Usual durations and overdue jobs**: the daemon keeps the last 30 durations of every successful repository build
   (across lanes) and of every test project of an unfiltered test run (passed or failed; a run with `filter` or
-  `rerunFailed` runs only a part of a project and is not counted), per repository, test project and configuration
-  (`duration-history.json` in the state folder; the `build-history.json` of earlier daemons is taken over).
+  `rerunFailed` runs only a part of a project and is not counted), per repository, test project and configuration; a
+  test project's runs that compile it first and those on its last build are two series (`compilesFirst`), and a running
+  project is compared with the series of its own kind (`duration-history.json` in the state folder; the
+  `build-history.json` of earlier daemons is taken over, and a damaged file starts an empty history).
   `job_stats(repo?)` lists them slowest first with samples, median, p90, min, max, the last duration and `limitSeconds`
   = twice p90, at least median + 120 s, from three samples on. A running repository or test project beyond its limit is
   **overdue** - it runs far longer than usual and probably hangs: `job_status` marks it in `progress.current` /

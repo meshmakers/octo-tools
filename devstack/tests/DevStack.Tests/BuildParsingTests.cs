@@ -320,13 +320,13 @@ public sealed class BuildParsingTests : IDisposable
         var paths = new DevStackPaths(_checkout.StateDirectory);
         var history = new BuildHistory(paths);
         var at = new DateTimeOffset(2026, 11, 25, 9, 0, 0, TimeSpan.FromHours(1));
-        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", "DebugL", 300, at);
-        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", "DebugL", 280, at);
+        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", null, "DebugL", 300, at);
+        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", null, "DebugL", 280, at);
         history.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL")!.LimitSeconds.Should().BeNull("two durations say too little");
 
         foreach (var s in new[] { 320.0, 310, 290, 330, 305, 295, 315, 600 })
         {
-            history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", "DebugL", s, at.AddMinutes(1));
+            history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", null, "DebugL", s, at.AddMinutes(1));
         }
 
         history.Record(_checkout.Lane, "octo-a", "DebugL", 20);
@@ -343,6 +343,47 @@ public sealed class BuildParsingTests : IDisposable
         stats[1].LimitSeconds.Should().Be(145, "a short build gets at least two minutes more than its median");
         history.Typical(DurationKind.Test, "octo-a", "B.Tests", "DebugL").Should().BeNull();
         history.Typical(DurationKind.Build, "OCTO-A", null, "DebugL").Should().NotBeNull("repo names are compared without case");
+    }
+
+    [Fact]
+    public void A_test_project_that_compiles_first_is_never_compared_with_its_runs_on_the_last_build()
+    {
+        var paths = new DevStackPaths(_checkout.StateDirectory);
+        var history = new BuildHistory(paths);
+        foreach (var s in new[] { 20.0, 21, 22 })
+        {
+            history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", false, "DebugL", s);
+        }
+
+        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", true, "DebugL", 180);
+
+        var reloaded = new BuildHistory(paths);
+        reloaded.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL", compilesFirst: false)
+            .Should().BeEquivalentTo(new { Samples = 3, MedianSeconds = 21.0, LimitSeconds = (double?)141, CompilesFirst = (bool?)false });
+        reloaded.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL", compilesFirst: true)
+            .Should().BeEquivalentTo(new { Samples = 1, MedianSeconds = 180.0, LimitSeconds = (double?)null, CompilesFirst = (bool?)true },
+                "a run that compiles first has its own durations, so a 3 min compile run is not overdue against 20 s runs");
+        reloaded.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL").Should().BeNull("unknown is a third kind");
+        reloaded.Stats().Select(s => s.CompilesFirst).Should().BeEquivalentTo(new bool?[] { true, false });
+    }
+
+    [Fact]
+    public void A_damaged_history_file_starts_an_empty_history_instead_of_failing()
+    {
+        Directory.CreateDirectory(_checkout.StateDirectory);
+        var file = Path.Combine(_checkout.StateDirectory, "duration-history.json");
+        File.WriteAllText(file,
+            """{"SchemaVersion":1,"Series":[null,{"Kind":"build","Repo":"octo-a","Configuration":"DebugL","Samples":[null,{"Seconds":12,"Lane":"/x"}]},{"Kind":"build","Repo":"octo-b","Configuration":"DebugL","Samples":null}]}""");
+
+        var history = new BuildHistory(new DevStackPaths(_checkout.StateDirectory));
+
+        history.Stats().Should().ContainSingle().Which.Should().BeEquivalentTo(new { Repo = "octo-a", Samples = 1 }, "null entries are dropped");
+
+        File.WriteAllText(file, "{ not json");
+        new BuildHistory(new DevStackPaths(_checkout.StateDirectory)).Stats().Should().BeEmpty();
+        File.Delete(file);
+        File.WriteAllText(Path.Combine(_checkout.StateDirectory, "build-history.json"), """{"x|octo-a|DebugL":null}""");
+        new BuildHistory(new DevStackPaths(_checkout.StateDirectory)).Stats().Should().BeEmpty();
     }
 
     [Fact]

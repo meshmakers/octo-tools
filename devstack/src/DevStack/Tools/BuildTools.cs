@@ -289,7 +289,8 @@ public sealed class BuildTools(BuildQueue queue)
 
     [McpServerTool(Name = "job_stats", ReadOnly = true)]
     [Description("Shows how long jobs usually take on this machine, slowest first: per repository build (kind build, every lane) and per test " +
-                 "project of a repository (kind test, unfiltered lane_test / base_test runs only) and configuration - samples (the last 30), " +
+                 "project of a repository (kind test, unfiltered lane_test / base_test runs only; compilesFirst true/false keeps the runs " +
+                 "that compile the project first apart from those on its last build) and configuration - samples (the last 30), " +
                  "medianSeconds, p90Seconds, min, max, the last duration and when it ended, and limitSeconds (twice p90, at least median + " +
                  "120 s; from three samples on). A running repo or test project beyond its limit is overdue: job_status marks it " +
                  "(progress.current/running overdue, typicalSeconds) and stack_attention lists it - it probably hangs. Read-only.")]

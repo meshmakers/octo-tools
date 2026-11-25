@@ -1194,7 +1194,8 @@ function durationsSection() {
         { text: "p90", cls: "num" }, { text: "Max", cls: "num" }, { text: "Last", cls: "num" }, { text: "Overdue after", cls: "num" }];
     const body = rows.map((r) => el("tr", {},
         el("td", { class: "mono" }, r.repo, el("span", { class: "sub", text: r.kind === "test" ? "test run" : "build" })),
-        el("td", { class: "mono", text: r.project || "" }),
+        el("td", { class: "mono" }, r.project || "",
+            r.compilesFirst === true || r.compilesFirst === false ? el("span", { class: "sub", text: r.compilesFirst ? "compiles first" : "on its last build" }) : null),
         el("td", { text: r.configuration }),
         el("td", { class: "num", text: String(r.samples) }),
         el("td", { class: "num", text: seconds(r.medianSeconds) }),
@@ -1205,7 +1206,7 @@ function durationsSection() {
     return section("Usual durations",
         rows.length
             ? fold("durations", `${count(builds, "repository build")}, ${count(rows.length - builds, "test project")}, slowest first`,
-                [note("From the last 30 successful builds per repository (every lane) and the test projects of unfiltered test runs. A running repository or test project beyond \"overdue after\" (twice p90, at least median + 2 minutes; from three samples on) is marked overdue: it probably hangs."),
+                [note("From the last 30 successful builds per repository (every lane) and the test projects of unfiltered test runs; a test project's runs that compile it first and those on its last build are kept apart. A running repository or test project beyond \"overdue after\" (twice p90, at least median + 2 minutes; from three samples on) is marked overdue: it probably hangs."),
                     table(head, body, "compact")])
             : empty("No durations yet: they are recorded when a build or an unfiltered test run ends."));
 }

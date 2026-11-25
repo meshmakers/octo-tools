@@ -1838,7 +1838,7 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
                 { Project = test ? r.Run.Repo : null })
             .ToList();
         BuildCurrentRepo Now(RepoRun run, double seconds, string? phase = null) =>
-            WithTypical(new BuildCurrentRepo(test ? null : run.Repo, seconds, phase) { Project = test ? run.Repo : null }, job);
+            WithTypical(new BuildCurrentRepo(test ? null : run.Repo, seconds, phase) { Project = test ? run.Repo : null }, job, run);
         // Where the time went: the phases summed over every repo that reported them, and the slowest repo.
         var timed = rows.Where(r => r.Run.Seconds != null || r.Run.BuildSeconds != null).ToList();
         var slowest = timed.OrderByDescending(r => r.Run.Seconds ?? r.Run.BuildSeconds).FirstOrDefault();
@@ -1901,7 +1901,7 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
 
         foreach (var run in events.Repos.Where(r => r.TestState is "passed" or "failed" && r.Seconds != null))
         {
-            _history.RecordTest(job.Planned.Lane ?? "", repo, run.Repo, job.Planned.Configuration, run.Seconds!.Value, run.FinishedAt);
+            _history.RecordTest(job.Planned.Lane ?? "", repo, run.Repo, CompilesFirst(run), job.Planned.Configuration, run.Seconds!.Value, run.FinishedAt);
         }
     }
 
@@ -1909,14 +1909,20 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
     private static string? TestedRepo(BuildJob job) =>
         !IsTest(job) ? null : job.Planned.TestFolder is { Length: > 0 } folder ? Path.GetFileName(folder.TrimEnd('/', '\\')) : job.Request.Repo;
 
+    /// <summary>Whether a test project compiled before it ran: its time includes the compile then (null when the cmdlet did not say).</summary>
+    private static bool? CompilesFirst(RepoRun run) => run.NoBuild is { } noBuild ? !noBuild : null;
+
     /// <summary>
     ///     A running repository (or test project) with what it usually takes: typicalSeconds (median), limitSeconds, and overdue
-    ///     once it runs longer than the limit - it probably hangs.
+    ///     once it runs longer than the limit - it probably hangs. A test project is compared with the runs of its own kind
+    ///     (compiling first or not).
     /// </summary>
-    private BuildCurrentRepo WithTypical(BuildCurrentRepo now, BuildJob job)
+    private BuildCurrentRepo WithTypical(BuildCurrentRepo now, BuildJob job, RepoRun run)
     {
         var stat = IsTest(job)
-            ? TestedRepo(job) is { } repo && now.Project is { } project ? _history.Typical(DurationKind.Test, repo, project, job.Planned.Configuration) : null
+            ? TestedRepo(job) is { } repo && now.Project is { } project
+                ? _history.Typical(DurationKind.Test, repo, project, job.Planned.Configuration, CompilesFirst(run))
+                : null
             : now.Repo is { } built ? _history.Typical(DurationKind.Build, built, null, job.Planned.Configuration) : null;
         return stat == null
             ? now
