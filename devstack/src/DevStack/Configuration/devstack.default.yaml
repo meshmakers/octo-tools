@@ -238,7 +238,7 @@ services:
     startAfter: [identityServices]
 
   refineryStudio:
-    description: Data Refinery Studio dev server (ng serve, http://localhost:4200)
+    description: Data Refinery Studio dev server (ng serve, http://localhost:4200); runs in the shared stack only
     repo: octo-frontend-refinery-studio
     exclusive: true
     workingDirectory: .
@@ -247,7 +247,7 @@ services:
     logName: octo-frontend-refinery-studio
 
   frontendLibraries:
-    description: Frontend libraries dev servers (ng serve on 4201/4202)
+    description: Frontend libraries dev servers (ng serve on 4201/4202); runs in the shared stack only
     repo: octo-frontend-libraries
     exclusive: true
     workingDirectory: .
