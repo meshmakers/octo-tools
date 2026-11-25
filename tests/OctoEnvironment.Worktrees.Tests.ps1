@@ -379,6 +379,13 @@ Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
         @($doc.data.baseDrift).Count | Should -Be 0
         @($doc.data.feedSnapshot.rebuildInEnvironment) | Should -Be @('octo-sdk')
         @($doc.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
+        @($doc.data.feedSnapshot.staleProducers[0].consumedBy) | Should -Be @('octo-sdk')   # identity consumes only mm-common
+        # an added consumer in step with origin that reaches the engine (through the sdk) is named too: it is rebuilt
+        # against the stale package just the same
+        $doc = Get-Doc (Add-OctoEnvironmentRepo -env 'env-f' -repo octo-asset-repo-services -role consumer -Json)
+        @($doc.data.feedSnapshot.rebuildInEnvironment) | Should -Be @('octo-sdk')
+        @($doc.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
+        @($doc.data.feedSnapshot.staleProducers[0].consumedBy | Sort-Object) | Should -Be @('octo-asset-repo-services', 'octo-sdk')
 
         # in step with origin, or -localBase: nothing to say
         $doc = Get-Doc (New-OctoEnvironment -env 'env-g' -repos octo-cli -branchName 'feature/g' -Json)

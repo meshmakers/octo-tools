@@ -764,9 +764,10 @@ function Get-OctoEnvironmentFeedSnapshotReport {
             package's commit (Get-OctoPackageSourceCommit), or the base lane checkout's HEAD for a repository without a
             package (a service). Their seeded packages are older than their sources; Invoke-BuildEnvironment rebuilds
             them into the environment feed.
-          - staleProducers: libraries OUTSIDE the environment that an environment repository of rebuildInEnvironment
-            consumes (transitively) and whose package in the feed was built from a commit behind its upstream (the
-            package's commit; the base lane checkout's HEAD when the package names none). The upstream is fetched
+          - staleProducers: libraries OUTSIDE the environment that an environment repository consumes (transitively;
+            checked when rebuildInEnvironment is not empty; consumedBy names every environment repository that reaches
+            it) and whose package in the feed was built from a commit behind its upstream (the package's commit; the
+            base lane checkout's HEAD when the package names none). The upstream is fetched
             first unless -noFetch (a failed fetch uses the ref as last fetched). Their seeded packages can lack what the
             newer consumers need (CS0246, CS1061); nothing in the environment rebuilds them.
         Both are derived from the manifest (every repository of the environment, not only the ones a call added).
@@ -817,8 +818,10 @@ function Get-OctoEnvironmentFeedSnapshotReport {
                     if (-not $producersOf[$edge.Consumer].Contains($producer)) { $producersOf[$edge.Consumer].Add($producer) }
                 }
             }
+            # Every environment repository is rebuilt against the feed, not only the newer ones: all of them that reach a stale
+            # producer are named (AB#9808 - a consumer added in step with origin fails with CS1061 just the same).
             $consumedBy = @{}
-            foreach ($name in $rebuild) {
+            foreach ($name in @($inEnvironment | Where-Object { -not (Test-OctoEnvironmentToolRepo -repo $_) })) {
                 $seen = @{ $name = $true }
                 $queue = [System.Collections.Generic.Queue[string]]::new()
                 $queue.Enqueue($name)
