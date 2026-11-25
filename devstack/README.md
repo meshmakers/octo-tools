@@ -1019,6 +1019,8 @@ lane_remove(owner, session, lane="ab8625-enum-null")
   and reserves it after; when the reservation still fails (no index fits any more), it takes the fresh lane
   away again (`Remove-OctoEnvironment`, its `.octo` folder, its feature branches) and answers with a failure that names why;
   when that roll-back fails too, the notes name the lane folder and branches that are left to remove by hand.
+  `lane_create` and `lane_add_repo` run to their end when the caller's MCP call times out (AB#9808): the caller only
+  loses the answer, `lane_list` shows the lane, its repos and its reserved slot.
   A `stack_start` that fails gives back the lease it took for the call when nothing of it runs (a lease held before stays).
   `lane_create` reserves the environment's slot (index, port offset, prefix in the answer); `lane_list` shows the reserved slot or,
   for an environment created outside the daemon, the slot the next start would get. A fresh lane stack sets itself up

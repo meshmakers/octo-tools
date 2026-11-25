@@ -71,6 +71,36 @@ public sealed partial class EnvironmentTests
     }
 
     [Fact]
+    public async Task Lane_create_and_lane_add_repo_finish_their_work_and_reserve_the_slot_when_the_callers_call_is_cancelled()
+    {
+        var (queue, supervisor, store) = CreateQueue();
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        _fake.Build = async (body, _, ct) =>
+        {
+            var command = FakePwsh.Command(body);
+            await caller.CancelAsync(); // the caller's MCP call times out while the cmdlet runs
+            await Task.Delay(50, ct); // a run that observed the caller's token would be killed here
+            if (command == "New-OctoEnvironment")
+            {
+                Env("ab1-slow", ["octo-a"]);
+            }
+
+            return FakePwsh.Ok(command, """{"success":true,"exitCode":0}""");
+        };
+        var manager = Manager(queue, supervisor, store);
+
+        var created = await manager.CreateAsync("agent-1", "ab1-slow", ["octo-a"], "AB#1", null, false, caller.Token);
+
+        created.Success.Should().BeTrue();
+        supervisor.Registry.Known().Should().Contain(k => k.Slot.Name == "ab1-slow", "the slot is reserved although the caller gave up");
+        supervisor.Registry.Predict("ab2-next").Slot.Index.Should().NotBe(created.Environment!.SlotInfo!.Index, "the next lane gets another slot");
+
+        var added = await manager.AddRepoAsync("agent-1", "ab1-slow", "octo-b", null, "consumer", false, false, caller.Token);
+        added.Success.Should().BeTrue();
+        _fake.BuildCalls.Should().Contain("Add-OctoEnvironmentRepo -env 'ab1-slow' -repo 'octo-b' -role 'consumer' -Json");
+    }
+
+    [Fact]
     public async Task Lane_build_warns_about_stale_base_lane_packages_from_the_dry_run()
     {
         var (queue, _, _) = CreateQueue();

@@ -145,6 +145,9 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
     public async Task<EnvironmentCommandResult> AddRepoAsync(string owner, string env, string? repo, string? path, string? role, bool addAffected, bool inPlace,
         CancellationToken cancellationToken)
     {
+        // AB#9808: the work runs to its end when the caller's MCP call times out - a cancelled cmdlet run would leave a half-added
+        // repo; the caller only loses the answer (lane_list shows the result).
+        cancellationToken = CancellationToken.None;
         RequireOwner(owner);
         var config = store.Load();
         var info = EnvironmentDiscovery.Find(config, env);
@@ -437,6 +440,10 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
     public async Task<EnvironmentCommandResult> CreateAsync(string owner, string name, IReadOnlyList<string> repos, string? workItem, string? branchName,
         bool addAffected, CancellationToken cancellationToken, bool skipPackageCacheSeed = false)
     {
+        // AB#9808: the work runs to its end when the caller's MCP call times out (a lane with many repos takes longer than a
+        // teammate's ~60 s): a cancellation between New-OctoEnvironment and the slot reservation left a lane without its slot, and
+        // the next lane_create got the same index. The caller only loses the answer (lane_list shows the lane and its slot).
+        cancellationToken = CancellationToken.None;
         RequireOwner(owner);
         var config = store.Load();
         CheckName(name);
