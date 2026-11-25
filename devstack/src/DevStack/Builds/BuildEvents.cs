@@ -89,6 +89,9 @@ internal sealed class StepEvents
     /// <summary>A test run waits for the machine-wide test lock: who holds it (set by lockWait, cleared by lockAcquired and done).</summary>
     public string? LockWait { get; set; }
 
+    /// <summary>The lock file the run waits for (lockWait.path): its current owner may have changed since the event (AB#9841).</summary>
+    public string? LockPath { get; set; }
+
     public RepoRun Repo(string name)
     {
         var run = Repos.FirstOrDefault(r => string.Equals(r.Repo, name, StringComparison.OrdinalIgnoreCase));
@@ -165,6 +168,7 @@ internal static class BuildEventReader
                     break;
                 case "lockWait":
                     result.LockWait = LockOwner(e["owner"] as JsonObject);
+                    result.LockPath = Str(e["path"]);
                     break;
                 case "lockAcquired":
                     result.LockWait = null;
@@ -294,6 +298,34 @@ internal static class BuildEventReader
         }
 
         return $"{Str(owner["command"]) ?? "a test run"}{(what.Length > 0 ? " of " + what : "")}{(details.Count > 0 ? $" ({string.Join(", ", details)})" : "")}";
+    }
+
+    /// <summary>
+    ///     Who holds the lock file now (AB#9841): the cmdlet sends lockWait once, when the wait starts, and the holder can change
+    ///     while the run waits (one run releases, the next one in front of it takes the lock). Read = false when there is no
+    ///     path or the file cannot be read or names nobody (the caller keeps the holder of the event); Read = true with Owner
+    ///     null when no file exists - the lock is free and the waiting run takes it within its next poll.
+    /// </summary>
+    internal static (bool Read, JsonObject? Owner) CurrentLock(string? lockPath)
+    {
+        if (string.IsNullOrWhiteSpace(lockPath))
+        {
+            return (false, null);
+        }
+
+        if (!File.Exists(lockPath))
+        {
+            return (true, null);
+        }
+
+        try
+        {
+            return JsonNode.Parse(ReadShared(lockPath)) is JsonObject owner && owner["pid"] != null ? (true, owner) : (false, null);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return (false, null);
+        }
     }
 
     public static string ReadShared(string file)

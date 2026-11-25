@@ -1896,7 +1896,9 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
     {
         var finished = snapshot.FinishedAt != null;
         var projects = snapshot.Tests ?? Rows(job).Select(r => FromEvents(r.Run, finished)).ToList();
-        var lockWait = finished ? null : job.Steps.Select(s => job.ReadEvents(s, finished: false).LockWait).FirstOrDefault(w => w != null);
+        // AB#9841: the cmdlet names the holder once, when the wait starts; the lock file says who holds it now.
+        var waiting = finished ? null : job.Steps.Select(s => job.ReadEvents(s, finished: false)).FirstOrDefault(e => e.LockWait != null);
+        var lockWait = waiting == null ? null : LockWaitText(job, waiting);
         var shown = projects
             .Where(p => view.Repo == null || string.Equals(p.Project, view.Repo, StringComparison.OrdinalIgnoreCase))
             .OrderBy(p => p.State is "failed" or "error" or "canceled" or "terminated" ? 0 : p.State == "running" ? 1 : 2)
@@ -1907,8 +1909,62 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
                 : p with { FailedTests = p.FailedTests.Take(FailedTestsPerProjectInStatus).ToList(), MoreFailed = (p.Failed ?? p.FailedTests.Count) - FailedTestsPerProjectInStatus })
             .ToList();
         return new BuildTests(projects.Sum(p => p.Total ?? 0), projects.Sum(p => p.Passed ?? 0), projects.Sum(p => p.Failed ?? 0), projects.Sum(p => p.Skipped ?? 0),
-            lockWait == null ? null : $"waiting for the docker test lock held by {lockWait}", shown,
-            Docker: snapshot.Results.Select(r => DockerOf(r["data"] as JsonObject ?? r)).LastOrDefault(d => d != null));
+            lockWait, shown,
+            Docker: snapshot.Results.Select(r => DockerOf(r["data"] as JsonObject ?? r)).LastOrDefault(d => d != null),
+            Selection: Selection(job.Request, job.Planned.Capabilities?.Tests.IncludeSlow == true));
+    }
+
+    /// <summary>
+    ///     What a run that waits for the docker test lock is waiting for (AB#9841), from the lock file rather than the cmdlet's
+    ///     lockWait event (sent once, when the wait starts): no file - the lock is free and the run takes it with its next poll;
+    ///     the file names this run's own lane - it has just taken it (lockAcquired follows; one job per lane runs at a time); an
+    ///     unreadable file - the holder the event named.
+    /// </summary>
+    private static string LockWaitText(BuildJob job, StepEvents waiting)
+    {
+        var (read, owner) = BuildEventReader.CurrentLock(waiting.LockPath);
+        if (!read)
+        {
+            return $"waiting for the docker test lock held by {waiting.LockWait}";
+        }
+
+        if (owner == null)
+        {
+            return "the docker test lock is free; the run takes it now";
+        }
+
+        return job.Planned.Lane is { } lane && BuildPlanner.Str(owner["lane"]) is { } holderLane &&
+               string.Equals(PathScope.Normalize(holderLane), PathScope.Normalize(lane), StringComparison.OrdinalIgnoreCase)
+            ? "the run takes the docker test lock now"
+            : $"waiting for the docker test lock held by {BuildEventReader.LockOwner(owner)}";
+    }
+
+    /// <summary>
+    ///     What a test run runs (AB#9841), so a filtered run does not look like a whole suite: the projects it names, its filter,
+    ///     a rerun of the failed tests, or every test - without the slow categories unless includeSlow (octo-tools AB#9829).
+    /// </summary>
+    internal static string Selection(BuildRequest request, bool slowLeftOut = true)
+    {
+        var projects = request.Projects.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()).ToList();
+        var scope = projects.Count > 0 ? $"projects {string.Join(", ", projects)}" : "every test project";
+        if (request.RerunFailed)
+        {
+            return $"{scope}: only the tests that failed in the last run" + (string.IsNullOrWhiteSpace(request.Filter) ? "" : $", within filter {request.Filter.Trim()}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Filter))
+        {
+            return $"{scope}: filter {request.Filter.Trim()}";
+        }
+
+        // slowLeftOut: the lane's octo-tools leaves the slow categories out (AB#9829); an older one runs every test anyway.
+        // Frontend and Pester projects never get the exclusion, so the text says it is about the .NET test projects.
+        if (request.IncludeSlow || !slowLeftOut)
+        {
+            return $"{scope}: every test" + (request.IncludeSlow ? ", including the slow categories (includeSlow)" : "");
+        }
+
+        return $"{scope}: every test; .NET test projects without the slow categories Performance and Stress (includeSlow=true runs them)";
     }
 
     /// <summary>Every repo of the job in plan order (then the ones only its events name), with the step it belongs to.</summary>
