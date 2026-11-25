@@ -154,11 +154,14 @@ function Read-OctoChainBuildLog {
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($line in [IO.File]::ReadLines($path)) {
         # The text of the message is translated with the UI culture of the SDK; the code is not. English text names the
-        # package after "package"; otherwise the first Meshmakers.* token of the line is taken.
-        if ($line -notmatch 'error\s+(?<code>NU110[123])\s*:') { continue }
-        $code = $Matches['code']
-        if ($line -match 'Unable to find (?:a stable )?package\s+(?<id>[A-Za-z0-9_.\-]+)') { $id = $Matches['id'].TrimEnd('.') }
-        elseif ($line -match '(?<id>Meshmakers\.[A-Za-z0-9_.\-]*[A-Za-z0-9_])') { $id = $Matches['id'] }
+        # package after "package"; otherwise the first Meshmakers.* token AFTER the error code is taken (the text before
+        # it is the failing project's own path, which may contain Meshmakers.* too).
+        $codeMatch = [regex]::Match($line, 'error\s+(?<code>NU110[123])\s*:')
+        if (-not $codeMatch.Success) { continue }
+        $code = $codeMatch.Groups['code'].Value
+        $messageText = $line.Substring($codeMatch.Index + $codeMatch.Length)
+        if ($messageText -match 'Unable to find (?:a stable )?package\s+(?<id>[A-Za-z0-9_.\-]+)') { $id = $Matches['id'].TrimEnd('.') }
+        elseif ($messageText -match '(?<id>Meshmakers\.[A-Za-z0-9_.\-]*[A-Za-z0-9_])') { $id = $Matches['id'] }
         else { continue }
         $consumer = ''
         $normalized = $line -replace '\\', '/'
@@ -236,7 +239,9 @@ function Test-OctoBuildChain {
 
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     if ($branch -ne '' -and $LaneRoot -ne '') { throw 'Test-OctoBuildChain: use either -branch or -LaneRoot, not both.' }
-    if ($LaneRoot -ne '') { $branchRootPath = [IO.Path]::GetFullPath($LaneRoot) }
+    # A relative -LaneRoot / -BuildLog follows the PowerShell location ($PWD), never the process directory
+    # ([IO.Path]::GetFullPath and [IO.File] resolve against that one, which Set-Location does not change; AB#8954).
+    if ($LaneRoot -ne '') { $branchRootPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LaneRoot) }
     else { $branchRootPath = (Resolve-OctoBranchRootPath -branch $branch).BranchRootPath }
     $branchRootPath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($branchRootPath))
     if (-not (Test-Path -LiteralPath $branchRootPath -PathType Container)) { throw "Test-OctoBuildChain: lane root $branchRootPath does not exist." }
@@ -341,11 +346,12 @@ function Test-OctoBuildChain {
 
     # 4. build log
     if ($BuildLog -ne '') {
-        if (-not (Test-Path -LiteralPath $BuildLog -PathType Leaf)) {
+        $buildLogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BuildLog)
+        if (-not (Test-Path -LiteralPath $buildLogPath -PathType Leaf)) {
             & $add 'buildLog' 'warning' '' '' 'logNotFound' "Build log $BuildLog does not exist." '' ''
         }
         else {
-            foreach ($hit in @(Read-OctoChainBuildLog -path $BuildLog -repoNames @($order | ForEach-Object Name))) {
+            foreach ($hit in @(Read-OctoChainBuildLog -path $buildLogPath -repoNames @($order | ForEach-Object Name))) {
                 $producer = $index.ProducedBy[$hit.PackageId.ToLowerInvariant()]
                 $consumerText = if ($hit.Consumer) { " in $($hit.Consumer)" } else { '' }
                 if ($producer) {
@@ -367,7 +373,10 @@ function Test-OctoBuildChain {
     $recommended = ''
     if ($affected.Count -gt 0) {
         $combined = Get-OctoChainRange -producers $affected -order $order -index $index -consumer @($logConsumers)
-        if ($combined) { $recommended = Format-OctoChainRangeCommand -range $combined -purgeStaleCache:(@($findings | Where-Object check -eq 'staleCache').Count -gt 0) -laneArgument $laneArgument }
+        # -purgeStaleCache only for a blocking stale-cache finding of a producer inside the combined range (a warning such
+        # as noHashFile, or a stale folder no chain repository produces, does not need the purge).
+        $needsPurge = @($findings | Where-Object { $_.check -eq 'staleCache' -and $_.severity -eq 'blocking' -and $_.repo -and $_.repo -in $affected }).Count -gt 0
+        if ($combined) { $recommended = Format-OctoChainRangeCommand -range $combined -purgeStaleCache:$needsPurge -laneArgument $laneArgument }
     }
 
     $global:LASTEXITCODE = if ($blocking -gt 0) { 1 } else { 0 }

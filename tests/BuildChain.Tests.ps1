@@ -354,6 +354,96 @@ Describe 'Test-OctoBuildChain: recommendation' {
         Remove-Item (Join-Path $fake.Nuget 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg')
         (Invoke-Doctor $fake).summary.recommendedFix | Should -Be 'Invoke-BuildRange -from mm-common -to octo-sdk'
     }
+
+    It 'adds -purgeStaleCache for a blocking stale-cache finding of a producer in the range' {
+        $fake = New-FakeLane
+        $cacheDir = Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0'
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+        Set-Content -Path (Join-Path $cacheDir 'meshmakers.octo.sdk.common.999.0.0.nupkg.sha512') -Value 'not-the-hash'
+        (Invoke-Doctor $fake).summary.recommendedFix | Should -Be 'Invoke-BuildRange -from octo-sdk -to octo-sdk -purgeStaleCache'
+    }
+
+    It 'adds no -purgeStaleCache for a missing package plus a stale-cache warning (noHashFile)' {
+        $fake = New-FakeLane
+        Remove-Item (Join-Path $fake.Nuget 'Meshmakers.Common.Shared.999.0.0.nupkg')
+        New-Item -ItemType Directory -Path (Join-Path $fake.Cache 'meshmakers.octo.sdk.common/999.0.0') -Force | Out-Null
+        $data = Invoke-Doctor $fake
+        @($data.findings | Where-Object { $_.check -eq 'staleCache' -and $_.severity -eq 'warning' }).Count | Should -Be 1
+        $data.summary.recommendedFix | Should -Be 'Invoke-BuildRange -from mm-common -to octo-sdk'
+    }
+
+    It 'adds no -purgeStaleCache for a blocking stale folder of a package no chain repository produces' {
+        $fake = New-FakeLane
+        Remove-Item (Join-Path $fake.Nuget 'Meshmakers.Common.Shared.999.0.0.nupkg')
+        $cacheDir = Join-Path $fake.Cache 'meshmakers.unknown.package/999.0.0'
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+        Set-Content -Path (Join-Path $cacheDir 'meshmakers.unknown.package.999.0.0.nupkg.sha512') -Value 'not-the-hash'
+        $data = Invoke-Doctor $fake
+        $data.summary.recommendedFix | Should -Be 'Invoke-BuildRange -from mm-common -to mm-common'
+    }
+}
+
+Describe 'Test-OctoBuildChain: relative paths follow the PowerShell location' {
+    It 'resolves a relative -LaneRoot and -BuildLog against $PWD, not the process directory' {
+        $fake = New-FakeLane
+        Copy-Item -Path (Join-Path $script:Fixtures 'nu1102.buildlog') -Destination (Join-Path $fake.Lane 'build.log')
+        $savedProcessDirectory = [Environment]::CurrentDirectory
+        Push-Location -LiteralPath (Split-Path -Parent $fake.Lane)
+        try {
+            # The process directory is another folder (Set-Location does not change it).
+            [Environment]::CurrentDirectory = [IO.Path]::GetTempPath()
+            $relativeLane = Split-Path -Leaf $fake.Lane
+            $json = Test-OctoBuildChain -LaneRoot $relativeLane -GlobalPackagesPath @($fake.Cache) -BuildLog "$relativeLane/build.log" -Json
+        }
+        finally {
+            Pop-Location
+            [Environment]::CurrentDirectory = $savedProcessDirectory
+        }
+        $data = ($json | ConvertFrom-Json).data
+        [IO.Path]::TrimEndingDirectorySeparator($data.laneRoot) | Should -Be ([IO.Path]::TrimEndingDirectorySeparator($fake.Lane))
+        $finding = @($data.findings | Where-Object check -eq 'buildLog' | Where-Object package -eq 'Meshmakers.Octo.Sdk.Common')
+        $finding.Count | Should -Be 1
+        $finding[0].reason | Should -Be 'NU1102'
+    }
+
+    It 'resolves -LaneRoot . to the current PowerShell location' {
+        $fake = New-FakeLane
+        $savedProcessDirectory = [Environment]::CurrentDirectory
+        Push-Location -LiteralPath $fake.Lane
+        try {
+            [Environment]::CurrentDirectory = [IO.Path]::GetTempPath()
+            $json = Test-OctoBuildChain -LaneRoot . -GlobalPackagesPath @($fake.Cache) -Json
+        }
+        finally {
+            Pop-Location
+            [Environment]::CurrentDirectory = $savedProcessDirectory
+        }
+        $laneRoot = ($json | ConvertFrom-Json).data.laneRoot
+        [IO.Path]::TrimEndingDirectorySeparator($laneRoot) | Should -Be ([IO.Path]::TrimEndingDirectorySeparator($fake.Lane))
+    }
+}
+
+Describe 'Test-OctoBuildChain: build log fallback for translated messages' {
+    It 'takes the package id from the text after the error code, not from a project path that contains Meshmakers.' {
+        $fake = New-FakeLane
+        $finding = @((Invoke-Doctor $fake @{ BuildLog = (Join-Path $script:Fixtures 'german-project-path.buildlog') }).findings | Where-Object check -eq 'buildLog')
+        $finding.Count | Should -Be 1
+        $finding[0].package | Should -Be 'Meshmakers.Octo.Sdk.Common'
+        $finding[0].repo | Should -Be 'octo-sdk'
+        $finding[0].reason | Should -Be 'NU1101'
+    }
+}
+
+Describe 'Test-OctoBuildChain: package caches derived from the lane (no -GlobalPackagesPath)' {
+    It 'uses the lane-local cache of an isolated lane and runs to the end' {
+        $fake = New-FakeLane
+        Set-Content -Path (Join-Path $fake.Lane 'Octo.User.props') -Value '<Project><PropertyGroup><RestorePackagesPath>$(MSBuildThisFileDirectory).nuget-packages</RestorePackagesPath></PropertyGroup></Project>'
+        $json = Test-OctoBuildChain -LaneRoot $fake.Lane -Json
+        $data = ($json | ConvertFrom-Json).data
+        $data.success | Should -BeTrue
+        @($data.packageCaches).Count | Should -BeGreaterThan 0
+        @($data.packageCaches | ForEach-Object { [IO.Path]::TrimEndingDirectorySeparator($_) }) | Should -Contain (Join-Path $fake.Lane '.nuget-packages')
+    }
 }
 
 Describe 'Test-OctoBuildChain: read-only guarantee (AC 5)' {
