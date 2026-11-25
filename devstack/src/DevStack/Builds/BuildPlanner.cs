@@ -1157,6 +1157,8 @@ internal sealed class BuildPlanner(
             {
                 warnings.Add($"Up to {parallel:0} independent repos of the lane build at the same time (maxParallel=1 builds one after the other).");
             }
+            // AB#9808: base-lane packages older than the lane's worktrees (CS0246/CS1061), or a check that could not be made.
+            warnings.AddRange(Runtime.FeedSnapshot.Notes(data["feedSnapshot"], scope.Name));
             if (repos.Count > 0 && repos.All(r => r.Action == "skip"))
             {
                 warnings.Add("Nothing would be built: every repo of the lane is unchanged since its last build, not selected or excluded " +

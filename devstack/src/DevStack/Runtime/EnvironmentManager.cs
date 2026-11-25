@@ -132,7 +132,8 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
 
     /// <summary>
     ///     Add-OctoEnvironmentRepo: a repo as a new feature/consumer worktree (repo), or an existing worktree adopted (path,
-    ///     inPlace keeps it where it is). Refused while the environment builds or a service of that repo runs in its slot.
+    ///     inPlace keeps it where it is). Waits for the lane's running or queued jobs (at most <see cref="AddRepoJobWait" />);
+    ///     refused while a service of that repo runs in its slot.
     /// </summary>
     public async Task<EnvironmentCommandResult> AddRepoAsync(string owner, string env, string? repo, string? path, string? role, bool addAffected, bool inPlace,
         CancellationToken cancellationToken)
@@ -177,7 +178,7 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             throw new InvalidOperationException($"Add-OctoEnvironmentRepo of the daemon's octo-tools takes no -{(role != null && !caps.AddRepoRole ? "role" : "addAffected")}.");
         }
 
-        RefuseWhileBuilding(env);
+        var waited = await WaitForJobsAsync(env, cancellationToken);
         var repoName = repo ?? (Common.PathScope.IsWorktree(fullPath!) ? CheckoutDiscovery.ReadWorktree(Path.Combine(fullPath!, ".git")).Repo : null) ?? Path.GetFileName(fullPath!);
         var services = config.Services.Where(s => string.Equals(s.Value.Repo, repoName, StringComparison.OrdinalIgnoreCase)).Select(s => s.Key).ToHashSet();
         if (supervisor.Registry.Known().Any(k => k.Slot.Name == info.Slot))
@@ -211,8 +212,18 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
         var (success, exitCode, command, data, tail) = await RunAsync(config, string.Join(' ', parts) + " -Json", "Add-OctoEnvironmentRepo", cancellationToken);
         logger?.LogInformation("{Owner} added {Repo} to environment {Env}: {Result}", owner, repoName, env, success ? "ok" : $"failed ({exitCode})");
         var row = success ? (await ListAsync(null, cancellationToken)).FirstOrDefault(r => r.Name == env) : null;
-        return new EnvironmentCommandResult(success, exitCode, command, row, data,
-            success ? [$"Build it: lane_build(owner, lane=\"{env}\")."] : [], success ? null : tail);
+        var notes = FeedSnapshot.Notes((data as JsonObject)?["feedSnapshot"], env);
+        if (waited != null)
+        {
+            notes.Insert(0, waited);
+        }
+
+        if (success)
+        {
+            notes.Add($"Build it: lane_build(owner, lane=\"{env}\").");
+        }
+
+        return new EnvironmentCommandResult(success, exitCode, command, row, data, notes, success ? null : tail);
     }
 
     /// <summary>Sync-OctoEnvironment: refresh the snapshot of the base lane's feed and catalogs; refused like lane_build syncMain=true.</summary>
@@ -254,10 +265,46 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
         return new EnvironmentCommandResult(success, exitCode, command, null, data, [], success ? null : tail);
     }
 
-    private void RefuseWhileBuilding(string env)
+    /// <summary>How long lane_add_repo waits for the lane's running or queued jobs before it refuses (AB#9808).</summary>
+    public TimeSpan AddRepoJobWait { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>How often the wait looks at the lane's jobs again (tests shorten it).</summary>
+    public TimeSpan JobPollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    ///     lane_add_repo while a build or test run of the lane runs or waits: wait for them to end (at most <see cref="AddRepoJobWait" />),
+    ///     instead of refusing at once (AB#9808); still refused when they did not end by then, or the lane is being removed. Returns the
+    ///     note for the answer when it waited, else null.
+    /// </summary>
+    private async Task<string?> WaitForJobsAsync(string env, CancellationToken cancellationToken)
     {
         supervisor.Removals.Refuse(env); // AB#9673: a lane that is being removed takes no change
-        RefuseWhileJobs(env);
+        var waitedFor = queue.ActiveFor(env).Select(b => b.Id).ToList();
+        if (waitedFor.Count == 0)
+        {
+            return null;
+        }
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (queue.ActiveFor(env) is { Count: > 0 } active)
+        {
+            foreach (var id in active.Select(b => b.Id).Where(id => !waitedFor.Contains(id)))
+            {
+                waitedFor.Add(id);
+            }
+
+            if (clock.Elapsed >= AddRepoJobWait)
+            {
+                throw new InvalidOperationException($"Jobs of lane '{env}' still run or wait after {clock.Elapsed.TotalSeconds:0} s " +
+                                                    $"({string.Join(", ", active.Select(b => $"{b.Id} {b.State}"))}); wait for them " +
+                                                    "(job_status(id, waitSeconds)) and call lane_add_repo again, or job_cancel(owner, id, lane) them first.");
+            }
+
+            await Task.Delay(JobPollInterval, cancellationToken);
+        }
+
+        supervisor.Removals.Refuse(env);
+        return $"Waited {clock.Elapsed.TotalSeconds:0} s for the lane's job(s) {string.Join(", ", waitedFor)} to end before adding the repo.";
     }
 
     private void RefuseWhileJobs(string env)
@@ -472,6 +519,7 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             row = Row(created, await supervisor.SummariesAsync());
             // The row carries the manifest already; the cmdlet's copy would double the answer.
             (data as JsonObject)?.Remove("manifest");
+            notes.AddRange(FeedSnapshot.Notes((data as JsonObject)?["feedSnapshot"], name));
             notes.Add($"Edit in the repo paths of lane_list(lane=\"{name}\"). Build it: lane_build(owner, lane=\"{name}\"); test it: lane_test(owner, lane=\"{name}\", repo=...). " +
                       $"Run it: stack_start(owner, lane=\"{name}\", profile=...) - its own stack (slot '{created.Slot}'), lease held by {created.LeaseOwner}.");
         }
