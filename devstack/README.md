@@ -650,7 +650,8 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
   get that filter, xunit.v3 on MTP `--filter-not-trait Category=<name>`; TUnit, frontend and Pester projects run unchanged.
   `includeSlow=true` runs them too (in octo-construction-kit-engine-mongodb they take about 17 of the 25 minutes of
   `Runtime.Engine.MongoDb.IntegrationTests`); a `filter` or `rerunFailed` runs exactly what it names. A project that then
-  runs no test stays `noTests`, and its note names the categories left out. A run with `includeSlow` is no sample for
+  runs no test stays `noTests`, and its note names the categories left out. `job_status` names them per project
+  (`excludedCategories`, left out when none). A run with `includeSlow` is no sample for
   `job_stats`. Refused with an octo-tools without `-includeSlow` (there every test runs anyway).
 - **rerunFailed** reruns the failed tests of one job: the newest finished test run of the repository in that lane; only its
   projects with failed tests run, and a note names the job. Refused before a job exists when that run had no failed test

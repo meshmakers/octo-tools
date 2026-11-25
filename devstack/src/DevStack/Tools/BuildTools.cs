@@ -224,7 +224,8 @@ public sealed class BuildTools(BuildQueue queue)
                  "A test run has 'tests': total/passed/failed/skipped, lockWait (who holds the docker test lock), and per test project (failed " +
                  "ones first) its state (pending|running|passed|failed|error|noTests|noMatch|skipped|notRun; noMatch = the filter matched " +
                  "nothing there, a success; noTests = no test ran without a filter, a failure), runner (vstest|mtp|ng), counts, seconds, " +
-                 "buildReason (why the run compiled the project first), and the failed tests by full name with the first error message and stack frame (20 per project; project=X " +
+                 "buildReason (why the run compiled the project first), excludedCategories (the slow test categories a run without filter " +
+                 "and rerunFailed left out, octo-tools AB#9829; includeSlow=true runs them), and the failed tests by full name with the first error message and stack frame (20 per project; project=X " +
                  "lists all, moreFailed counts the rest), run-level errors; passedListed / includePassed=true for a run started with " +
                  "includePassed; tests.docker (the cmdlet's Docker check) and tests.dockerWarning (the daemon's look at the Docker VM). " +
                  "live=N adds the last N lines of the output (field 'live') of the repo or test project that runs now, or of repo/project=X " +
