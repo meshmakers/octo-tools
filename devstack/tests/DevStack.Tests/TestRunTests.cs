@@ -272,6 +272,26 @@ public sealed class TestRunTests : IDisposable
     }
 
     [Fact]
+    public async Task A_test_run_of_a_worktree_records_under_the_repository_the_cmdlet_reports()
+    {
+        var queue = Create();
+        _checkout.Repo("wt-8625-octo-a");
+        _fake.Build = (body, _, _) =>
+        {
+            Event(body, "plan", "\"repo\":\"octo-a\",\"environment\":null,\"projects\":[{\"project\":\"A.Tests\",\"docker\":false,\"noBuild\":true,\"skip\":false}],\"count\":1");
+            Event(body, "testProjectStart", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":1,\"noBuild\":true");
+            Event(body, "testProjectDone", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":1,\"success\":true,\"state\":\"passed\",\"total\":3,\"passed\":3,\"failed\":0,\"skipped\":0,\"seconds\":4.2");
+            return Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", Passed));
+        };
+
+        await WaitAsync(queue, (await queue.EnqueueAsync(Tests("wt-8625-octo-a"), Ct)).Id);
+
+        queue.DurationStats("octo-a").Should().ContainSingle().Which.Should().BeEquivalentTo(new { Repo = "octo-a", Project = "A.Tests", CompilesFirst = (bool?)false },
+            "a worktree's test run belongs to the repository it tests, not to its folder's name");
+        queue.DurationStats().Should().NotContain(s => s.Repo == "wt-8625-octo-a");
+    }
+
+    [Fact]
     public async Task A_test_project_that_runs_far_longer_than_usual_is_overdue()
     {
         var history = new BuildHistory(new DevStackPaths(_checkout.StateDirectory));

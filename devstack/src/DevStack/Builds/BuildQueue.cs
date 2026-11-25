@@ -1837,8 +1837,9 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
                     Part(r.Run.CatalogSeconds), Part(r.Run.RestoreSeconds), Part(r.Run.CompileSeconds), Part(r.Run.TestRestoreSeconds))
                 { Project = test ? r.Run.Repo : null })
             .ToList();
+        var testedRepo = test ? TestedRepo(job, ReportedTestRepo(job)) : null;
         BuildCurrentRepo Now(RepoRun run, double seconds, string? phase = null) =>
-            WithTypical(new BuildCurrentRepo(test ? null : run.Repo, seconds, phase) { Project = test ? run.Repo : null }, job, run);
+            WithTypical(new BuildCurrentRepo(test ? null : run.Repo, seconds, phase) { Project = test ? run.Repo : null }, job, run, testedRepo);
         // Where the time went: the phases summed over every repo that reported them, and the slowest repo.
         var timed = rows.Where(r => r.Run.Seconds != null || r.Run.BuildSeconds != null).ToList();
         var slowest = timed.OrderByDescending(r => r.Run.Seconds ?? r.Run.BuildSeconds).FirstOrDefault();
@@ -1894,7 +1895,7 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
     /// </summary>
     private void RecordTestDurations(BuildJob job, StepEvents events)
     {
-        if (!string.IsNullOrWhiteSpace(job.Request.Filter) || job.Request.RerunFailed || TestedRepo(job) is not { } repo)
+        if (!string.IsNullOrWhiteSpace(job.Request.Filter) || job.Request.RerunFailed || TestedRepo(job, events.TestRepo) is not { } repo)
         {
             return;
         }
@@ -1905,9 +1906,20 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
         }
     }
 
-    /// <summary>The repository a test run tests (its folder's name), null for a build.</summary>
-    private static string? TestedRepo(BuildJob job) =>
-        !IsTest(job) ? null : job.Planned.TestFolder is { Length: > 0 } folder ? Path.GetFileName(folder.TrimEnd('/', '\\')) : job.Request.Repo;
+    /// <summary>
+    ///     The repository a test run tests, null for a build: the one the cmdlet reported in its plan event (resolved, also for a
+    ///     worktree whose folder is named otherwise, e.g. wt-8625-octo-mesh-adapter), else the requested repo, else the tested
+    ///     folder's name.
+    /// </summary>
+    private static string? TestedRepo(BuildJob job, string? reported) =>
+        !IsTest(job) ? null
+        : !string.IsNullOrWhiteSpace(reported) ? reported
+        : !string.IsNullOrWhiteSpace(job.Request.Repo) ? job.Request.Repo
+        : job.Planned.TestFolder is { Length: > 0 } folder ? Path.GetFileName(folder.TrimEnd('/', '\\')) : null;
+
+    /// <summary>The repository the cmdlet reported for a test run (its plan event), null before the plan or for a build.</summary>
+    private static string? ReportedTestRepo(BuildJob job) =>
+        !IsTest(job) ? null : job.Steps.Select(s => job.ReadEvents(s, finished: false).TestRepo).FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
 
     /// <summary>Whether a test project compiled before it ran: its time includes the compile then (null when the cmdlet did not say).</summary>
     private static bool? CompilesFirst(RepoRun run) => run.NoBuild is { } noBuild ? !noBuild : null;
@@ -1917,10 +1929,10 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
     ///     once it runs longer than the limit - it probably hangs. A test project is compared with the runs of its own kind
     ///     (compiling first or not).
     /// </summary>
-    private BuildCurrentRepo WithTypical(BuildCurrentRepo now, BuildJob job, RepoRun run)
+    private BuildCurrentRepo WithTypical(BuildCurrentRepo now, BuildJob job, RepoRun run, string? testedRepo)
     {
         var stat = IsTest(job)
-            ? TestedRepo(job) is { } repo && now.Project is { } project
+            ? testedRepo is { } repo && now.Project is { } project
                 ? _history.Typical(DurationKind.Test, repo, project, job.Planned.Configuration, CompilesFirst(run))
                 : null
             : now.Repo is { } built ? _history.Typical(DurationKind.Build, built, null, job.Planned.Configuration) : null;
