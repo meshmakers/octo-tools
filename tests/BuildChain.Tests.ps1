@@ -309,9 +309,9 @@ Describe 'Test-OctoBuildChain: lane of the printed commands and feature environm
         try {
             Remove-Item (Join-Path $fake.Nuget 'Meshmakers.Octo.Sdk.Common.999.0.0.nupkg')
             $global:rootPath = $TestDrive
-            (Invoke-Doctor $fake).findings[0].fix | Should -Be "Invoke-BuildRange -from octo-sdk -to octo-sdk -branch $(Split-Path -Leaf $fake.Lane)"
+            @((Invoke-Doctor $fake).findings | Where-Object check -eq 'missingPackage')[0].fix | Should -Be "Invoke-BuildRange -from octo-sdk -to octo-sdk -branch $(Split-Path -Leaf $fake.Lane)"
             $global:rootPath = Join-Path $TestDrive 'elsewhere'
-            (Invoke-Doctor $fake).findings[0].fix | Should -Be 'Invoke-BuildRange -from octo-sdk -to octo-sdk'
+            @((Invoke-Doctor $fake).findings | Where-Object check -eq 'missingPackage')[0].fix | Should -Be 'Invoke-BuildRange -from octo-sdk -to octo-sdk'
         }
         finally { $global:rootPath = $savedRoot }
     }
@@ -322,6 +322,16 @@ Describe 'Test-OctoBuildChain: lane of the printed commands and feature environm
         Set-Content -Path (Join-Path $fake.Lane '.octo/environment.json') -Value '{ "name": "ab1", "repos": [] }'
         & git -C (Join-Path $fake.Lane 'octo-sdk') checkout -q -b 'gerald/AB#1_feature' 2>&1 | Out-Null
         (Invoke-Doctor $fake).findings | Where-Object check -eq 'branch' | Should -BeNullOrEmpty
+    }
+
+    It 'still flags a detached HEAD in a feature environment' {
+        $fake = New-FakeLane
+        New-Item -ItemType Directory -Path (Join-Path $fake.Lane '.octo') | Out-Null
+        Set-Content -Path (Join-Path $fake.Lane '.octo/environment.json') -Value '{ "name": "ab1", "repos": [] }'
+        & git -C (Join-Path $fake.Lane 'octo-sdk') checkout -q --detach 2>&1 | Out-Null
+        $finding = @((Invoke-Doctor $fake).findings | Where-Object check -eq 'branch')
+        $finding.Count | Should -Be 1
+        $finding[0].reason | Should -Be 'detached'
     }
 }
 

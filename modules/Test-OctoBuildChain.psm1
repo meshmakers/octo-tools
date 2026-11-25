@@ -178,8 +178,8 @@ function Test-OctoBuildChain {
         variable except the lane paths (checkout, nuget feed, package cache). The fixes are only printed, never run.
 
         Checks (finding "check" values):
-          branch         a chain repository is not on main (feature branch or detached HEAD). Blocking. Skipped in a
-                         feature environment (<lane>/.octo/environment.json): its repositories are on feature branches by design.
+          branch         a chain repository is not on main (feature branch or detached HEAD). Blocking. Skipped for the branch name in a
+                         feature environment (<lane>/.octo/environment.json; detached HEAD is still flagged).
           dirty          a chain repository has uncommitted changes (the build uses them). Warning.
           missingPackage a package a chain repository produces is not in <lane>/nuget (the NU1101 case). Blocking.
           outdatedPackage the package in <lane>/nuget is older than the last commit of its repository. Warning.
@@ -270,7 +270,7 @@ function Test-OctoBuildChain {
             & $add 'notGit' 'warning' $state.name '' '' "$($state.name) is not a git checkout; branch and age cannot be checked." ''  ''
             continue
         }
-        if (-not $isEnvironment -and ($state.detached -or $state.branch -ne 'main')) {
+        if ($state.detached -or (-not $isEnvironment -and $state.branch -ne 'main')) {
             $where = if ($state.detached) { "detached HEAD at $($state.commit)" } else { "branch '$($state.branch)'" }
             $switch = "git -C '$($state.path)' switch main"
             $reason = if ($state.detached) { 'detached' } else { 'featureBranch' }
