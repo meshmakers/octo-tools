@@ -10,7 +10,8 @@ the local stack daemon in `devstack/` (C#; it has its own `devstack/CLAUDE.md`).
 - `modules/` - one module per cmdlet group, imported by `modules/profile.ps1` (`tests/ProfileImports.Tests.ps1` fails
   for a module the profile does not import). `Invoke-BuildAll` picks the builder per repository: `Invoke-Publish` for
   names containing `frontend`, `Invoke-BuildZenonPlug` (Windows only) for `octo-plug-zenon`, else `Invoke-Build`
-  (`modules/Invoke-BuildAll.psm1:20-26`).
+  (`modules/Invoke-BuildAll.psm1:20-26`); a `build.ps1` in the repository takes precedence over all three
+  (`:9-10`).
 - `tests/` - Pester 5 tests; `docs/testing.md`.
 - `kubernetes/` - manifests and runbooks (`README.md`, `QUICKSTART.md`) of the local kind cluster, the only supported
   local infrastructure: MongoDB and CrateDB as single-replica StatefulSets, RabbitMQ, a local S3 store; host ports in
@@ -65,7 +66,8 @@ deletes it with its data).
 ## Rules
 
 - **This repository is public.** No work item ids, internal hostnames, environment, customer or tenant names, or
-  secrets in docs and in new or changed code comments and test names; remove an existing one when you touch its line
+  secrets in docs and `readme.md` (`Test-OctoAgentDocs` scans both) and in new or changed code comments and test
+  names; remove an existing one when you touch its line
   (several hundred `AB#` ids remain in code comments and tests). Not ids: the format placeholders `AB#..` and
   `AB#<id>` of the `-workItem` parameter and the branch pattern.
 - **Stop processes and delete folders only inside one lane.** Other sessions run builds, services and the shared
@@ -74,7 +76,9 @@ deletes it with its data).
   (`:324-327`; tests `tests/KillDotnet.Tests.ps1:115` and `:138`); never by process name. `Remove-BinAndObjFolders`
   deletes below `-path`, whose default is the current folder (`modules/Remove-BinAndObjFolders.psm1:4`): always pass
   the lane. Exception: `Invoke-KillDotnet` without `-branchRootPath` is the legacy mode that kills every dotnet process
-  on Windows (`docs/repository-and-cleanup-commands.md`).
+  on Windows (`docs/repository-and-cleanup-commands.md`). Second exception: the deprecated docker-compose
+  `Install-OctoInfrastructure` stops every Docker process by name pattern (`Get-Process *docker* | Stop-Process`,
+  `modules/Install-OctoInfrastructure.psm1:194`); it is removed with that infrastructure.
 - **No credential or token reaches a command line, a log or `-Json`.** Feed URLs with `user:password@` are masked by
   `Hide-OctoUrlCredentials` (`modules/OctoBuildOrder.psm1:226`) wherever the build cmdlets print or return their MSBuild
   properties (`modules/Invoke-BuildRange.psm1:517`, `:1490`), and the credentials themselves travel in an owner-only
@@ -83,13 +87,16 @@ deletes it with its data).
   `tests/OctoTenantSweep.Tests.ps1:164-172` also fails when its source gains a file or web cmdlet). `-Json` of
   `Get-RancherKubeConfig` and `Request-BreakGlassKubeConfig` carries metadata only
   (`modules/Get-RancherKubeConfig.psm1:186-195`, `modules/Request-BreakGlassKubeConfig.psm1:282-289`). A new command
-  that handles a token follows the same pattern and adds a canary test like `tests/OctoTenantSweep.Tests.ps1:7`.
-- **Three pieces of logic have a twin elsewhere; change both together.** The start order of
+  that handles a token follows the same pattern and adds a canary test like `tests/OctoTenantSweep.Tests.ps1`
+  (canary defined at `:17`, asserted at `:141-157`).
+- **Four pieces of logic have a twin elsewhere; change both together.** The start order of
   `Start-Octo` (`modules/Start-Octo.psm1:375`) and the built-in `startAfter` of the daemon, pinned by
   `devstack/tests/DevStack.Tests/ConfigurationTests.cs:143-156`; `modules/scripts/Sync-CkIntermediateVersions.ps1`, a
   verbatim copy of the step `templates/steps/ck-sync-intermediate-versions.yml` of `octo-pipeline-templates`
   (`modules/Sync-OctoCkIntermediateVersions.psm1:20`); `modules/Update-OctoCrateDb.psm1:3-4` and the customer script
-  `scripts/om-upgrade-cratedb.ps1` of the getting-started repository. Nothing in the build or the tests here notices a
+  `scripts/om-upgrade-cratedb.ps1` of the getting-started repository; `Get-OctoRepoBuildMode`
+  (`modules/Invoke-BuildRange.psm1:104`), which mirrors the builder dispatch of `Get-RepoBuilder` in
+  `modules/Invoke-BuildAll.psm1:3-26`. Nothing in the build or the tests here notices a
   twin that was not changed.
 - **Run and install the shared devstack daemon only from the main octo-tools checkout, never from a worktree** (`wt-*`,
   `.claude/worktrees`, a feature environment). A worktree has its own `devstack/`, `Remove-OctoEnvironment` deletes it

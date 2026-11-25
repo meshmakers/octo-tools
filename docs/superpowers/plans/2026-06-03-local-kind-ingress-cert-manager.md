@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the local kind cluster staging-like web exposure — ingress-nginx (class `nginx`) + cert-manager with a CA `ClusterIssuer` named `mm-cloud-issuer` — so app exposure values copy to staging unchanged.
+**Goal:** Give the local kind cluster hosted-environment-like web exposure — ingress-nginx (class `nginx`) + cert-manager with a CA `ClusterIssuer` named `mm-cloud-issuer` — so app exposure values copy to staging unchanged.
 
 **Architecture:** Add Helm-installed ingress-nginx (NodePort 30080/30443, mapped to host 80/443 by kind) and jetstack cert-manager, plus a cert-manager self-signed local root CA fronted by a CA `ClusterIssuer` named `mm-cloud-issuer`. Wire it into `Install-OctoKubernetes` (on by default, `-SkipIngress` to opt out). Manifests/values live under `octo-tools/kubernetes/`.
 
@@ -25,7 +25,7 @@
 `kubernetes/ingress-nginx-values.yaml`:
 ```yaml
 # ingress-nginx for the local kind cluster. NodePort 30080/30443 are mapped to
-# host 80/443 by kubernetes/kind-cluster.yaml. Mirrors staging (chart 4.15.1,
+# host 80/443 by kubernetes/kind-cluster.yaml. Mirrors the hosted environment (chart 4.15.1,
 # class "nginx") with NodePort instead of LoadBalancer.
 controller:
   ingressClassResource:
@@ -153,7 +153,7 @@ git commit -m "feat(k8s): cert-manager values for local kind cluster"
 `kubernetes/cluster-issuer.yaml`:
 ```yaml
 # Local self-signed root CA fronted by a CA ClusterIssuer named exactly as
-# staging (mm-cloud-issuer), so app annotations are identical across envs.
+# the hosted environment (mm-cloud-issuer), so app annotations are identical across envs.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:

@@ -1,5 +1,5 @@
 ---
-description: Get-CiWasteReport: the daily report of duplicate CI work, its method and the 2026-10-10 baseline
+description: "Get-CiWasteReport: the daily report of duplicate CI work, its method and the 2026-10-10 baseline"
 applies_to: modules/Get-CiWasteReport.psm1, tests/CiWasteReport.Tests.ps1
 ---
 # CI waste report (`Get-CiWasteReport`)

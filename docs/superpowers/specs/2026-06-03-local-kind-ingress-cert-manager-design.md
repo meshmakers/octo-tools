@@ -1,4 +1,4 @@
-# Local kind: ingress-nginx + cert-manager (staging-like web exposure)
+# Local kind: ingress-nginx + cert-manager (hosted-environment-like web exposure)
 
 **Date:** 2026-06-03
 **Branch:** `dev/local-k8s-dev-env` (test-branch `octo-tools`)
@@ -7,12 +7,12 @@
 ## Goal
 
 Make the local kind cluster (`Install-OctoKubernetes`) expose web workloads the
-same way test-2 / staging do, so that an app's **exposure values are identical
-across local and staging** and can be copied straight over. Concretely: install
+same way the hosted environments do, so that an app's **exposure values are identical
+across local and hosted** and can be copied straight over. Concretely: install
 **ingress-nginx** (class `nginx`) and **cert-manager** with a **CA `ClusterIssuer`
 named `mm-cloud-issuer`**, matching the meshmakers cluster pattern.
 
-## Context (what prod/staging actually run)
+## Context (what the hosted environments actually run)
 
 From `deployment/meshmakers-infrastructure` (RKE2 / k3s, Rancher-managed):
 
@@ -47,7 +47,7 @@ Four additions, all living under `octo-tools/kubernetes/` and wired into
 1. **kind port mapping** — `kubernetes/kind-cluster.yaml` gains `extraPortMappings`
    `30080→80` and `30443→443` on `127.0.0.1`.
 2. **ingress-nginx** — Helm install, class `nginx`, `service.type=NodePort` pinned
-   to nodePorts `30080/30443` (the kind equivalent of staging's LoadBalancer
+   to nodePorts `30080/30443` (the kind equivalent of the hosted environment's LoadBalancer
    install). Values in `kubernetes/ingress-nginx-values.yaml`.
 3. **cert-manager + `mm-cloud-issuer`** — jetstack Helm install (+CRDs); a
    cert-manager self-signed **local root CA**, then a CA `ClusterIssuer` named
@@ -108,7 +108,7 @@ controller:
 
 Installed with `helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx
 -n ingress-nginx --create-namespace -f kubernetes/ingress-nginx-values.yaml
---version <pinned>`. Chart version pinned to match staging (from
+--version <pinned>`. Chart version pinned to match the hosted environment (from
 `meshmakers-infrastructure` group_vars; current stable is 4.11.x).
 
 ### `kubernetes/cert-manager-values.yaml`
@@ -121,7 +121,7 @@ replicaCount: 1
 
 Installed with `helm upgrade --install cert-manager jetstack/cert-manager
 -n cert-manager --create-namespace -f kubernetes/cert-manager-values.yaml
---version <pinned>`. Version pinned to match staging.
+--version <pinned>`. Version pinned to match the hosted environment.
 
 ### `kubernetes/cluster-issuer.yaml`
 
@@ -144,7 +144,7 @@ spec:
   privateKey: { algorithm: ECDSA, size: 256 }
   issuerRef: { name: selfsigned-bootstrap, kind: ClusterIssuer, group: cert-manager.io }
 ---
-# 3) the CA ClusterIssuer named exactly as staging: mm-cloud-issuer
+# 3) the CA ClusterIssuer named exactly as the hosted environment: mm-cloud-issuer
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata: { name: mm-cloud-issuer }
@@ -153,7 +153,7 @@ spec:
 ```
 
 This yields a `mm-cloud-issuer` CA `ClusterIssuer` — same name and kind as
-staging. App TLS certs are issued by the local root CA.
+the hosted environment. App TLS certs are issued by the local root CA.
 
 ### `Install-OctoKubernetes` (in `Install-OctoInfrastructure.psm1`)
 
@@ -174,9 +174,9 @@ staging. App TLS certs are issued by the local root CA.
 - Summary block extended with the ingress URL hint (`https://<app>.localhost`),
   the issuer name, and the exported CA path.
 
-## How this mirrors staging (the payoff)
+## How this mirrors the hosted environment (the payoff)
 
-An app's exposure values are identical local vs staging:
+An app's exposure values are identical local vs hosted:
 
 ```yaml
 ingress:
@@ -189,7 +189,7 @@ publicUri: "https://<app>.localhost"   # only the host string differs per env
 
 Only the CA *behind* `mm-cloud-issuer` differs (local self-signed root vs the
 meshmakers internal CA) — an environment-level detail, not an app-level one. So
-values developed locally copy to staging unchanged (swap the host).
+values developed locally copy to the hosted environment unchanged (swap the host).
 
 ## Verification
 
@@ -218,4 +218,4 @@ values developed locally copy to staging unchanged (swap the host).
 
 - Exact chart versions to pin for ingress-nginx and cert-manager — take from
   `meshmakers-infrastructure` group_vars during implementation so local matches
-  staging.
+  the hosted environment.

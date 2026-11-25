@@ -1,5 +1,5 @@
 ---
-description: Invoke-OctoTestRun and the machine-wide test lock: runners, filters, results, Docker guard
+description: "Invoke-OctoTestRun and the machine-wide test lock: runners, filters, results, Docker guard"
 applies_to: modules/OctoTests.psm1, tests/OctoTests.Tests.ps1
 ---
 

@@ -1,5 +1,5 @@
 ---
-description: Feature environments (wt-<env> lanes): cmdlets, base lane, package cache, build stamps, parallel builds, removal
+description: "Feature environments (wt-<env> lanes): cmdlets, base lane, package cache, build stamps, parallel builds, removal"
 applies_to: modules/OctoEnvironment.psm1, modules/OctoBuildStamp.psm1, modules/OctoCkCatalog*.psm1, tests/OctoEnvironment*.Tests.ps1
 ---
 

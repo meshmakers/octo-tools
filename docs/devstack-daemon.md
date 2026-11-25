@@ -1,5 +1,5 @@
 ---
-description: The octo-devstack daemon cmdlets: start, stop, service install, workspace layout
+description: "The octo-devstack daemon cmdlets: start, stop, service install, workspace layout"
 applies_to: modules/OctoDevStack.psm1, tests/OctoDevStack.Tests.ps1
 ---
 

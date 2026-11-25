@@ -1,5 +1,5 @@
 ---
-description: Local infrastructure: deprecated docker-compose cmdlets and backups, the kind cluster, CrateDB upgrade, S3 store
+description: "Local infrastructure: deprecated docker-compose cmdlets and backups, the kind cluster, CrateDB upgrade, S3 store"
 applies_to: infrastructure/**, kubernetes/**, modules/*Infrastructure*.psm1, modules/*Kubernetes*.psm1, modules/OctoComposeInfra.psm1, modules/Start-Octo.psm1
 ---
 

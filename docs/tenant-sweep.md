@@ -1,5 +1,5 @@
 ---
-description: Invoke-OctoTenantSweep: running one octo-cli command over many tenants without handling tokens
+description: "Invoke-OctoTenantSweep: running one octo-cli command over many tenants without handling tokens"
 applies_to: modules/Invoke-OctoTenantSweep.psm1, tests/OctoTenantSweep.Tests.ps1
 ---
 # Working on many tenants: `Invoke-OctoTenantSweep`
@@ -34,17 +34,17 @@ cause (`ProvisionCurrentUser -ttid <tenant>`). The sweep reports it as **Denied*
 
 ```powershell
 # What would run? (lists tenants and the exact octo-cli calls, runs nothing)
-Invoke-OctoTenantSweep -Installation test2 -Tenant tecob,lkv,wwc26 -CliArguments '-c','LibraryStatus','-io' -WhatIf
+Invoke-OctoTenantSweep  -CliArguments '-c','LibraryStatus','-io' -WhatIf
 
 # Run it; one row per tenant: Tenant, Context, Outcome (Ok|Denied|Failed), ExitCode, Cause
-Invoke-OctoTenantSweep -Installation test2 -Tenant tecob,lkv,wwc26 -CliArguments '-c','LibraryStatus','-io'
+Invoke-OctoTenantSweep  -CliArguments '-c','LibraryStatus','-io'
 
 # Commands with their own tenant argument: one context, {tenant} is substituted; tenants from GetTenants --all
-Invoke-OctoTenantSweep -Context test2_octosystem -AllTenants -Exclude octosystem `
+Invoke-OctoTenantSweep -Context <parent-tenant-context> -AllTenants -Exclude <parent-tenant> `
     -CliArguments '-c','ProvisionCurrentUser','-ttid','{tenant}'
 
 # Machine-readable (standard octo-tools envelope: data.summary + data.results)
-Invoke-OctoTenantSweep -Installation test2 -Tenant a,b -CliArguments '-c','ClearCache' -Json | ConvertFrom-Json
+Invoke-OctoTenantSweep  -CliArguments '-c','ClearCache' -Json | ConvertFrom-Json
 ```
 
 | Parameter | Meaning |
@@ -72,7 +72,7 @@ standard error). That makes it a normal sweep command; `-IncludeOutput` adds the
 $q = '{ constructionKit { models(first:1) { totalCount } } }'
 
 # one system-tenant context, the tenant goes into -tid (read-only query here; a mutation works the same way)
-Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv,wwc26 -IncludeOutput `\
+Invoke-OctoTenantSweep -Context <parent-tenant-context> -Tenant <tenantA>,<tenantB>,<tenantC> -IncludeOutput `\
     -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q |
   ForEach-Object {
       [pscustomobject]@{
