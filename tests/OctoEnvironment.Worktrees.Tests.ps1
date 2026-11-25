@@ -433,6 +433,32 @@ Describe 'Environment base: origin instead of the local checkout (AB#8815)' {
         $build.data.feedSnapshot.checked | Should -BeTrue
     }
 
+    It 'builds the lane once, then still names the stale producer (AB#9808)' {
+        Add-OriginCommit 'octo-sdk' | Out-Null
+        Add-OriginCommit 'octo-construction-kit-engine' | Out-Null
+        $doc = Get-Doc (New-OctoEnvironment -env 'env-r' -repos octo-sdk -branchName 'feature/r' -Json -WarningAction SilentlyContinue)
+        @($doc.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
+
+        # A lane build packs octo-sdk from its worktree into the lane feed: that package is as new as the worktree.
+        $worktreeHead = [string](Invoke-TestGit (Join-Path $ws.Root 'wt-env-r/octo-sdk') rev-parse HEAD)
+        $file = Join-Path $ws.Root 'wt-env-r/nuget/Meshmakers.Octo.Sdk.Common.999.0.0.nupkg'
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+        $zip = [System.IO.Compression.ZipFile]::Open($file, 'Create')
+        try {
+            $writer = [System.IO.StreamWriter]::new($zip.CreateEntry('Meshmakers.Octo.Sdk.Common.nuspec').Open())
+            $writer.Write("<package><metadata><id>Meshmakers.Octo.Sdk.Common</id><repository type=""git"" url=""https://example.invalid/x"" commit=""$worktreeHead"" /></metadata></package>")
+            $writer.Dispose()
+        }
+        finally { $zip.Dispose() }
+
+        # The base lane's package is still older than the worktree, so the engine stays named on every later build.
+        $build = Get-Doc (Invoke-BuildEnvironment -env 'env-r' -DryRun -Json -WarningAction SilentlyContinue)
+        $build.data.feedSnapshot.checked | Should -BeTrue
+        @($build.data.feedSnapshot.rebuildInEnvironment) | Should -Be @('octo-sdk')
+        @($build.data.feedSnapshot.staleProducers.repo) | Should -Be @('octo-construction-kit-engine')
+        @($build.data.feedSnapshot.staleProducers[0].consumedBy) | Should -Be @('octo-sdk')
+    }
+
     It 'reports a check that could not be made as failed, not as an empty list (AB#9808)' {
         Add-OriginCommit 'octo-sdk' | Out-Null
         New-OctoEnvironment -env 'env-q' -repos octo-sdk -branchName 'feature/q' -Json -WarningAction SilentlyContinue | Out-Null

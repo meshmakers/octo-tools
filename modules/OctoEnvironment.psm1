@@ -761,8 +761,9 @@ function Get-OctoEnvironmentFeedSnapshotReport {
         whatever commit they had when the base lane was built last. With worktrees based on origin (the default) two
         things can be out of step:
           - rebuildInEnvironment: environment repositories whose worktree is newer than what the base lane built: its
-            package's commit (Get-OctoPackageSourceCommit), or the base lane checkout's HEAD for a repository without a
-            package (a service). Their seeded packages are older than their sources; Invoke-BuildEnvironment rebuilds
+            package's commit in the base lane's feed (Get-OctoPackageSourceCommit; never the environment feed, which a
+            lane build fills from the worktree), or the base lane checkout's HEAD for a repository without a package (a
+            service). Their seeded packages are older than their sources; Invoke-BuildEnvironment rebuilds
             them into the environment feed.
           - staleProducers: libraries OUTSIDE the environment that an environment repository consumes (transitively;
             checked when rebuildInEnvironment is not empty; consumedBy names every environment repository that reaches
@@ -792,17 +793,19 @@ function Get-OctoEnvironmentFeedSnapshotReport {
         $inEnvironment = @($manifest['repos'] | ForEach-Object { $_['name'] })
         $set = @(Get-OctoEnvironmentRepoSet -manifest $manifest -basePath $basePath)
         $graph = Get-OctoAffectedRepoGraph -repos $set -features @()
-        # The commit the base lane (or a lane build) packed repository $name from, or $null.
+        # The commit repository $name was packed from in the first of $from that holds its package, or $null.
         $packageCommit = {
-            param([string]$name)
+            param([string]$name, [string[]]$from = $feeds)
             if (-not $graph.Info.Contains($name)) { return $null }
-            return Get-OctoPackageSourceCommit -feeds $feeds -ids @($graph.Info[$name].Produces)
+            return Get-OctoPackageSourceCommit -feeds $from -ids @($graph.Info[$name].Produces)
         }
         foreach ($repo in $manifest['repos']) {
             if (-not $repo['baseCommit'] -or (Test-OctoEnvironmentToolRepo -repo $repo['name'])) { continue }
             $source = Get-OctoEnvironmentRepoSource -repo ([string]$repo['name']) -basePath $basePath
             if (-not $source) { continue }
-            $built = & $packageCommit ([string]$repo['name'])
+            # Against the base lane's package only: a lane build packs the repository from its worktree into the lane feed,
+            # which would hide that the base lane built it from an older commit - and with it the staleProducers walk below.
+            $built = & $packageCommit ([string]$repo['name']) @(Join-Path $basePath 'nuget')
             $newer = if ($built) { Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--count', "$built..$($repo['baseCommit'])") }
             # A package commit git does not know (packed in another clone) falls back to the checkout's HEAD.
             if (-not $built -or $newer.ExitCode -ne 0) { $newer = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--count', "HEAD..$($repo['baseCommit'])") }
