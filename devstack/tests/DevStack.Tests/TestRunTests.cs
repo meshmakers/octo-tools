@@ -272,6 +272,19 @@ public sealed class TestRunTests : IDisposable
     }
 
     [Fact]
+    public async Task A_test_run_without_project_events_records_the_durations_of_its_result()
+    {
+        // Only the cmdlet's result document: A.Tests passed in 4.2 s (Passed), no testProject* events.
+        _fake.Build = (_, _, _) => Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", Passed));
+        var queue = Create();
+
+        await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        queue.DurationStats("octo-a").Should().ContainSingle().Which.Should()
+            .BeEquivalentTo(new { Project = "A.Tests", LastSeconds = 4.2, CompilesFirst = (bool?)null }, "the result's project state counts like an event's");
+    }
+
+    [Fact]
     public async Task A_test_run_of_a_worktree_records_under_the_repository_the_cmdlet_reports()
     {
         var queue = Create();

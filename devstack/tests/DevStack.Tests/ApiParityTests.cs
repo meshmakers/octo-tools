@@ -260,7 +260,10 @@ public sealed class ApiParityTests : IDisposable
         var b = items.Single(i => i.BuildId == "b20");
         b.Level.Should().Be("caution");
         b.Text.Should().Be("octo-asset-repo-services has been building for 21 min in the build of wt-ab1; it usually takes 5 min - it may hang.");
-        b.Hint.Should().Contain("job_output(id=\"b20\", repo=\"octo-asset-repo-services\")").And.Contain("job_cancel(id=\"b20\")");
+        b.Hint.Should().Contain("job_output(id=\"b20\", repo=\"octo-asset-repo-services\")")
+            .And.Contain("job_cancel(owner=\"a\", id=\"b20\")", "job_cancel requires owner").And.EndWith("(only its owner).");
+        var laneJob = build with { Id = "b22", Env = "ab1" };
+        Attention.Of(Overview(builds: [laneJob])).Single().Hint.Should().EndWith("(or a session of lane ab1 with lane=\"ab1\").");
         items.Single(i => i.BuildId == "b21").Text.Should()
             .Be("Test project Asset.IntegrationTests has been running for 1 h 7 min (ab1: tests of octo-asset-repo-services); it usually takes 10 min - it may hang.");
     }

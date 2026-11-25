@@ -104,7 +104,8 @@ public static class Attention
                     "#/builds/" + Uri.EscapeDataString(b.Id))
                 {
                     BuildId = b.Id,
-                    Hint = $"job_output(id=\"{b.Id}\", repo=\"{name}\") shows its log; job_cancel(id=\"{b.Id}\") stops the job (its owner {b.Owner}, or a session of its lane)."
+                    Hint = $"job_output(id=\"{b.Id}\", repo=\"{name}\") shows its log; job_cancel(owner=\"{b.Owner}\", id=\"{b.Id}\") stops the job " +
+                           (b.Env is { } lane ? $"(or a session of lane {lane} with lane=\"{lane}\")." : "(only its owner).")
                 });
             }
         }

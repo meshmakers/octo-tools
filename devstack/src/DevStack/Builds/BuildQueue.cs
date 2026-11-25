@@ -1522,6 +1522,8 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
                     "skipped" or "notRun" => "skipped",
                     _ => run.State
                 };
+                // Without project events (an older octo-tools or a lost events file) the result's state is the only one.
+                run.TestState ??= BuildPlanner.Str(entry["state"]);
                 run.Seconds = BuildPlanner.Num(entry["durationSeconds"]) ?? run.Seconds;
                 run.TestSeconds = run.Seconds;
                 run.Total = (int?)BuildPlanner.Num(entry["total"]) ?? run.Total;
