@@ -102,7 +102,7 @@ in your private profile override the config-file ones.
 
 | Field | Description |
 | --- | --- |
-| `url`  | Default `-AdapterUrl` for `Register-AiBastion` / `Get-AiBastionStatus`. |
+| `url`  | Reserved: no cmdlet reads it yet; `Register-AiBastion` / `Get-AiBastionStatus` take a mandatory `-AdapterUrl`. |
 
 ### `installations[]`
 

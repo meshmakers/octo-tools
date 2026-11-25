@@ -1,6 +1,6 @@
 ---
 description: octo-cli contexts, tenant sweep, identity overlays and Rancher or break-glass kubeconfig cmdlets
-applies_to: modules/Register-OctoCliContext.psm1, modules/Invoke-OctoTenantSweep.psm1, modules/Invoke-IdentityOverlay.psm1, modules/Get-RancherKubeConfig.psm1, modules/Request-BreakGlassKubeConfig.psm1, overlays/**, tests/RegisterOctoCliContext.Tests.ps1, tests/OctoTenantSweep.Tests.ps1, tests/InvokeIdentityOverlay.Tests.ps1
+applies_to: modules/*OctoCliContext.psm1, modules/*TenantSweep.psm1, modules/*IdentityOverlay.psm1, modules/*KubeConfig.psm1, overlays/**
 ---
 
 ### Authentication
@@ -13,7 +13,7 @@ applies_to: modules/Register-OctoCliContext.psm1, modules/Invoke-OctoTenantSweep
 
 ### Cluster Access (Rancher / Break-Glass)
 Two paths for Kubernetes access to Rancher-managed clusters:
-- `Get-RancherKubeConfig -Cluster <name>` - Routine read-only access. Fetches a kubeconfig via the Rancher v3 API using your personal `RANCHER_API_TOKEN` and merges it into `~/.kube/config`. The resulting kubeconfig inherits whatever permissions the token user has. Requires `RANCHER_URL` (populated from `rancher.url` in your octo-tools config, or set in the private profile) and `RANCHER_API_TOKEN` (always set in the private profile, format `token-xxxxx:secret`, created in Rancher UI -> Account & API Keys).
-- `Request-BreakGlassKubeConfig -Cluster <name> -Reason "..." -DurationHours <1-4>` - Write access for incidents. Triggers a Semaphore playbook that provisions a short-lived `cluster-admin` ServiceAccount token via Vault response-wrapping, with audit entries in Semaphore, Vault, the K8s audit log, and your operations chat channel. The token TTL closes the window automatically. Requires the `semaphore.*` and `vault.addr` blocks in your octo-tools config (see `docs/installations-config.md`).
+- `Get-RancherKubeConfig -Cluster <name>` - Routine access with the token user's own permissions. Fetches a kubeconfig via the Rancher v3 API using your personal `RANCHER_API_TOKEN` and merges it into `~/.kube/config`. The resulting kubeconfig inherits whatever permissions the token user has. Requires `RANCHER_URL` (populated from `rancher.url` in your octo-tools config, or set in the private profile) and `RANCHER_API_TOKEN` (always set in the private profile, format `token-xxxxx:secret`, created in Rancher UI -> Account & API Keys).
+- `Request-BreakGlassKubeConfig -Cluster <name> -Reason "..." -DurationHours <1-4>` - Write access for incidents. Triggers a Semaphore playbook that provisions a short-lived `cluster-admin` ServiceAccount token via Vault response-wrapping, with audit entries in Semaphore, Vault, the K8s audit log, and your operations chat channel. The token TTL closes the window automatically. Needs the Semaphore URL, break-glass project id and template id (the `semaphore.*` block of your octo-tools config or the matching `SEMAPHORE_*` environment variables) and your personal `SEMAPHORE_API_TOKEN` (environment only); the Vault address (`vault.addr`) is optional, the cmdlet has a default (see `docs/installations-config.md`).
 
 This cmdlet pair assumes your clusters do not bind a persistent `cluster-owner` to any AD group — write access goes through the break-glass flow only.
