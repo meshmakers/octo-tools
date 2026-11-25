@@ -760,6 +760,58 @@ function Test-OctoFrontendTestProject {
     return ($null -ne $project.PSObject.Properties['Kind'] -and $project.Kind -eq 'frontend')
 }
 
+function Get-OctoPesterTestProjects {
+    <#
+        The Pester tests of a repository (AB#9808): <repo>/tests/*.Tests.ps1 as one test project named 'Pester' (Kind =
+        'pester'), so a change of a PowerShell module is tested like the code of the other projects. None without such files.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$repositoryPath)
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($repositoryPath)))
+    $folder = Join-Path $root 'tests'
+    if (-not (Test-Path -LiteralPath $folder -PathType Container)) { return @() }
+    if (@(Get-ChildItem -LiteralPath $folder -Filter '*.Tests.ps1' -File -ErrorAction SilentlyContinue).Count -eq 0) { return @() }
+    return @([pscustomobject]@{
+            Kind = 'pester'; Name = 'Pester'; Path = $folder; RelativePath = 'tests'; Directory = $folder
+            AssemblyName = 'Pester'; Docker = $false; DockerReason = $null; ProjectReferences = @()
+        })
+}
+
+function Test-OctoPesterTestProject {
+    param($project)
+    return ($null -ne $project.PSObject.Properties['Kind'] -and $project.Kind -eq 'pester')
+}
+
+function Test-OctoPester5 {
+    # Whether pwsh has Pester 5 or newer (the tests use its syntax; Windows PowerShell's built-in Pester 3 cannot run them).
+    return @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version.Major -ge 5 }).Count -gt 0
+}
+
+function Invoke-OctoPesterTest {
+    <#
+        The one place that starts the Pester tests of a repository (tests mock it), in a pwsh of its own - the tests change
+        process-wide state: tests/Invoke-ParallelPester.ps1 when the repository has it, else Invoke-Pester. Writes
+        { total, passed, failed, skipped, success, failedTests[{ name, message }] } as JSON to $resultFile and every line of
+        output to the log (each finished test file prints one, which the idle watchdog of octo-devstack counts as progress).
+        Returns the exit code: 0 only when the run succeeded.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string]$directory,
+        [Parameter(Mandatory = $true)] [string]$resultFile,
+        [Parameter(Mandatory = $true)] [string]$logFile
+    )
+    $quote = { param([string]$text) "'" + $text.Replace("'", "''") + "'" }
+    $parallel = Join-Path $directory 'Invoke-ParallelPester.ps1'
+    $run = if (Test-Path -LiteralPath $parallel -PathType Leaf) {
+        "`$r = & $(& $quote $parallel) -PassThru; `$failedTests = @(`$r.Files | ForEach-Object { `$_.FailedTests } | Where-Object { `$_ } | ForEach-Object { [ordered]@{ name = [string]`$_.Name; message = [string]`$_.Error } }); `$success = [bool]`$r.Success"
+    }
+    else {
+        "Import-Module Pester -MinimumVersion 5.0; `$r = Invoke-Pester -Path $(& $quote $directory) -PassThru -Output Detailed; `$failedTests = @(`$r.Failed | ForEach-Object { [ordered]@{ name = [string]`$_.ExpandedPath; message = [string]`$_.ErrorRecord } }); `$success = `$r.Result -eq 'Passed'"
+    }
+    $script = "$run; [ordered]@{ total = `$r.TotalCount; passed = `$r.PassedCount; failed = `$r.FailedCount; skipped = `$r.SkippedCount; success = `$success; failedTests = `$failedTests } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $(& $quote $resultFile); exit ([int](-not `$success))"
+    & pwsh -NoProfile -NonInteractive -Command $script *>> $logFile
+    return $LASTEXITCODE
+}
+
 function Read-OctoJUnitFile {
     <#
         Reads one JUnit XML report (vitest / `ng test --reporters=junit`). Same shape as Read-OctoTrxFile. A failed test's
@@ -1297,7 +1349,8 @@ function Get-OctoTestLogErrors {
     param([string]$logFile)
     if (-not $logFile -or -not (Test-Path -LiteralPath $logFile -PathType Leaf)) { return @() }
     $lines = @(Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue)
-    $errors = @($lines | Where-Object { $_ -match '(\berror\b|\bFAILED\b|aborted|Unhandled exception)' } | ForEach-Object { $_.Trim() } | Select-Object -Unique -First $script:MaxErrorLines)
+    # "  Passed <name>" lines of the console logger are never errors, also when a test name holds such a word.
+    $errors = @($lines | Where-Object { $_ -match '(\berror\b|\bFAILED\b|aborted|Unhandled exception)' -and $_ -notmatch '^\s*Passed\s' } | ForEach-Object { $_.Trim() } | Select-Object -Unique -First $script:MaxErrorLines)
     if ($errors.Count -eq 0) { $errors = @($lines | Where-Object { $_.Trim() } | Select-Object -Last 5 | ForEach-Object { $_.Trim() }) }
     return @($errors | ForEach-Object {
             $line = Hide-OctoUrlCredentials $_
@@ -1456,6 +1509,11 @@ function Format-OctoTestDuration {
     Runs `dotnet test` for the test projects of -repo (all of them, or the ones named with -project), optionally with
     a `dotnet test --filter` expression, and reports per test project the totals, the duration and the failed tests
     by full name with the first error message and stack frame.
+
+    Pester (AB#9808): a repository with tests/*.Tests.ps1 has one more test project, 'Pester'. It runs those files in a
+    pwsh of its own (tests/Invoke-ParallelPester.ps1 when the repository has it, else Invoke-Pester), needs Pester 5
+    (without it the project fails, naming the install command), builds nothing, and is left out of a run with -filter
+    (noMatch) or -rerunFailed (skipped): it runs whole files. Its log is pester-test.log.
 
     No full rebuild: with -build Auto (default) a project whose build is current runs with --no-build; otherwise
     `dotnet test` builds it first (incremental) and the result says why ("source changed after the last build
@@ -1619,8 +1677,9 @@ function Invoke-OctoTestRun {
         $target = Resolve-OctoTestTarget -env $env -branch $branch -repo $repo
         if (-not (Test-Path -LiteralPath $target.RepoPath -PathType Container)) { throw "Repository folder $($target.RepoPath) does not exist." }
         $repo = $target.Repo
-        $allProjects = @(Get-OctoTestProjects -repositoryPath $target.RepoPath) + @(Get-OctoFrontendTestProjects -repositoryPath $target.RepoPath)
-        if ($allProjects.Count -eq 0) { throw "$repo has no test project (no csproj with <IsTestProject>true</IsTestProject> or a Microsoft.NET.Test.Sdk reference, and no Angular workspace with a ""test"" script in its package.json, below $($target.RepoPath))." }
+        $allProjects = @(Get-OctoTestProjects -repositoryPath $target.RepoPath) + @(Get-OctoFrontendTestProjects -repositoryPath $target.RepoPath) +
+            @(Get-OctoPesterTestProjects -repositoryPath $target.RepoPath)
+        if ($allProjects.Count -eq 0) { throw "$repo has no test project (no csproj with <IsTestProject>true</IsTestProject> or a Microsoft.NET.Test.Sdk reference, and no Angular workspace with a ""test"" script in its package.json, and no tests/*.Tests.ps1, below $($target.RepoPath))." }
         $selected = $allProjects
         if (@($project | Where-Object { $_ }).Count -gt 0) {
             $names = @($project | Where-Object { $_ } | ForEach-Object { (Resolve-OctoTestProject -name $_ -projects $allProjects).Name })
@@ -1642,7 +1701,13 @@ function Invoke-OctoTestRun {
         $skip = $null
         $rerunCount = $null
         $rerunFiles = @()
-        if ($rerunFailed) {
+        $pesterEntry = Test-OctoPesterTestProject $entry
+        if ($pesterEntry) {
+            # Pester runs whole test files: neither a filter (in a runner's form) nor the failed tests of a last result reach it.
+            if ($rerunFailed) { $skip = 'Pester runs whole test files; -rerunFailed does not apply' }
+            elseif ($filter) { $noMatch = 'Pester runs whole test files; the filter does not reach it' }
+        }
+        elseif ($rerunFailed) {
             $last = Read-OctoTestLastResult -projectResultsPath $projectResults
             $failedNames = @()
             if ($null -ne $last) { $failedNames = @($last['failedTests'] | Where-Object { $_ }) }
@@ -1671,6 +1736,9 @@ function Invoke-OctoTestRun {
         $buildState = if (Test-OctoFrontendTestProject $entry) {
             [pscustomobject]@{ Current = $false; Reason = 'frontend tests: ng test builds the test bundle itself' }
         }
+        elseif ($pesterEntry) {
+            [pscustomobject]@{ Current = $true; Reason = 'Pester tests: nothing to build' }
+        }
         else {
             switch ($build) {
                 'Always' { [pscustomobject]@{ Current = $false; Reason = '-build Always' } }
@@ -1685,7 +1753,7 @@ function Invoke-OctoTestRun {
             Filters     = $filters
             Calls       = $calls
             NoMatch     = $noMatch
-            Runner      = if ($frontendEntry) { 'ng' } elseif ($entry.PSObject.Properties['Runner']) { $entry.Runner } else { 'vstest' }
+            Runner      = if ($frontendEntry) { 'ng' } elseif ($pesterEntry) { 'pester' } elseif ($entry.PSObject.Properties['Runner']) { $entry.Runner } else { 'vstest' }
             RerunFiles  = $rerunFiles
             Skip        = $skip
             RerunCount  = $rerunCount
@@ -1954,7 +2022,10 @@ function Invoke-OctoTestRun {
             $runPath = Join-Path $item.ResultsPath $runStamp
             [void][IO.Directory]::CreateDirectory($runPath)
             $frontend = Test-OctoFrontendTestProject $item.Project
-            $logFile = Join-Path $runPath $(if ($frontend) { 'ng-test.log' } else { 'dotnet-test.log' })
+            $pester = Test-OctoPesterTestProject $item.Project
+            $pesterResult = Join-Path $runPath 'pester-result.json'
+            $pesterMissing = $null
+            $logFile = Join-Path $runPath $(if ($frontend) { 'ng-test.log' } elseif ($pester) { 'pester-test.log' } else { 'dotnet-test.log' })
             $result.resultsPath = $runPath
             $result.logFile = $logFile
             & $emit 'testProjectStart' ([ordered]@{ repo = $repo; project = $name; index = $index; count = $plan.Count; runner = $item.Runner; docker = $item.Docker; noBuild = $item.NoBuild; buildReason = $item.BuildReason; calls = $(if ($frontend) { 1 } else { @($item.Calls).Count }) })
@@ -1973,6 +2044,18 @@ function Invoke-OctoTestRun {
                 foreach ($file in @($item.RerunFiles)) { $arguments += @('--include', $file) }
                 "Invoke-OctoTestRun: npx $($arguments -join ' ') (in $($item.Project.Directory))" | Add-Content -LiteralPath $logFile
                 $exitCode = Invoke-OctoFrontendTest -directory $item.Project.Directory -arguments $arguments -logFile $logFile
+            }
+            elseif ($pester) {
+                if (-not (Test-OctoPester5)) {
+                    # Refused with the way out: the tests need Pester 5 syntax.
+                    $pesterMissing = 'Pester 5 is not installed for pwsh - install it with: Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force'
+                    "Invoke-OctoTestRun: $pesterMissing" | Add-Content -LiteralPath $logFile
+                    $exitCode = 1
+                }
+                else {
+                    "Invoke-OctoTestRun: Pester tests of $($item.Project.Directory)" | Add-Content -LiteralPath $logFile
+                    $exitCode = Invoke-OctoPesterTest -directory $item.Project.Directory -resultFile $pesterResult -logFile $logFile
+                }
             }
             $mtp = $item.Runner -eq 'mtp'
             foreach ($testCall in @($(if (-not $frontend) { $item.Calls }))) {
@@ -1993,7 +2076,9 @@ function Invoke-OctoTestRun {
                     $arguments = @('test', $item.Project.Path, '-c', $configuration)
                     # Only the first call of a chunked rerun may build.
                     if ($item.NoBuild -or $call -gt 1) { $arguments += '--no-build' }
-                    $arguments += @('--results-directory', $runPath, '--logger', "trx;LogFileName=$trxName", '-nodeReuse:false')
+                    # The console logger at normal verbosity prints a line per test into the log (AB#9808): a suite that writes its
+                    # TRX only at the end still shows progress, so octo-devstack's idle watchdog does not take it for a hang.
+                    $arguments += @('--results-directory', $runPath, '--logger', "trx;LogFileName=$trxName", '--logger', 'console;verbosity=normal', '-nodeReuse:false')
                     $arguments += @($testCall.Arguments)
                     $arguments += $propertyArgs
                 }
@@ -2019,6 +2104,17 @@ function Invoke-OctoTestRun {
                 foreach ($test in $trx.FailedTests) { $failedTests.Add($test) }
                 if ($trx.PSObject.Properties['PassedTests']) { foreach ($test in @($trx.PassedTests)) { if ($passedTests.Count -lt $passedLimit) { $passedTests.Add([string]$test) } } }
                 foreach ($line in $trx.RunErrors) { $errors.Add($line) }
+            }
+            if ($pesterMissing) { $errors.Add($pesterMissing) }
+            elseif ($pester -and (Test-Path -LiteralPath $pesterResult -PathType Leaf)) {
+                try {
+                    $counts = Get-Content -LiteralPath $pesterResult -Raw | ConvertFrom-Json
+                    $result.total += [int]$counts.total; $result.passed += [int]$counts.passed; $result.failed += [int]$counts.failed; $result.skipped += [int]$counts.skipped
+                    foreach ($test in @($counts.failedTests | Where-Object { $_ })) {
+                        $failedTests.Add([pscustomobject]@{ Name = [string]$test.name; DisplayName = [string]$test.name; Outcome = 'Failed'; Message = [string]$test.message; StackFrame = $null; DurationSeconds = $null })
+                    }
+                }
+                catch { $errors.Add("Cannot read $($pesterResult): $($_.Exception.Message)") }
             }
             $result.exitCode = $exitCode
             $result.trx = @($trxFiles | ForEach-Object FullName)
