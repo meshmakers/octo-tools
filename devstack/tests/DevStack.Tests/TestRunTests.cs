@@ -708,12 +708,15 @@ public sealed class TestRunTests : IDisposable
     [Fact]
     public async Task A_run_that_waits_for_the_docker_test_lock_says_who_holds_it()
     {
+        // The holder the event names still holds the lock file (AB#9841 reads the file).
+        var lockFile = Path.Combine(Directory.CreateDirectory(Path.Combine(_checkout.StateDirectory, "locks-a")).FullName, "docker-tests.lock");
+        File.WriteAllText(lockFile, """{"schemaVersion":1,"pid":4711,"since":"2026-11-11T09:48:00Z","command":"Invoke-OctoTestRun","lane":"/x/wt-ab8797","environment":"ab8797","repo":"octo-b","projects":["B.Tests"]}""");
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _fake.Build = async (body, _, _) =>
         {
             Event(body, "plan", "\"repo\":\"octo-a\",\"environment\":null,\"projects\":[{\"project\":\"A.Tests\",\"docker\":true,\"noBuild\":true,\"skip\":false}],\"count\":1");
             Event(body, "lockWait",
-                "\"path\":\"/state/docker-tests.lock\",\"timeoutSeconds\":1800,\"owner\":{\"pid\":4711,\"since\":\"2026-11-11T09:48:00Z\",\"heldSeconds\":120,\"command\":\"Invoke-OctoTestRun\",\"lane\":\"/x/wt-ab8797\",\"environment\":\"ab8797\",\"repo\":\"octo-b\",\"projects\":[\"B.Tests\"]}");
+                "\"path\":" + JsonSerializer.Serialize(lockFile) + ",\"timeoutSeconds\":1800,\"owner\":{\"pid\":4711,\"since\":\"2026-11-11T09:48:00Z\",\"heldSeconds\":120,\"command\":\"Invoke-OctoTestRun\",\"lane\":\"/x/wt-ab8797\",\"environment\":\"ab8797\",\"repo\":\"octo-b\",\"projects\":[\"B.Tests\"]}");
             await release.Task;
             Event(body, "lockAcquired", "\"path\":\"/state/docker-tests.lock\",\"waitedSeconds\":3");
             return FakePwsh.Ok("Invoke-OctoTestRun", Passed);
@@ -762,6 +765,14 @@ public sealed class TestRunTests : IDisposable
         File.WriteAllText(lockFile, "");
         queue.Get(job.Id).Tests!.LockWait.Should().StartWith("waiting for the docker test lock held by Invoke-OctoTestRun of ab8673 octo-b (pid 4711, since ");
 
+        // No lock file: the lock is free, never the holder that already released it.
+        File.Delete(lockFile);
+        queue.Get(job.Id).Tests!.LockWait.Should().Be("the docker test lock is free; the run takes it now");
+
+        // The file names this run's own lane: it has just taken the lock (lockAcquired follows).
+        File.WriteAllText(lockFile, JsonSerializer.Serialize(new { schemaVersion = 1, pid = 6000, since = "2026-11-25T16:00:00Z", command = "Invoke-OctoTestRun", lane = _checkout.Lane, repo = "octo-a" }));
+        queue.Get(job.Id).Tests!.LockWait.Should().Be("the run takes the docker test lock now");
+
         release.SetResult();
         (await WaitAsync(queue, job.Id)).Tests!.LockWait.Should().BeNull();
     }
@@ -770,9 +781,12 @@ public sealed class TestRunTests : IDisposable
     public void The_selection_of_a_test_run_says_what_it_runs()
     {
         BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a" })
-            .Should().Be("every test project: every test except the slow categories Performance and Stress (includeSlow=true runs them)");
+            .Should().Be("every test project: every test; .NET test projects without the slow categories Performance and Stress (includeSlow=true runs them)");
         BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a", IncludeSlow = true })
             .Should().Be("every test project: every test, including the slow categories (includeSlow)");
+        // an octo-tools from before AB#9829 leaves nothing out
+        BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a" }, slowLeftOut: false)
+            .Should().Be("every test project: every test");
         BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a", Projects = ["A.IntegrationTests"], Filter = " FullyQualifiedName~X|FullyQualifiedName~Y " })
             .Should().Be("projects A.IntegrationTests: filter FullyQualifiedName~X|FullyQualifiedName~Y");
         BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a", RerunFailed = true })

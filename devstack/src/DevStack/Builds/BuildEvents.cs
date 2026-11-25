@@ -302,23 +302,29 @@ internal static class BuildEventReader
 
     /// <summary>
     ///     Who holds the lock file now (AB#9841): the cmdlet sends lockWait once, when the wait starts, and the holder can change
-    ///     while the run waits (one run releases, the next one in front of it takes the lock). Null when the file cannot be read
-    ///     or names nobody - the caller then keeps the holder of the event.
+    ///     while the run waits (one run releases, the next one in front of it takes the lock). Read = false when there is no
+    ///     path or the file cannot be read or names nobody (the caller keeps the holder of the event); Read = true with Owner
+    ///     null when no file exists - the lock is free and the waiting run takes it within its next poll.
     /// </summary>
-    internal static string? CurrentLockOwner(string? lockPath)
+    internal static (bool Read, JsonObject? Owner) CurrentLock(string? lockPath)
     {
-        if (string.IsNullOrWhiteSpace(lockPath) || !File.Exists(lockPath))
+        if (string.IsNullOrWhiteSpace(lockPath))
         {
-            return null;
+            return (false, null);
+        }
+
+        if (!File.Exists(lockPath))
+        {
+            return (true, null);
         }
 
         try
         {
-            return JsonNode.Parse(ReadShared(lockPath)) is JsonObject owner && owner["pid"] != null ? LockOwner(owner) : null;
+            return JsonNode.Parse(ReadShared(lockPath)) is JsonObject owner && owner["pid"] != null ? (true, owner) : (false, null);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
         {
-            return null;
+            return (false, null);
         }
     }
 
