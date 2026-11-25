@@ -969,7 +969,7 @@ Describe 'Invoke-OctoTestRun' {
             $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project UnitTests -lockPath $script:LockPath -Json)
             $doc.data.success | Should -BeFalse
             $doc.data.projects[0].state | Should -Be 'noTests'
-            $doc.data.projects[0].note | Should -Match 'Performance, Stress were left out.+-includeSlow'
+            $doc.data.projects[0].note | Should -Match 'Performance, Stress were left out.+-includeSlow, in octo-devstack includeSlow=true'
         }
 
         It 'reuses a current build in a repository that builds into one repository-level bin folder (-build Auto passes --no-build, AB#9659)' {
@@ -1379,6 +1379,13 @@ Describe 'Invoke-OctoTestRun' {
             $script:Calls[0].Arguments[1] | Should -BeLike '*Sample.UnitTests.csproj'
             $script:Calls[0].Arguments | Should -Contain '--logger'
             $script:Calls[0].WorkingDirectory | Should -Be $ws.Repo
+        }
+
+        It 'leaves no slow category out of a TUnit project, and the run then names none either (AB#9829)' {
+            $plan = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-mtp-services -project Jobs.Tests -lockPath $script:LockPath -WhatIf -Json)
+            @($plan.data.excludedCategories).Count | Should -Be 0
+            @($plan.data.projects[0].excludedCategories).Count | Should -Be 0
+            @($plan.data.projects[0].filters).Count | Should -Be 0
         }
 
         It 'reruns the failed tests of a TUnit project with one tree-node filter per class' {

@@ -1496,11 +1496,13 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
             var errors = (entry["errors"] as JsonArray ?? []).Select(BuildPlanner.Str).Where(e => !string.IsNullOrWhiteSpace(e)).Select(e => SecretMask.MaskValue(e!)).ToList();
             var failedCount = (int?)BuildPlanner.Num(entry["failed"]);
             var passed = entry["passedTests"] is JsonArray names ? names.Select(BuildPlanner.Str).OfType<string>().ToList() : null;
+            var excluded = (entry["excludedCategories"] as JsonArray ?? []).Select(BuildPlanner.Str).OfType<string>().Where(c => c.Length > 0).ToList();
             result.Add(new BuildTestProject(name, BuildPlanner.Str(entry["state"]) ?? (BuildPlanner.Bool(entry["success"]) == false ? "failed" : "passed"),
                 (int?)BuildPlanner.Num(entry["total"]), (int?)BuildPlanner.Num(entry["passed"]), failedCount, (int?)BuildPlanner.Num(entry["skipped"]),
                 Round(BuildPlanner.Num(entry["durationSeconds"])), failed, failedCount > failed.Count ? failedCount - failed.Count : null,
                 errors.Count > 0 ? errors : null, BuildPlanner.Str(entry["buildReason"]), BuildPlanner.Bool(entry["docker"]), BuildPlanner.Str(entry["note"]),
-                BuildPlanner.Str(entry["runner"]), passed, passed == null ? null : BuildPlanner.Bool(entry["passedTruncated"]) == true ? true : null));
+                BuildPlanner.Str(entry["runner"]), passed, passed == null ? null : BuildPlanner.Bool(entry["passedTruncated"]) == true ? true : null,
+                ExcludedCategories: excluded.Count > 0 ? excluded : null));
         }
 
         foreach (var run in events.Repos.Where(r => !result.Any(p => string.Equals(p.Project, r.Repo, StringComparison.OrdinalIgnoreCase))))

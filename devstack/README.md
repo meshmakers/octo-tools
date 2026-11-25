@@ -575,7 +575,9 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   (the next build of the repo deletes `Invoke-Build.log`).
 - **Usual durations and overdue jobs**: the daemon keeps the last 30 durations of every successful repository build
   (across lanes) and of every test project of an unfiltered test run (passed or failed; a run with `filter` or
-  `rerunFailed` runs only a part of a project and is not counted), per repository, test project and configuration; a
+  `rerunFailed` runs only a part of a project and is not counted, neither is a run with `includeSlow`), per repository,
+  test project and configuration (samples recorded before octo-tools AB#9829 include the slow categories, so median and
+  p90 of such a project fall only as new runs replace them - the series keeps the last 30); a
   test project's runs that compile it first and those on its last build are two series (`compilesFirst`), and a running
   project is compared with the series of its own kind (`duration-history.json` in the state folder; the
   `build-history.json` of earlier daemons is taken over, and a damaged file starts an empty history).

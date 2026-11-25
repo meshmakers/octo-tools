@@ -1813,6 +1813,8 @@ function Invoke-OctoTestRun {
             DockerReason = switch ($dockerLock) { 'Always' { '-dockerLock Always' } 'Never' { '-dockerLock Never' } default { $entry.DockerReason } }
         }
     }
+    # What the run as a whole left out: only categories some project really left out (TUnit, frontend and Pester leave out none).
+    $leftOutRun = @($plan | ForEach-Object { @($_.Excluded) } | Where-Object { $_ } | Select-Object -Unique)
     # Projects without Docker first, so the lock is held only while the Docker-heavy ones run.
     $plan = @(@($plan | Where-Object { -not $_.Docker }) + @($plan | Where-Object { $_.Docker }))
     $runnable = @($plan | Where-Object { -not $_.Skip -and -not $_.NoMatch })
@@ -1887,7 +1889,7 @@ function Invoke-OctoTestRun {
                     filter        = if ($filter) { $filter } else { $null }
                     rerunFailed   = [bool]$rerunFailed
                     includeSlow   = [bool]$includeSlow
-                    excludedCategories = @($leftOut)
+                    excludedCategories = @($leftOutRun)
                     lane          = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                     msbuildProperties = $displayProperties
                     lock          = [ordered]@{ required = $lockNeeded; path = $lockFile; timeoutSeconds = $lockTimeoutSeconds }
@@ -1925,7 +1927,7 @@ function Invoke-OctoTestRun {
     & $emit 'plan' ([ordered]@{ repo = $repo; environment = $target.Environment; projects = @($planReport | ForEach-Object { [ordered]@{ project = $_.project; runner = $_.runner; docker = $_.docker; noBuild = $_.noBuild; buildReason = $_.buildReason; skip = $_.skip; noMatch = $_.noMatch } }); count = $plan.Count })
     if (-not $Json) {
         Write-Host "Invoke-OctoTestRun ($configuration): $repo in $($target.LanePath) - $($runnable.Count) test project(s)" -ForegroundColor Cyan
-        if ($leftOut.Count -gt 0) { Write-Host "  Leaves out the tests of Category $($leftOut -join ', ') (-includeSlow runs them)" -ForegroundColor DarkGray }
+        if ($leftOutRun.Count -gt 0) { Write-Host "  Leaves out the tests of Category $($leftOutRun -join ', ') (-includeSlow runs them)" -ForegroundColor DarkGray }
     }
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -2205,7 +2207,7 @@ function Invoke-OctoTestRun {
                 # also when the slow categories were left out (AB#9829): a broken discovery looks the same, so it is named.
                 $result.state = 'noTests'
                 $result.note = if (@($item.Excluded).Count -gt 0) {
-                    "the project ran no test although no filter was given (the categories $(@($item.Excluded) -join ', ') were left out; if every test is in one of them, run with -includeSlow)"
+                    "the project ran no test although no filter was given (the categories $(@($item.Excluded) -join ', ') were left out; if every test is in one of them, run with -includeSlow, in octo-devstack includeSlow=true)"
                 }
                 else { 'the project ran no test although no filter was given' }
                 foreach ($line in @(Get-OctoTestLogErrors -logFile $logFile)) { if (-not $errors.Contains($line)) { $errors.Add($line) } }
@@ -2313,7 +2315,7 @@ function Invoke-OctoTestRun {
         filter         = if ($filter) { $filter } else { $null }
         rerunFailed    = [bool]$rerunFailed
         includeSlow    = [bool]$includeSlow
-        excludedCategories = @($leftOut)
+        excludedCategories = @($leftOutRun)
         totals         = $totals
         elapsedSeconds = $watch.Elapsed.TotalSeconds
         lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }

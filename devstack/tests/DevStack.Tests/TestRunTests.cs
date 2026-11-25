@@ -450,6 +450,23 @@ public sealed class TestRunTests : IDisposable
     }
 
     [Fact]
+    public async Task A_green_default_run_says_per_project_which_slow_categories_it_left_out()
+    {
+        _fake.Capabilities = SlowParams;
+        _fake.Build = (_, _, _) => Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun",
+            """{"success":true,"exitCode":0,"repo":"octo-a","excludedCategories":["Performance","Stress"],"totals":{"total":3,"passed":3,"failed":0,"skipped":0},"projects":[""" +
+            """{"project":"A.Tests","state":"passed","success":true,"runner":"vstest","excludedCategories":["Performance","Stress"],"total":2,"passed":2,"failed":0,"skipped":0,"failedTests":[]},""" +
+            """{"project":"B.Tests","state":"passed","success":true,"runner":"mtp","note":"TUnit: the categories Performance, Stress are not left out, every test runs","excludedCategories":[],"total":1,"passed":1,"failed":0,"skipped":0,"failedTests":[]}]}"""));
+        var queue = Create();
+
+        var done = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        done.State.Should().Be("succeeded");
+        done.Tests!.Projects.Single(p => p.Project == "A.Tests").ExcludedCategories.Should().Equal("Performance", "Stress");
+        done.Tests.Projects.Single(p => p.Project == "B.Tests").ExcludedCategories.Should().BeNull("an empty list is left out of the answer");
+    }
+
+    [Fact]
     public async Task IncludeSlow_needs_an_octo_tools_that_has_it()
     {
         var queue = Create();
