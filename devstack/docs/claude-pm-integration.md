@@ -61,7 +61,7 @@ Agent-facing tools (old name → new name). Read-only tools keep `ReadOnly = tru
 | | `lane_create(owner, lane, repos, branch, workItem, session, addAffected)` | `env_create(name, branchName, ...)` |
 | | `lane_add_repo`, `lane_sync`, `lane_affected` | `env_add_repo`, `env_sync`, `env_affected` |
 | | `lane_build(owner, lane, repos, skip, verifyTests = true, syncMain, restartServices)` | `build_start(kind=env, env=...)` |
-| | `lane_test(owner, lane, repo, project, filter, rerunFailed)` | `test_run(env=...)` |
+| | `lane_test(owner, lane, repo, project, filter, rerunFailed, includeSlow)` | `test_run(env=...)` |
 | | `lane_remove(owner, lane)` | `env_remove` |
 | Base lane | `base_build(owner, kind = repo\|range\|all\|profile, ...)` | `build_start(kind=repo\|range\|all\|profile)` |
 | | `base_test(owner, repo, ...)` | `test_run(checkout=...)` |

@@ -213,8 +213,12 @@ ones, or a `dotnet test --filter` expression - and tells you which tests failed 
 them.
 
 ```powershell
-# All test projects of a repository in a feature environment (or a lane: -branch branches/main)
+# All test projects of a repository in a feature environment (or a lane: -branch branches/main);
+# leaves out the slow tests (Category Performance and Stress), as CI does
 Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine
+
+# The same with the slow tests (wall-clock budget and memory-pressure tests)
+Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine-mongodb -includeSlow
 
 # One project, one class
 Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine -project Engine.Tests -filter 'FullyQualifiedName~EnumTests'

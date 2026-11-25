@@ -1248,12 +1248,19 @@ function Get-OctoTestFilterCalls {
           TUnit:    one tree-node filter per class, /*/<namespace>/<class>/(<method>|<method>)
           xunit.v3: --filter-method <name> per test, split at -maxLength
         For the two Microsoft.Testing.Platform forms -filter is not combined with the rerun (no AND there).
+        -excludeCategories (AB#9829) leaves out the tests with one of these Category traits, only in a run without
+        -filter and -failedNames (a filter or a rerun runs what it names):
+          VSTest:   --filter Category!=<a>&Category!=<b>
+          xunit.v3: --filter-not-trait Category=<a> per category
+          TUnit:    not left out (ExcludeNote says so)
+        The result then also carries Excluded (the categories left out, empty when none) and ExcludeNote.
     #>
     param(
         [Parameter(Mandatory = $true)] $project,
         [string]$filter = '',
         [string[]]$failedNames = $null,
-        [int]$maxLength = 6000
+        [int]$maxLength = 6000,
+        [string[]]$excludeCategories = @()
     )
     $runner = if ($project.PSObject.Properties['Runner']) { [string]$project.Runner } else { 'vstest' }
     $framework = if ($project.PSObject.Properties['Framework']) { [string]$project.Framework } else { 'other' }
@@ -1269,7 +1276,19 @@ function Get-OctoTestFilterCalls {
 
     if ($null -eq $failedNames) {
         if ($mismatch) { return [pscustomobject]@{ Calls = @(); Mismatch = $mismatch } }
-        if (-not $filter) { return [pscustomobject]@{ Calls = @((& $call '' @())); Mismatch = $null } }
+        $categories = @($excludeCategories | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
+        if (-not $filter -and $categories.Count -gt 0 -and $kind -eq 'expression') {
+            $text = ($categories | ForEach-Object { "Category!=$(ConvertTo-OctoTestFilterValue -value $_)" }) -join '&'
+            return [pscustomobject]@{ Calls = @((& $call $text @('--filter', $text))); Mismatch = $null; Excluded = $categories; ExcludeNote = $null }
+        }
+        if (-not $filter -and $categories.Count -gt 0 -and $kind -eq 'query') {
+            $arguments = @(foreach ($category in $categories) { '--filter-not-trait'; "Category=$category" })
+            return [pscustomobject]@{ Calls = @((& $call ($arguments -join ' ') $arguments)); Mismatch = $null; Excluded = $categories; ExcludeNote = $null }
+        }
+        if (-not $filter) {
+            $note = if ($categories.Count -gt 0) { "TUnit: the categories $($categories -join ', ') are not left out, every test runs" }
+            return [pscustomobject]@{ Calls = @((& $call '' @())); Mismatch = $null; Excluded = @(); ExcludeNote = $note }
+        }
         $option = switch ($kind) { 'treenode' { '--treenode-filter' } 'query' { '--filter-query' } default { '--filter' } }
         return [pscustomobject]@{ Calls = @((& $call $filter @($option, $filter))); Mismatch = $null }
     }
@@ -1545,6 +1564,15 @@ function Format-OctoTestDuration {
     A run with -filter or -rerunFailed in which no test ran at all fails (the filter matches nothing). Without a
     filter, a project that runs no test fails the run (state noTests): it is never reported green.
 
+    Slow tests (AB#9829): a run without -filter and -rerunFailed leaves out the tests whose Category trait is one of
+    -slowCategories (default Performance and Stress - the wall-clock budget and memory-pressure tests CI leaves out
+    as well and runs in its own performance pipeline), like CI's --filter "Category!=Performance&Category!=Stress".
+    VSTest projects get that filter, xunit.v3 on Microsoft.Testing.Platform --filter-not-trait Category=<name>;
+    TUnit, frontend and Pester projects run unchanged (a TUnit project notes it). -includeSlow runs them too; a
+    -filter or -rerunFailed runs exactly what it names, without this exclusion. The result lists the categories
+    left out (excludedCategories); a project that then runs no test stays noTests (a failure, as a broken discovery
+    looks the same) and its note names the categories left out.
+
     Projects on Microsoft.Testing.Platform (the repository's global.json selects that runner: TUnit, xunit.v3) are
     run with `dotnet test --project <csproj> ... -- --report-trx`, VSTest projects with `dotnet test <csproj>
     --logger trx`; the result names the runner of each project.
@@ -1575,6 +1603,12 @@ function Format-OctoTestDuration {
 .PARAMETER rerunFailed
     Run only the tests that failed in the last result of each selected project. Projects without failed tests in
     their last result are skipped.
+
+.PARAMETER includeSlow
+    Also run the tests of -slowCategories, which a run without -filter and -rerunFailed leaves out by default.
+
+.PARAMETER slowCategories
+    The Category trait values a plain run leaves out (default Performance, Stress). @() leaves out nothing.
 
 .PARAMETER build
     Auto (default): --no-build when the build is current. Always: build. Never: --no-build.
@@ -1629,6 +1663,9 @@ function Format-OctoTestDuration {
 
 .EXAMPLE
     Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine -rerunFailed
+
+.EXAMPLE
+    Invoke-OctoTestRun -env ab9829-slow-tests -repo construction-kit-engine-mongodb -includeSlow
 #>
 function Invoke-OctoTestRun {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -1639,6 +1676,8 @@ function Invoke-OctoTestRun {
         [string[]]$project = @(),
         [string]$filter = '',
         [switch]$rerunFailed,
+        [switch]$includeSlow,
+        [string[]]$slowCategories = @('Performance', 'Stress'),
         [ValidateSet('Auto', 'Always', 'Never')] [string]$build = 'Auto',
         [ValidateSet('Auto', 'Always', 'Never')] [string]$dockerLock = 'Auto',
         [int]$lockTimeoutSeconds = 1800,
@@ -1693,6 +1732,9 @@ function Invoke-OctoTestRun {
     $resultsRoot = Get-OctoTestResultsRoot -lanePath $target.LanePath -repo $repo
     $laneSettings = Get-OctoLaneBuildSettings -laneRootPath $target.LanePath
 
+    # AB#9829: the slow categories (CI leaves them out too) stay out of a plain run; a filter or a rerun runs what it names.
+    $leftOut = if ($includeSlow -or $filter -or $rerunFailed) { @() } else { @($slowCategories | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique) }
+
     # The plan: per project what runs (filters), whether it builds and whether it needs the lock.
     $plan = @()
     foreach ($entry in $selected) {
@@ -1703,6 +1745,8 @@ function Invoke-OctoTestRun {
         $skip = $null
         $rerunCount = $null
         $rerunFiles = @()
+        $excluded = @()
+        $excludeNote = $null
         $pesterEntry = Test-OctoPesterTestProject $entry
         if ($pesterEntry) {
             # Pester runs whole test files: neither a filter (in a runner's form) nor the failed tests of a last result reach it.
@@ -1729,10 +1773,12 @@ function Invoke-OctoTestRun {
             }
         }
         elseif (-not $frontendEntry) {
-            $callPlan = Get-OctoTestFilterCalls -project $entry -filter $filter -maxLength $maxFilterLength
+            $callPlan = Get-OctoTestFilterCalls -project $entry -filter $filter -maxLength $maxFilterLength -excludeCategories $leftOut
             $calls = @($callPlan.Calls)
             # A filter in a form this project's runner does not take cannot match here: not run, not a failure.
             $noMatch = $callPlan.Mismatch
+            if ($callPlan.PSObject.Properties['Excluded']) { $excluded = @($callPlan.Excluded) }
+            if ($callPlan.PSObject.Properties['ExcludeNote']) { $excludeNote = $callPlan.ExcludeNote }
         }
         $filters = if ($frontendEntry) { @($filter) } else { @($calls | ForEach-Object { $_.Display }) }
         $buildState = if (Test-OctoFrontendTestProject $entry) {
@@ -1757,6 +1803,8 @@ function Invoke-OctoTestRun {
             NoMatch     = $noMatch
             Runner      = if ($frontendEntry) { 'ng' } elseif ($pesterEntry) { 'pester' } elseif ($entry.PSObject.Properties['Runner']) { $entry.Runner } else { 'vstest' }
             RerunFiles  = $rerunFiles
+            Excluded    = $excluded
+            ExcludeNote = $excludeNote
             Skip        = $skip
             RerunCount  = $rerunCount
             NoBuild     = [bool]$buildState.Current
@@ -1765,6 +1813,8 @@ function Invoke-OctoTestRun {
             DockerReason = switch ($dockerLock) { 'Always' { '-dockerLock Always' } 'Never' { '-dockerLock Never' } default { $entry.DockerReason } }
         }
     }
+    # What the run as a whole left out: only categories some project really left out (TUnit, frontend and Pester leave out none).
+    $leftOutRun = @($plan | ForEach-Object { @($_.Excluded) } | Where-Object { $_ } | Select-Object -Unique)
     # Projects without Docker first, so the lock is held only while the Docker-heavy ones run.
     $plan = @(@($plan | Where-Object { -not $_.Docker }) + @($plan | Where-Object { $_.Docker }))
     $runnable = @($plan | Where-Object { -not $_.Skip -and -not $_.NoMatch })
@@ -1818,6 +1868,7 @@ function Invoke-OctoTestRun {
                 filters      = @($_.Filters | Where-Object { $_ })
                 rerunCount   = $_.RerunCount
                 rerunFiles   = @($_.RerunFiles | Where-Object { $_ })
+                excludedCategories = @($_.Excluded)
                 skip         = $_.Skip
                 runner       = $_.Runner
                 noMatch      = $_.NoMatch
@@ -1837,6 +1888,8 @@ function Invoke-OctoTestRun {
                     configuration = $configuration
                     filter        = if ($filter) { $filter } else { $null }
                     rerunFailed   = [bool]$rerunFailed
+                    includeSlow   = [bool]$includeSlow
+                    excludedCategories = @($leftOutRun)
                     lane          = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }
                     msbuildProperties = $displayProperties
                     lock          = [ordered]@{ required = $lockNeeded; path = $lockFile; timeoutSeconds = $lockTimeoutSeconds }
@@ -1863,6 +1916,8 @@ function Invoke-OctoTestRun {
             }
             elseif ($null -ne $item.RerunCount) { Write-Host "    reruns $($item.RerunCount) failed test(s) in $(@($item.Filters).Count) dotnet test call(s)" }
             elseif ($filter) { Write-Host "    filter: $filter" }
+            if (@($item.Excluded).Count -gt 0) { Write-Host "    leaves out Category $(@($item.Excluded) -join ', ') (-includeSlow runs them)" }
+            if ($item.ExcludeNote) { Write-Host "    $($item.ExcludeNote)" -ForegroundColor Yellow }
         }
         Write-Host ''
         Write-Host 'WhatIf: nothing was built or run.' -ForegroundColor Cyan
@@ -1872,6 +1927,7 @@ function Invoke-OctoTestRun {
     & $emit 'plan' ([ordered]@{ repo = $repo; environment = $target.Environment; projects = @($planReport | ForEach-Object { [ordered]@{ project = $_.project; runner = $_.runner; docker = $_.docker; noBuild = $_.noBuild; buildReason = $_.buildReason; skip = $_.skip; noMatch = $_.noMatch } }); count = $plan.Count })
     if (-not $Json) {
         Write-Host "Invoke-OctoTestRun ($configuration): $repo in $($target.LanePath) - $($runnable.Count) test project(s)" -ForegroundColor Cyan
+        if ($leftOutRun.Count -gt 0) { Write-Host "  Leaves out the tests of Category $($leftOutRun -join ', ') (-includeSlow runs them)" -ForegroundColor DarkGray }
     }
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -1892,7 +1948,7 @@ function Invoke-OctoTestRun {
             $results.Add([ordered]@{
                     project = $pending.Project.Name; path = $pending.Project.Path; state = 'notRun'; success = $false; exitCode = $null
                     docker = $pending.Docker; dockerReason = $pending.DockerReason; noBuild = $pending.NoBuild; buildReason = $pending.BuildReason
-                    filters = @($pending.Filters | Where-Object { $_ }); rerunCount = $pending.RerunCount
+                    filters = @($pending.Filters | Where-Object { $_ }); rerunCount = $pending.RerunCount; excludedCategories = @($pending.Excluded)
                     total = 0; passed = 0; failed = 0; skipped = 0; durationSeconds = 0.0; failedTests = @(); truncated = $false
                     passedTests = @(); passedTruncated = $false; errors = @(); runner = $pending.Runner
                     note = $note; resultsPath = $null; trx = @(); logFile = $null
@@ -1928,6 +1984,7 @@ function Invoke-OctoTestRun {
                 buildReason     = $item.BuildReason
                 filters         = @($item.Filters | Where-Object { $_ })
                 rerunCount      = $item.RerunCount
+                excludedCategories = @($item.Excluded)
                 total           = 0
                 passed          = 0
                 failed          = 0
@@ -2146,12 +2203,17 @@ function Invoke-OctoTestRun {
                 $result.note = 'no test matched the filter'
             }
             elseif ($result.total -eq 0) {
-                # Without a filter a project that runs nothing is broken (wrong runner, discovery failed): never green.
+                # Without a filter a project that runs nothing is broken (wrong runner, discovery failed): never green -
+                # also when the slow categories were left out (AB#9829): a broken discovery looks the same, so it is named.
                 $result.state = 'noTests'
-                $result.note = 'the project ran no test although no filter was given'
+                $result.note = if (@($item.Excluded).Count -gt 0) {
+                    "the project ran no test although no filter was given (the categories $(@($item.Excluded) -join ', ') were left out; if every test is in one of them, run with -includeSlow, in octo-devstack includeSlow=true)"
+                }
+                else { 'the project ran no test although no filter was given' }
                 foreach ($line in @(Get-OctoTestLogErrors -logFile $logFile)) { if (-not $errors.Contains($line)) { $errors.Add($line) } }
             }
             else { $result.state = 'passed' }
+            if ($item.ExcludeNote -and -not $result.note) { $result.note = $item.ExcludeNote }
             $result.success = $result.state -in @('passed', 'noMatch')
             $result.errors = @($errors | Select-Object -First $script:MaxErrorLines)
             if (-not $result.success -and -not $failedProject) {
@@ -2168,6 +2230,7 @@ function Invoke-OctoTestRun {
                 configuration = $configuration
                 filter        = if ($filter) { $filter } else { $null }
                 rerunFailed   = [bool]$rerunFailed
+                excludedCategories = @($item.Excluded)
                 state         = $result.state
                 total         = $result.total
                 passed        = $result.passed
@@ -2251,6 +2314,8 @@ function Invoke-OctoTestRun {
         configuration  = $configuration
         filter         = if ($filter) { $filter } else { $null }
         rerunFailed    = [bool]$rerunFailed
+        includeSlow    = [bool]$includeSlow
+        excludedCategories = @($leftOutRun)
         totals         = $totals
         elapsedSeconds = $watch.Elapsed.TotalSeconds
         lane           = [ordered]@{ isolated = $laneSettings.isolated; reason = $laneSettings.reason; environment = $runEnvironment }

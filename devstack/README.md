@@ -367,10 +367,10 @@ The tools speak the vocabulary of octo-claude-pm (the server instructions say th
 | | `lane_sync(owner, lane, session)` | `Sync-OctoEnvironment`: refresh the snapshot of the base lane's feed and catalogs; refused while a range/all build of the base lane runs or waits, or the lane builds |
 | | `lane_affected(lane, target?)` | `Get-OctoAffectedRepos [-target]`: the repos the lane's changes reach (read-only) |
 | | `lane_build(owner, lane, repos, skip, verifyTests = true, syncMain, stopServices, restartServices, buildUnchanged, includeTests, maxParallel, refreshCatalogs, dryRun, session)` | `Invoke-BuildEnvironment`: the lane's repos that changed into its own feed, test projects compiled; a job (see "Lanes") |
-| | `lane_test(owner, lane, repo, project, filter, rerunFailed, ..., session)` | `Invoke-OctoTestRun` of one repo of the lane as a job (see "Test runs") |
+| | `lane_test(owner, lane, repo, project, filter, rerunFailed, includeSlow, ..., session)` | `Invoke-OctoTestRun` of one repo of the lane as a job; leaves the slow categories Performance and Stress out unless `includeSlow=true` (see "Test runs") |
 | | `lane_remove(owner, lane, keepData, keepBranches, session)` | Remove a lane, leaving nothing behind: refused while a process the daemon did not start holds files below it; stop the lane stack, release its lease, `Remove-OctoEnvironment` (refuses dirty or unpushed worktrees), then drop the lane stack's data (`dataDrop`; `leftovers` list what remains) and delete the feature branches without commits (`branches`) - see "Removing a lane" |
 | Base lane | `base_build(owner, kind = repo \| range \| all \| profile, path, baseLane, from, to, include, exclude, profile, publish, confirm, stopServices, restartServices, ..., session)` | Builds of the base lane (see "Builds"); `range` (`publish=true`) and `all` (`confirm=true`) only with the developer's go |
-| | `base_test(owner, repo, baseLane?, project, filter, rerunFailed, ..., session)` | `Invoke-OctoTestRun` of one repo of the base lane as a job |
+| | `base_test(owner, repo, baseLane?, project, filter, rerunFailed, includeSlow, ..., session)` | `Invoke-OctoTestRun` of one repo of the base lane as a job (slow categories as `lane_test`) |
 | Jobs | `job_status(id, waitSeconds, repo, project, errorsOnly, include, live, includePassed)` | A build or test run in a compact shape (progress, ETA, seconds per repo and phase, parsed errors; a test run's failed tests by name); `waitSeconds` (max 50, a longer value is capped with a note) waits until the job ends and says `timedOut` when it did not. `job_status` / `job_output` / `job_cancel` take the full id (`b351-081503`) or the short one (`b351`, `351`; exactly that sequence, an ambiguous one is refused) |
 | | `job_list(lane?, limit=20)` / `job_cancel(owner, id, lane?, session)` | One line per job the daemon knows (also of earlier daemon runs), newest first - id, kind, state, lane, target, summary, queued, seconds, owner; cancel your own (any session of a lane cancels the lane's jobs) |
 | | `job_output(id, repo?, lines)` / `job_refusals` | Up to 5000 log lines of one repo or the job (`GET /api/builds/<id>/output`); the builds refused in the last 2 hours with their conflicts |
@@ -575,7 +575,9 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   (the next build of the repo deletes `Invoke-Build.log`).
 - **Usual durations and overdue jobs**: the daemon keeps the last 30 durations of every successful repository build
   (across lanes) and of every test project of an unfiltered test run (passed or failed; a run with `filter` or
-  `rerunFailed` runs only a part of a project and is not counted), per repository, test project and configuration; a
+  `rerunFailed` runs only a part of a project and is not counted, neither is a run with `includeSlow`), per repository,
+  test project and configuration (samples recorded before octo-tools AB#9829 include the slow categories, so median and
+  p90 of such a project fall only as new runs replace them - the series keeps the last 30); a
   test project's runs that compile it first and those on its last build are two series (`compilesFirst`), and a running
   project is compared with the series of its own kind (`duration-history.json` in the state folder; the
   `build-history.json` of earlier daemons is taken over, and a damaged file starts an empty history).
@@ -642,6 +644,15 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
   expression; `rerunFailed=true` runs only the tests that failed in each project's last result. No full rebuild: a
   project whose build is current runs with `--no-build`, otherwise `dotnet test` builds it incrementally (`buildReason`).
   A repository with `tests/*.Tests.ps1` has the test project `Pester` (runner `pester`; Pester 5 in a pwsh of its own).
+- **Slow tests are left out by default** (octo-tools AB#9829): a run without `filter` and `rerunFailed` leaves out the tests
+  with trait `Category=Performance` or `Category=Stress` - the wall-clock budget and memory-pressure tests that CI leaves
+  out as well (`--filter "Category!=Performance&Category!=Stress"`) and runs in its performance pipelines. VSTest projects
+  get that filter, xunit.v3 on MTP `--filter-not-trait Category=<name>`; TUnit, frontend and Pester projects run unchanged.
+  `includeSlow=true` runs them too (in octo-construction-kit-engine-mongodb they take about 17 of the 25 minutes of
+  `Runtime.Engine.MongoDb.IntegrationTests`); a `filter` or `rerunFailed` runs exactly what it names. A project that then
+  runs no test stays `noTests`, and its note names the categories left out. `job_status` names them per project
+  (`excludedCategories`, left out when none). A run with `includeSlow` is no sample for
+  `job_stats`. Refused with an octo-tools without `-includeSlow` (there every test runs anyway).
 - **rerunFailed** reruns the failed tests of one job: the newest finished test run of the repository in that lane; only its
   projects with failed tests run, and a note names the job. Refused before a job exists when that run had no failed test
   (the refusal names an earlier run that had), when octo-devstack knows no such run, or while a run of the repository

@@ -202,7 +202,10 @@ public sealed record BuildTestProject(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     bool? PassedTruncated = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    int? PassedListed = null);
+    int? PassedListed = null,
+    // octo-tools AB#9829: the slow test categories the run left out of this project (null when none).
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? ExcludedCategories = null);
 
 /// <summary>name: &lt;class&gt;.&lt;method&gt;; message: the first error message; stackFrame: the first stack line.</summary>
 public sealed record BuildFailedTest(

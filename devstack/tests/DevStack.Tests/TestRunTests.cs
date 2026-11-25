@@ -428,6 +428,54 @@ public sealed class TestRunTests : IDisposable
         (await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id)).Tests!.Projects.Single().Runner.Should().BeNull();
     }
 
+    // octo-tools AB#9829: a plain run leaves the slow categories out; includeSlow runs them too.
+    private static readonly string SlowParams = FakePwsh.TestParams.Replace("\"rerunFailed\",", "\"rerunFailed\",\"includeSlow\",\"slowCategories\",");
+
+    [Fact]
+    public async Task IncludeSlow_runs_the_slow_categories_too_and_such_a_run_is_no_sample_of_the_usual_duration()
+    {
+        SlowParams.Should().Contain("includeSlow");
+        _fake.Capabilities = SlowParams;
+        ThreeProjects();
+        var queue = Create();
+
+        await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a") with { IncludeSlow = true }, Ct)).Id);
+
+        _fake.BuildCalls.Single().Should().StartWith("Invoke-OctoTestRun -branch 'branches/main' -repo 'octo-a' -includeSlow -Json");
+        queue.DurationStats("octo-a").Should().BeEmpty("a run with the slow categories takes far longer than the default run it would be compared with");
+
+        await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        _fake.BuildCalls.Last().Should().NotContain("-includeSlow", "the default run leaves the slow categories out in the cmdlet");
+        queue.DurationStats("octo-a").Should().NotBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_green_default_run_says_per_project_which_slow_categories_it_left_out()
+    {
+        _fake.Capabilities = SlowParams;
+        _fake.Build = (_, _, _) => Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun",
+            """{"success":true,"exitCode":0,"repo":"octo-a","excludedCategories":["Performance","Stress"],"totals":{"total":3,"passed":3,"failed":0,"skipped":0},"projects":[""" +
+            """{"project":"A.Tests","state":"passed","success":true,"runner":"vstest","excludedCategories":["Performance","Stress"],"total":2,"passed":2,"failed":0,"skipped":0,"failedTests":[]},""" +
+            """{"project":"B.Tests","state":"passed","success":true,"runner":"mtp","note":"TUnit: the categories Performance, Stress are not left out, every test runs","excludedCategories":[],"total":1,"passed":1,"failed":0,"skipped":0,"failedTests":[]}]}"""));
+        var queue = Create();
+
+        var done = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        done.State.Should().Be("succeeded");
+        done.Tests!.Projects.Single(p => p.Project == "A.Tests").ExcludedCategories.Should().Equal("Performance", "Stress");
+        done.Tests.Projects.Single(p => p.Project == "B.Tests").ExcludedCategories.Should().BeNull("an empty list is left out of the answer");
+    }
+
+    [Fact]
+    public async Task IncludeSlow_needs_an_octo_tools_that_has_it()
+    {
+        var queue = Create();
+
+        var run = () => queue.EnqueueAsync(Tests("octo-a") with { IncludeSlow = true }, Ct);
+
+        (await run.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*has no -includeSlow*AB#9829*runs every test anyway*");
+    }
+
     // octo-tools AB#8835: the Docker check and the container limits of Invoke-OctoTestRun.
     private static readonly string DockerParams = GapsParams.Replace("\"rerunFailed\",", "\"rerunFailed\",\"dockerCheck\",\"minDockerFreeMemoryGiB\",\"dockerCpus\",\"dockerMemory\",");
 

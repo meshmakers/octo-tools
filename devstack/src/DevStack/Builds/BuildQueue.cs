@@ -679,7 +679,7 @@ public sealed partial class BuildQueue : IBuildGuard
     {
         static string Key(BuildRequest r) => string.Join('\n', r.Owner.Trim().ToLowerInvariant(), r.Environment ?? "", r.Checkout?.Trim() ?? "",
             r.Repo?.Trim().ToLowerInvariant() ?? "", string.Join(',', r.Projects.Select(p => p.Trim().ToLowerInvariant()).Where(p => p.Length > 0).Order()),
-            r.Filter?.Trim() ?? "", r.RerunFailed, r.Configuration ?? "");
+            r.Filter?.Trim() ?? "", r.RerunFailed, r.IncludeSlow, r.Configuration ?? "");
 
         var key = Key(request);
         return _jobs.Values.Where(j => j.Request.Kind == BuildKind.Test && j.State is "queued" or "running" && Key(j.Request) == key)
@@ -1496,11 +1496,13 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
             var errors = (entry["errors"] as JsonArray ?? []).Select(BuildPlanner.Str).Where(e => !string.IsNullOrWhiteSpace(e)).Select(e => SecretMask.MaskValue(e!)).ToList();
             var failedCount = (int?)BuildPlanner.Num(entry["failed"]);
             var passed = entry["passedTests"] is JsonArray names ? names.Select(BuildPlanner.Str).OfType<string>().ToList() : null;
+            var excluded = (entry["excludedCategories"] as JsonArray ?? []).Select(BuildPlanner.Str).OfType<string>().Where(c => c.Length > 0).ToList();
             result.Add(new BuildTestProject(name, BuildPlanner.Str(entry["state"]) ?? (BuildPlanner.Bool(entry["success"]) == false ? "failed" : "passed"),
                 (int?)BuildPlanner.Num(entry["total"]), (int?)BuildPlanner.Num(entry["passed"]), failedCount, (int?)BuildPlanner.Num(entry["skipped"]),
                 Round(BuildPlanner.Num(entry["durationSeconds"])), failed, failedCount > failed.Count ? failedCount - failed.Count : null,
                 errors.Count > 0 ? errors : null, BuildPlanner.Str(entry["buildReason"]), BuildPlanner.Bool(entry["docker"]), BuildPlanner.Str(entry["note"]),
-                BuildPlanner.Str(entry["runner"]), passed, passed == null ? null : BuildPlanner.Bool(entry["passedTruncated"]) == true ? true : null));
+                BuildPlanner.Str(entry["runner"]), passed, passed == null ? null : BuildPlanner.Bool(entry["passedTruncated"]) == true ? true : null,
+                ExcludedCategories: excluded.Count > 0 ? excluded : null));
         }
 
         foreach (var run in events.Repos.Where(r => !result.Any(p => string.Equals(p.Project, r.Repo, StringComparison.OrdinalIgnoreCase))))
@@ -2009,12 +2011,13 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
 
     /// <summary>
     ///     The durations of the test projects of a whole test run: a filter or rerunFailed runs only a part of a project, so such
-    ///     a run says nothing about what the project usually takes. Projects that ended with passed or failed count; an error, no
+    ///     a run says nothing about what the project usually takes; a run with includeSlow (AB#9829) takes far longer than the
+    ///     default run that leaves the slow categories out, and is not counted either. Projects that ended with passed or failed count; an error, no
     ///     tests or a project the run never finished do not.
     /// </summary>
     private void RecordTestDurations(BuildJob job, StepEvents events)
     {
-        if (!string.IsNullOrWhiteSpace(job.Request.Filter) || job.Request.RerunFailed || TestedRepo(job, events.TestRepo) is not { } repo)
+        if (!string.IsNullOrWhiteSpace(job.Request.Filter) || job.Request.RerunFailed || job.Request.IncludeSlow || TestedRepo(job, events.TestRepo) is not { } repo)
         {
             return;
         }
