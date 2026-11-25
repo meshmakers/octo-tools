@@ -482,6 +482,36 @@ Describe 'Filter calls per runner (AB#8832)' {
     }
 }
 
+Describe 'Slow test categories left out of a plain run (AB#9829)' {
+    It 'leaves the categories out in the filter language of the runner, only without -filter and -failedNames' {
+        InModuleScope OctoTests {
+            $slow = @('Performance', 'Stress')
+            $vstest = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'A'; Runner = 'vstest'; Framework = 'other' }) -excludeCategories $slow
+            $vstest.Calls[0].Arguments | Should -Be @('--filter', 'Category!=Performance&Category!=Stress')
+            $vstest.Calls[0].Display | Should -Be 'Category!=Performance&Category!=Stress'
+            @($vstest.Excluded) | Should -Be $slow
+
+            $xunit = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'C'; Runner = 'mtp'; Framework = 'xunit3' }) -excludeCategories $slow
+            $xunit.Calls[0].Arguments | Should -Be @('--filter-not-trait', 'Category=Performance', '--filter-not-trait', 'Category=Stress')
+            @($xunit.Excluded) | Should -Be $slow
+
+            # TUnit runs unchanged and says so
+            $tunit = Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'B'; Runner = 'mtp'; Framework = 'tunit' }) -excludeCategories $slow
+            $tunit.Calls[0].Arguments | Should -BeNullOrEmpty
+            @($tunit.Excluded).Count | Should -Be 0
+            $tunit.ExcludeNote | Should -Match 'not left out'
+
+            # a filter runs what it names; a category with an operator character is escaped
+            (Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'A'; Runner = 'vstest'; Framework = 'other' }) -filter 'FullyQualifiedName~Order' -excludeCategories $slow).Calls[0].Arguments |
+                Should -Be @('--filter', 'FullyQualifiedName~Order')
+            (Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'A'; Runner = 'vstest'; Framework = 'other' }) -excludeCategories @('Load=High', ' ', 'Load=High')).Calls[0].Arguments |
+                Should -Be @('--filter', 'Category!=Load\=High')
+            # nothing to leave out: the plain call
+            (Get-OctoTestFilterCalls -project ([pscustomobject]@{ Name = 'A'; Runner = 'vstest'; Framework = 'other' }) -excludeCategories @()).Calls[0].Arguments | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'Test projects of a repository' {
     BeforeEach { $script:ws = New-TestWorkspace }
 
@@ -851,10 +881,14 @@ Describe 'Invoke-OctoTestRun' {
 
             # dotnet test <csproj> -c DebugL --no-build --results-directory <run> --logger trx --logger console;verbosity=normal -nodeReuse:false
             # (the console logger prints a line per test: progress for octo-devstack's idle watchdog, AB#9808)
+            # --filter Category!=Performance&Category!=Stress: a plain run leaves the slow categories out, as CI does (AB#9829)
             $script:Calls[0].Arguments[0] | Should -Be 'test'
             $script:Calls[0].Arguments[1] | Should -Be (Join-Path $ws.Repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj')
-            ($script:Calls[0].Arguments -join ' ') | Should -Match '-c DebugL --no-build --results-directory .+ --logger trx;LogFileName=results\.trx --logger console;verbosity=normal -nodeReuse:false$'
-            $script:Calls[0].Filter | Should -BeNullOrEmpty
+            ($script:Calls[0].Arguments -join ' ') | Should -Match '-c DebugL --no-build --results-directory .+ --logger trx;LogFileName=results\.trx --logger console;verbosity=normal -nodeReuse:false --filter Category!=Performance&Category!=Stress$'
+            $script:Calls[0].Filter | Should -Be 'Category!=Performance&Category!=Stress'
+            @($doc.data.excludedCategories) | Should -Be @('Performance', 'Stress')
+            $doc.data.includeSlow | Should -BeFalse
+            @($doc.data.projects[0].excludedCategories) | Should -Be @('Performance', 'Stress')
             # a legacy lane: no lane environment
             $script:Calls[0].NugetPackages | Should -BeNullOrEmpty
 
@@ -912,6 +946,30 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.lock.required | Should -BeFalse
             $doc.data.lock.acquired | Should -BeFalse
             @($doc.data.projects).Count | Should -Be 1
+            # a filter runs what it names: no slow categories left out (AB#9829)
+            @($doc.data.excludedCategories).Count | Should -Be 0
+        }
+
+        It 'runs the slow categories too with -includeSlow, and leaves out the ones -slowCategories names (AB#9829)' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project UnitTests -includeSlow -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeTrue
+            $doc.data.includeSlow | Should -BeTrue
+            @($doc.data.excludedCategories).Count | Should -Be 0
+            $script:Calls[0].Filter | Should -BeNullOrEmpty
+            $script:Calls[0].Arguments | Should -Not -Contain '--filter'
+
+            Reset-TestDotnet
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project UnitTests -slowCategories 'Slow' -lockPath $script:LockPath -Json)
+            $script:Calls[0].Filter | Should -Be 'Category!=Slow'
+            @($doc.data.projects[0].filters) | Should -Be @('Category!=Slow')
+
+            # what a plain run leaves out is named when the project then runs no test, which stays a failure
+            Reset-TestDotnet
+            $script:Behaviour['Sample.UnitTests'] = @{ Trx = $null; ExitCode = 0 }
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project UnitTests -lockPath $script:LockPath -Json)
+            $doc.data.success | Should -BeFalse
+            $doc.data.projects[0].state | Should -Be 'noTests'
+            $doc.data.projects[0].note | Should -Match 'Performance, Stress were left out.+-includeSlow'
         }
 
         It 'reuses a current build in a repository that builds into one repository-level bin folder (-build Auto passes --no-build, AB#9659)' {

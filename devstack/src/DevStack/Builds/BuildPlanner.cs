@@ -98,6 +98,12 @@ public sealed record BuildRequest
     /// <summary>kind=test: only the tests that failed in each project's last result.</summary>
     public bool RerunFailed { get; init; }
 
+    /// <summary>
+    ///     kind=test (octo-tools AB#9829): also run the slow test categories (Performance, Stress) that a run without filter and
+    ///     rerunFailed leaves out by default, as CI does.
+    /// </summary>
+    public bool IncludeSlow { get; init; }
+
     /// <summary>kind=test: the result names the passed tests too (at most <see cref="MaxPassed"/> per project).</summary>
     public bool IncludePassed { get; init; }
 
@@ -521,6 +527,17 @@ internal sealed class BuildPlanner(
         if (request.RerunFailed)
         {
             parts.Add("-rerunFailed");
+        }
+
+        if (request.IncludeSlow)
+        {
+            if (!caps.Tests.IncludeSlow)
+            {
+                throw new InvalidOperationException($"Invoke-OctoTestRun of the octo-tools in {octoTools} has no -includeSlow (it comes with octo-tools AB#9829): " +
+                                                    "it runs every test anyway, so leave includeSlow out.");
+            }
+
+            parts.Add("-includeSlow");
         }
 
         if (request.IncludePassed)

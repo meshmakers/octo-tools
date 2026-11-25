@@ -11,7 +11,9 @@ public sealed class TestTools(BuildQueue queue)
 {
     private const string RunDetails =
         "All test projects of the repository or the ones in 'project', optionally with a 'filter', or only the tests that failed last time " +
-        "(rerunFailed=true). Frontend tests too: an Angular workspace of the repository with a 'test' script is a test project named after " +
+        "(rerunFailed=true). Slow tests (octo-tools AB#9829): a run without filter and rerunFailed leaves out the tests with trait " +
+        "Category=Performance or Category=Stress, as CI does (they run in the performance pipelines) - includeSlow=true runs them too; a " +
+        "filter or rerunFailed runs what it names. Frontend tests too: an Angular workspace of the repository with a 'test' script is a test project named after " +
         "its folder; it runs ng test headless, 'filter' is then a regular expression over suite and test names, and a failed test is named " +
         "'<spec file> :: <test name>'. Returns a job at once - wait with job_status(id, waitSeconds); job_status lists the failed tests by " +
         "name. No full rebuild: a project whose build is current runs with --no-build, otherwise dotnet test builds it incrementally " +
@@ -41,6 +43,10 @@ public sealed class TestTools(BuildQueue queue)
         "Test filter in the language of the project's runner: VSTest (and MSTest/NUnit) an expression such as 'FullyQualifiedName~RtEntityTests' " +
         "or 'Category!=Slow'; TUnit and xunit.v3 on Microsoft.Testing.Platform a tree filter such as '/*/*/RtEntityTests/*' (starts with '/').";
 
+    private const string IncludeSlowDescription =
+        "Also run the slow tests (trait Category=Performance or Category=Stress: wall-clock budget and memory-pressure tests, e.g. " +
+        "DownsamplingManyIdsPerformanceTests, about 17 min) that a run without filter and rerunFailed leaves out by default. Needs octo-tools AB#9829.";
+
     private const string RerunFailedDescription =
         "Run only the tests that failed in the last result of each selected project (projects without failed tests are skipped).";
 
@@ -68,12 +74,13 @@ public sealed class TestTools(BuildQueue queue)
         [Description("CPU limit for every container the tests start (cmdlet default 4).")] double? dockerCpus = null,
         [Description(DockerMemoryDescription)] string? dockerMemory = null,
         [Description(StackTools.SessionDescription)] string? session = null,
+        [Description(IncludeSlowDescription)] bool includeSlow = false,
         CancellationToken cancellationToken = default) =>
         ToolGuard.Run(async () =>
         {
             using var caller = StackTools.Caller(session, owner, lane);
             return await queue.EnqueueAsync(Request(owner, repo, string.IsNullOrWhiteSpace(lane) ? throw new ArgumentException("lane is required (lane_list).") : lane.Trim(),
-                null, project, filter, rerunFailed, configuration, includePassed, maxPassed, dockerCheck, minDockerFreeMemoryGiB, dockerCpus, dockerMemory), cancellationToken);
+                null, project, filter, rerunFailed, includeSlow, configuration, includePassed, maxPassed, dockerCheck, minDockerFreeMemoryGiB, dockerCpus, dockerMemory), cancellationToken);
         });
 
     [McpServerTool(Name = "base_test")]
@@ -100,11 +107,12 @@ public sealed class TestTools(BuildQueue queue)
         [Description("CPU limit for every container the tests start (cmdlet default 4).")] double? dockerCpus = null,
         [Description(DockerMemoryDescription)] string? dockerMemory = null,
         [Description(StackTools.SessionDescription)] string? session = null,
+        [Description(IncludeSlowDescription)] bool includeSlow = false,
         CancellationToken cancellationToken = default) =>
         ToolGuard.Run(async () =>
         {
             using var caller = StackTools.Caller(session, owner, null);
-            return await queue.EnqueueAsync(Request(owner, repo, null, baseLane, project, filter, rerunFailed, configuration, includePassed, maxPassed, dockerCheck,
+            return await queue.EnqueueAsync(Request(owner, repo, null, baseLane, project, filter, rerunFailed, includeSlow, configuration, includePassed, maxPassed, dockerCheck,
                 minDockerFreeMemoryGiB, dockerCpus, dockerMemory), cancellationToken);
         });
 
@@ -114,7 +122,7 @@ public sealed class TestTools(BuildQueue queue)
         "OOM-killed (exit 137).";
 
     private static BuildRequest Request(string owner, string repo, string? lane, string? baseLane, List<string>? project, string? filter, bool rerunFailed,
-        string? configuration, bool includePassed, int? maxPassed, string? dockerCheck, double? minDockerFreeMemoryGiB, double? dockerCpus, string? dockerMemory) =>
+        bool includeSlow, string? configuration, bool includePassed, int? maxPassed, string? dockerCheck, double? minDockerFreeMemoryGiB, double? dockerCpus, string? dockerMemory) =>
         new()
         {
             Owner = owner,
@@ -125,6 +133,7 @@ public sealed class TestTools(BuildQueue queue)
             Projects = project ?? [],
             Filter = filter,
             RerunFailed = rerunFailed,
+            IncludeSlow = includeSlow,
             Configuration = configuration,
             IncludePassed = includePassed,
             MaxPassed = maxPassed,

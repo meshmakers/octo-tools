@@ -336,13 +336,13 @@ public sealed record EnvironmentCapabilities(
 ///     What the octo-tools test cmdlets offer (AB#8813): Invoke-OctoTestRun (-env | -branch) -repo [-project] [-filter]
 ///     [-rerunFailed] [-EventsFile] -Json and Get-OctoTestLock -Json. Without them base_test / lane_test are refused with the reason.
 /// </summary>
-public sealed record TestCapabilities(bool Run, bool Events, bool RerunFailed, bool Lock, bool IncludePassed = false, bool DockerCheck = false)
+public sealed record TestCapabilities(bool Run, bool Events, bool RerunFailed, bool Lock, bool IncludePassed = false, bool DockerCheck = false, bool IncludeSlow = false)
 {
     public static readonly TestCapabilities None = new(false, false, false, false);
 
     internal static TestCapabilities From(HashSet<string>? run, HashSet<string>? testLock) =>
         new(run != null && run.Contains("repo"), run?.Contains("EventsFile") == true, run?.Contains("rerunFailed") == true, testLock != null,
-            run?.Contains("includePassed") == true, run?.Contains("dockerCheck") == true);
+            run?.Contains("includePassed") == true, run?.Contains("dockerCheck") == true, run?.Contains("includeSlow") == true);
 
     /// <summary>Why test runs are not available: the probe failed, or the octo-tools checkout has no Invoke-OctoTestRun yet.</summary>
     public static string Unavailable(BuildCapabilities caps, string octoTools) =>
