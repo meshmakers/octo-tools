@@ -1,3 +1,7 @@
+---
+description: Invoke-OctoTenantSweep: running one octo-cli command over many tenants without handling tokens
+applies_to: modules/Invoke-OctoTenantSweep.psm1, tests/OctoTenantSweep.Tests.ps1
+---
 # Working on many tenants: `Invoke-OctoTenantSweep` (AB#6840)
 
 Since the tenant gate (AB#5054 / AB#6728) a call that addresses tenant X must carry a token for tenant X.
