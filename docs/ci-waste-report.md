@@ -1,7 +1,10 @@
+---
+description: "Get-CiWasteReport: the daily report of duplicate CI work, its method and the 2026-10-10 baseline"
+applies_to: modules/Get-CiWasteReport.psm1, tests/CiWasteReport.Tests.ps1
+---
 # CI waste report (`Get-CiWasteReport`)
 
-Answers one question every day: **how much of our CI work is duplicate?** (AB#6369, Feature AB#6333,
-Epic AB#5711). It is read-only: HTTP GET against `dev.azure.com`, no build is queued or canceled,
+Answers one question every day: **how much of our CI work is duplicate?** It is read-only: HTTP GET against `dev.azure.com`, no build is queued or canceled,
 nothing is written, the access token is never printed.
 
 ## Usage
@@ -63,7 +66,7 @@ JSON shape: `{ schemaVersion: 1, command: "Get-CiWasteReport", timestamp, data: 
 ## Baseline 2026-10-10 (24 h, 2026-10-09 10:25Z to 2026-10-10 10:25Z, heavy release day)
 
 Reproduced by `tests/CiWasteReport.Tests.ps1` from the scrubbed recording `tests/fixtures/ci-waste-baseline-20261010.json`
-(analysis: `.po/ci-parallel-runs-analysis-20261010.md`):
+(the column "Analysis" holds the numbers of the earlier manual analysis, a file that is not in this repository):
 
 | Metric | Analysis | Report |
 |---|---|---|
@@ -81,7 +84,7 @@ Reproduced by `tests/CiWasteReport.Tests.ps1` from the scrubbed recording `tests
 The redundant estimate differs slightly (about 3 % in count, 4 % in minutes) because the analysis selected the runs
 slightly differently; the shares agree within 1 point. The "peak 6" of the analysis is the sustained peak.
 
-Targets of Feature AB#6333: strict duplicate share below 15 % (baseline 60 %), wasted minutes -80 %, queue wait p90 below 5 minutes.
+Targets: strict duplicate share below 15 % (baseline 60 %), wasted minutes -80 %, queue wait p90 below 5 minutes.
 
 ## Running it daily
 
@@ -89,12 +92,12 @@ The report needs only `az login` and the profile. For a daily record:
 `Get-CiWasteReport -Json > ci-waste-$(Get-Date -Format yyyyMMdd).json` and compare `data.totals.chain.duplicateShare` and
 `wastedMinutes` with the baseline above. The Release-Trains wiki page links here; publish the note below with the merge.
 
-### Note for the Release-Trains wiki / Feature AB#6333 (prepare, publish with the merge)
+### Note for the Release-Trains wiki (prepare, publish with the merge)
 
 > **CI waste report.** `Get-CiWasteReport` (octo-tools, `docs/ci-waste-report.md`) shows per CI definition how many runs
 > repeat an already built commit and how many agent-minutes that costs; `-Json` for scripts. Baseline 2026-10-10 (heavy release
 > day, 24 h): 170 of 284 chain runs (60 %) were same-commit duplicates, about 2,579 of 4,271 chain minutes; about 1,345
-> minutes (39 %) were provably redundant repeats on main. Target of AB#6333: below 15 % duplicates.
+> minutes (39 %) were provably redundant repeats on main. Target: below 15 % duplicates.
 
 ## Tests
 

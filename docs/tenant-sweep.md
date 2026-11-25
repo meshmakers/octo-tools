@@ -1,9 +1,13 @@
-# Working on many tenants: `Invoke-OctoTenantSweep` (AB#6840)
+---
+description: "Invoke-OctoTenantSweep: running one octo-cli command over many tenants without handling tokens"
+applies_to: modules/Invoke-OctoTenantSweep.psm1, tests/OctoTenantSweep.Tests.ps1
+---
+# Working on many tenants: `Invoke-OctoTenantSweep`
 
-Since the tenant gate (AB#5054 / AB#6728) a call that addresses tenant X must carry a token for tenant X.
+Since the tenant gate a call that addresses tenant X must carry a token for tenant X.
 Scripts that copied the token out of the octo-cli context file and sent it to a child tenant stop working by
 design. `Invoke-OctoTenantSweep` is the supported replacement: a thin loop around
-`octo-cli --context <name> -c <command>`. octo-cli does the authentication (AB#6836); the helper
+`octo-cli --context <name> -c <command>`. octo-cli does the authentication; the helper
 
 * never reads, prints, logs or writes a token and never opens the octo-cli context file,
 * never changes the active context (it always passes `--context`),
@@ -30,17 +34,17 @@ cause (`ProvisionCurrentUser -ttid <tenant>`). The sweep reports it as **Denied*
 
 ```powershell
 # What would run? (lists tenants and the exact octo-cli calls, runs nothing)
-Invoke-OctoTenantSweep -Installation test2 -Tenant tecob,lkv,wwc26 -CliArguments '-c','LibraryStatus','-io' -WhatIf
+Invoke-OctoTenantSweep -Installation <installation> -Tenant <tenantA>,<tenantB> -CliArguments '-c','LibraryStatus','-io' -WhatIf
 
 # Run it; one row per tenant: Tenant, Context, Outcome (Ok|Denied|Failed), ExitCode, Cause
-Invoke-OctoTenantSweep -Installation test2 -Tenant tecob,lkv,wwc26 -CliArguments '-c','LibraryStatus','-io'
+Invoke-OctoTenantSweep -Installation <installation> -Tenant <tenantA>,<tenantB> -CliArguments '-c','LibraryStatus','-io'
 
 # Commands with their own tenant argument: one context, {tenant} is substituted; tenants from GetTenants --all
-Invoke-OctoTenantSweep -Context test2_octosystem -AllTenants -Exclude octosystem `
+Invoke-OctoTenantSweep -Context <parent-tenant-context> -AllTenants -Exclude <parent-tenant> `
     -CliArguments '-c','ProvisionCurrentUser','-ttid','{tenant}'
 
 # Machine-readable (standard octo-tools envelope: data.summary + data.results)
-Invoke-OctoTenantSweep -Installation test2 -Tenant a,b -CliArguments '-c','ClearCache' -Json | ConvertFrom-Json
+Invoke-OctoTenantSweep -Installation <installation> -Tenant <tenantA>,<tenantB> -CliArguments '-c','ClearCache' -Json | ConvertFrom-Json
 ```
 
 | Parameter | Meaning |
@@ -60,16 +64,15 @@ unknown context). The sweep runs the tenants one after the other and never stops
 
 ## GraphQL over many tenants
 
-`octo-cli -c GraphQl -tid <tenant> (-q <text> | -f <file> | -si) [-vars <json|@file>] [-on <operation>]` (AB#7027,
-octo-cli on `main`) sends one query or mutation to `tenants/<tenant>/GraphQL` with the token for that tenant (same rule
-as every other command, AB#6836) and writes the response JSON unmodified to standard output (banner and log lines go to
+`octo-cli -c GraphQl -tid <tenant> (-q <text> | -f <file> | -si) [-vars <json|@file>] [-on <operation>]` (octo-cli on `main`) sends one query or mutation to `tenants/<tenant>/GraphQL` with the token for that tenant (same rule
+as every other command) and writes the response JSON unmodified to standard output (banner and log lines go to
 standard error). That makes it a normal sweep command; `-IncludeOutput` adds the scrubbed standard output to every row:
 
 ```powershell
 $q = '{ constructionKit { models(first:1) { totalCount } } }'
 
 # one system-tenant context, the tenant goes into -tid (read-only query here; a mutation works the same way)
-Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv,wwc26 -IncludeOutput `\
+Invoke-OctoTenantSweep -Context <parent-tenant-context> -Tenant <tenantA>,<tenantB>,<tenantC> -IncludeOutput `\
     -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q |
   ForEach-Object {
       [pscustomobject]@{
@@ -87,11 +90,11 @@ as cause; a tenant without provisioning is `Denied`. Never copy a token into a `
 ## Files routes, pool deploy, Python helpers
 
 * The files-migration status routes (`system/v1/files/migration-status/{tenant}`, `files/capabilities`) have no
-  CLI command and get none: the files migration is finished (AB#6183, decision 2026-10-19), the scripts that
+  CLI command and get none: the files migration is finished (decision 2026-10-19), the scripts that
   call them are retired, not ported.
 * Impersonation loops use the existing command `SwitchServiceAccountsToImpersonation` (sweep it with `-Context` and
   `-tid {tenant}`), not curl against `serviceAccount/switchToImpersonation`.
 * Deploying a communication pool (`POST .../v1/Pool/deploy?poolRtId=`) has **no CLI command** (known gap, not part of
-  AB#6840). The call needs a token issued for that tenant (a context of that tenant); do not take it from another context.
+  the sweep). The call needs a token issued for that tenant (a context of that tenant); do not take it from another context.
 * The Python helpers in `octo-claude-skills/skills/octo/scripts` use the active context's token for the
   context's **own** tenant and are not affected by the gate.

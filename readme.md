@@ -76,7 +76,7 @@ Invoke-BuildRange -branch main -from octo-construction-kit-engine -to octo-commo
 
 Per repository, in build order:
 
-0. (DebugL, AB#7974) `Sync-OctoCkIntermediateVersions` brings the private catalog's intermediate versions of the
+0. (DebugL) `Sync-OctoCkIntermediateVersions` brings the private catalog's intermediate versions of the
    repository's ckLanguage 2 CK models into `<lane>/.octo/local-catalog`, so the CK compile gate does not fail with
    `OCTO-CK203` (see "CK intermediate versions" below). `-skipCkSync` turns it off.
 1. `dotnet build -c DebugL -nodeReuse:false` of the solution's `src/` projects only (a temporary
@@ -111,7 +111,7 @@ is the nearest folder above `-repositoryPath` that holds an `Octo.User.props` (`
 pwsh was started in: `Set-Location wt-<env>/<repo>; Invoke-Build -repositoryPath . -configuration DebugL` builds in
 the environment, also in a pwsh started in `branches/main`. The path is resolved once, before the lane is chosen;
 `-DryRun -Json` shows the resolved `repositoryPath` and `laneRoot`. Should the repository not lie under the lane root
-that was found, the build refuses before `dotnet` starts and names both paths (AB#8954).
+that was found, the build refuses before `dotnet` starts and names both paths.
 
 **Private feeds for library worktrees.** `-repoPaths @{ 'octo-construction-kit-engine' = '<absolute worktree folder>' }`
 builds that repository from the given folder (e.g. a git worktree) instead of `<checkout>/<repo>`, at the same
@@ -122,7 +122,7 @@ run does not override them). `-WhatIf` shows both, `-Json` reports `feedPath` / 
 
 **Progress events.** `-EventsFile <file>` (also on `Invoke-Build` and `Invoke-BuildAll`) appends one JSON line per
 event while the run is going: `plan`, per repository `repoStart` / `phase` / `repoDone`, and a closing `done`
-(also when the run refuses or throws). The contract is in `CLAUDE.md` (`-Json` section).
+(also when the run refuses or throws). The contract is in [docs/json-output.md](docs/json-output.md).
 
 It stops at the first failing repository (fail fast, prints the repository name and the error lines
 of its `Invoke-Build.log`) and prints per-repository timings at the end (`-Json` for a
@@ -182,7 +182,7 @@ Notes for the loop:
   System model along. The local CK catalog is `<checkout>/.octo/local-catalog` (Start-Octo points
   `OCTO_LocalFileSystemCatalog__RootPath` at it).
 
-**CK intermediate versions (AB#7974).** The compile gate of a `ckLanguage: 2` model (baseline source `Local`, the
+**CK intermediate versions.** The compile gate of a `ckLanguage: 2` model (baseline source `Local`, the
 default outside CI) compares the declared version with the newest version of the same major below it in the local
 catalog (plus the cached GitHub catalogs, which `Octo.User.props` usually switches off). When the local catalog holds
 `System.Identity` 2.26.0 but never got 2.27.0/2.28.0 (built only in other lanes or PR builds with
@@ -214,13 +214,13 @@ them.
 
 ```powershell
 # All test projects of a repository in a feature environment (or a lane: -branch branches/main)
-Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine
+Invoke-OctoTestRun -env enum-null -repo construction-kit-engine
 
 # One project, one class
-Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine -project Engine.Tests -filter 'FullyQualifiedName~EnumTests'
+Invoke-OctoTestRun -env enum-null -repo construction-kit-engine -project Engine.Tests -filter 'FullyQualifiedName~EnumTests'
 
 # Only what failed last time (repeat until it is green)
-Invoke-OctoTestRun -env ab8625-enum-null -repo construction-kit-engine -rerunFailed
+Invoke-OctoTestRun -env enum-null -repo construction-kit-engine -rerunFailed
 
 # What would run, would it build, does it need the Docker lock?
 Invoke-OctoTestRun -branch branches/main -repo octo-asset-repo-services -WhatIf
@@ -325,9 +325,9 @@ that has a `test` script is a test project (named after the folder; two workspac
 their folder path relative to the repository, e.g. `apps.web`).
 
 ```powershell
-Invoke-OctoTestRun -branch branches/main -repo voest-app                    # ng test, headless, JUnit report
-Invoke-OctoTestRun -env ab8819-apps -repo energy-community -filter 'Billing' # a regular expression over suite and test names
-Invoke-OctoTestRun -branch branches/main -repo voest-app -rerunFailed       # only the spec files that held a failed test
+Invoke-OctoTestRun -branch branches/main -repo <app-repo>                    # ng test, headless, JUnit report
+Invoke-OctoTestRun -env apps -repo <app-repo> -filter 'Billing' # a regular expression over suite and test names
+Invoke-OctoTestRun -branch branches/main -repo <app-repo> -rerunFailed       # only the spec files that held a failed test
 ```
 
 It runs `npx ng test --watch=false --reporters=junit ...` in the app folder (after `npm ci` when there is no
@@ -343,33 +343,33 @@ on several features at the same time without one build overwriting another's `99
 touching `branches/main/nuget`.
 
 ```powershell
-# 1. Create it: feature worktree(s) on <user>/AB#8625_enum-null from origin/main, feed and catalogs copied from branches/main
-New-OctoEnvironment -env ab8625-enum-null -repos octo-construction-kit-engine -workItem AB#8625
+# 1. Create it: feature worktree(s) on <user>/AB#<id>_enum-null from origin/main, feed and catalogs copied from branches/main
+New-OctoEnvironment -env enum-null -repos octo-construction-kit-engine -workItem AB#<id>
 
 # 2. Which repositories does the change reach? Add the ones between the library and the service you run
-Get-OctoAffectedRepos -env ab8625-enum-null
-Add-OctoEnvironmentRepo -env ab8625-enum-null -repo octo-asset-repo-services -role consumer -addAffected
+Get-OctoAffectedRepos -env enum-null
+Add-OctoEnvironmentRepo -env enum-null -repo octo-asset-repo-services -role consumer -addAffected
 
-# 3. Work in wt-ab8625-enum-null/octo-construction-kit-engine (Rider, dotnet build: isolated by Octo.User.props)
+# 3. Work in wt-enum-null/octo-construction-kit-engine (Rider, dotnet build: isolated by Octo.User.props)
 #    and build the environment: only what changed since its last build here, and what consumes it;
 #    compile the tests before every hand-off
-Invoke-BuildEnvironment -env ab8625-enum-null -verifyTests
-Invoke-BuildEnvironment -env ab8625-enum-null -DryRun                          # what would be built, and why
-Invoke-BuildEnvironment -env ab8625-enum-null -repos construction-kit-engine,sdk   # only these
-Invoke-BuildEnvironment -env ab8625-enum-null -skip octo-docs                  # all but these
-Invoke-BuildEnvironment -env ab8625-enum-null -buildUnchanged                  # everything, changed or not
-Invoke-BuildEnvironment -env ab8625-enum-null -maxParallel 1                   # one repository after the other
+Invoke-BuildEnvironment -env enum-null -verifyTests
+Invoke-BuildEnvironment -env enum-null -DryRun                          # what would be built, and why
+Invoke-BuildEnvironment -env enum-null -repos construction-kit-engine,sdk   # only these
+Invoke-BuildEnvironment -env enum-null -skip octo-docs                  # all but these
+Invoke-BuildEnvironment -env enum-null -buildUnchanged                  # everything, changed or not
+Invoke-BuildEnvironment -env enum-null -maxParallel 1                   # one repository after the other
 
 # 4. main moved on? Take its new packages and catalog entries (yours keep winning)
-Invoke-BuildEnvironment -env ab8625-enum-null -syncMain        # or Sync-OctoEnvironment -env ab8625-enum-null
+Invoke-BuildEnvironment -env enum-null -syncMain        # or Sync-OctoEnvironment -env enum-null
 
 # 5. Status, and clean-up after the PR is merged (refuses dirty worktrees and unpushed work that is not on main;
 #    a squash- or rebase-merged branch is recognised; branches are kept)
-Get-OctoEnvironment -env ab8625-enum-null
-Remove-OctoEnvironment -env ab8625-enum-null
+Get-OctoEnvironment -env enum-null
+Remove-OctoEnvironment -env enum-null
 ```
 
-- **Removal after the merge** (AB#8953). After a squash or rebase merge GitHub deletes the branch, so its commits
+- **Removal after the merge**. After a squash or rebase merge GitHub deletes the branch, so its commits
   are on no remote although main has their changes. `Remove-OctoEnvironment` fetches origin's default branch and lets
   such a worktree go when every unpushed commit has a patch-equivalent commit on it (rebase merge, fast-forward),
   when every file the branch changed is identical there or the branch's whole change equals one commit there (squash
@@ -393,7 +393,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
   add them as consumers, or update and rebuild them in the base lane and run `Sync-OctoEnvironment`.
 - **Building one repository by hand**: `Set-Location wt-<env>/<repo>; Invoke-Build -repositoryPath . -configuration DebugL`
   builds with the environment's feed and package cache - relative paths follow the PowerShell location, not the
-  folder pwsh was started in (AB#8954). Check it first with `-DryRun -Json` (`laneRoot` is `wt-<env>`).
+  folder pwsh was started in. Check it first with `-DryRun -Json` (`laneRoot` is `wt-<env>`).
 - **Consumers** are detached worktrees; treat them as read-only. A library
   change reaches a service only if every repository between them is rebuilt in the environment, otherwise main's
   prebuilt packages bind to the new library at runtime (`MissingMethodException`).
@@ -421,7 +421,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
   failure nothing new starts and the running repositories finish. Measured with real builds of a throw-away
   workspace (one library, six independent consumers, one repository on top): 24.7 s sequential, 20-22 s with 2,
   17-18 s with 4; the gain grows with the number of independent repositories.
-- **A first build without the waiting** (AB#8831). Two things used to eat a first environment build: every CK
+- **A first build without the waiting**. Two things used to eat a first environment build: every CK
   compile re-read both remote CK catalogs (1-2.5 minutes each time), and a new environment downloaded all
   third-party packages again (2-5 GB). Now a build run reads the catalogs at most once - not at all while they were
   read in the last 30 minutes; when that one read is not possible (no `octo-ckc`, it fails) every CK compile
@@ -443,10 +443,10 @@ Remove-OctoEnvironment -env ab8625-enum-null
   unregisters it (it belongs to its original owner).
 - **Kill scope** per environment: `Invoke-KillDotnet -branchRootPath <rootPath>/wt-<env> -additionalRoots <in-place
   worktrees>`, run by `Invoke-BuildEnvironment` before the build (`-skipKill` to opt out); a main build never touches
-  environment processes: a lane's scope leaves its own `<lane>/wt-*` folders out (AB#9007).
+  environment processes: a lane's scope leaves its own `<lane>/wt-*` folders out.
 - **Running** the environment's services is octo-devstack's job (own stack slot per environment, fallback to main's
   binaries for the services the environment does not build). `Start-Octo` stays for main.
-- **Two workspace layouts** (AB#9007). The base lane is the folder that holds the repositories, `nuget/` and `.octo/`:
+- **Two workspace layouts**. The base lane is the folder that holds the repositories, `nuget/` and `.octo/`:
 
   | Layout | Folders | Profile loaded from | Base lane | Environments |
   |--------|---------|---------------------|-----------|--------------|
@@ -467,13 +467,13 @@ Remove-OctoEnvironment -env ab8625-enum-null
   Any other folder works as the base lane when it is passed with `-base` (relative to `$rootPath` or absolute) and
   recorded in the manifest - e.g. on Windows `D:/source/Octo` with the base checkout `D:/source/Octo/main`:
   `New-OctoEnvironment -env <env> -repos <repo> -base main` (manifest `base: "main"`, environment
-  `D:/source/Octo/wt-<env>`); every later cmdlet reads the base from the manifest. Windows is supported (AB#8912).
-- **Windows and agent sessions** (AB#8912, AB#8955).
+  `D:/source/Octo/wt-<env>`); every later cmdlet reads the base from the manifest. Windows is supported.
+- **Windows and agent sessions**.
   - `Invoke-BuildEnvironment` / `Invoke-BuildRange` look for processes running out of `<repo>/bin/` before a build
     (also under `-DryRun`). The scan never fails on a command line it cannot parse (leading whitespace, an empty
     first token, a quoted `"C:\Program Files\...\x.exe"`). It reports a process only with repository, PID, name (the
     executable or the entry assembly, e.g. `Meshmakers.Octo.X.dll`) and `match` (`cwd` | `bin-path`) - never its
-    command line, which can carry secrets (AB#9108); `-Json` `runningProcesses[{repo, pid, name, match}]`.
+    command line, which can carry secrets; `-Json` `runningProcesses[{repo, pid, name, match}]`.
   - With `-Json` both always write a JSON document: when `Invoke-BuildRange` throws, `error` carries its message
     (`Invoke-BuildRange failed: ...`) instead of `returned no JSON document`; the exception still reaches the caller
     after the document (read the output as a stream, e.g. `... -Json | ForEach-Object { .. }`, or from stdout).
@@ -495,9 +495,9 @@ Remove-OctoEnvironment -env ab8625-enum-null
   manifest but no worktree (`-branchName` and `-addAffected` need `-repos`) - and record the existing worktrees in place:
 
   ```powershell
-  New-OctoEnvironment -env ab9006-adopt -workItem AB#9006
-  Add-OctoEnvironmentRepo -env ab9006-adopt -path $rootPath/wt-ab9006-csharp-optargs/octo-communication-sdk -inPlace
-  Invoke-BuildEnvironment -env ab9006-adopt -verifyTests
+  New-OctoEnvironment -env adopt -workItem AB#<id>
+  Add-OctoEnvironmentRepo -env adopt -path $rootPath/wt-csharp-optargs/octo-communication-sdk -inPlace
+  Invoke-BuildEnvironment -env adopt -verifyTests
   ```
 
   From then on `Get-OctoEnvironment`, octo-devstack (`env_list`, its own stack slot) and the worktree sweep know the
@@ -505,7 +505,7 @@ Remove-OctoEnvironment -env ab8625-enum-null
   the hand-made folder's `../nuget`); without `-inPlace` it is moved into `wt-<env>/<repo>` (refused while a process
   runs from it). `Remove-OctoEnvironment` only unregisters an in-place worktree; the hand-made folder stays until its
   owner removes it. Adopt only when no session works in the worktree any more, or with that session's agreement.
-- **Removal stops the environment's dotnet processes first** (AB#9660). Once the checks passed (a refused removal
+- **Removal stops the environment's dotnet processes first**. Once the checks passed (a refused removal
   stops nothing) and before the first worktree is removed, `Remove-OctoEnvironment` stops the dotnet processes of
   `wt-<env>` with the lane matching of `Invoke-KillDotnet` (working directory, entry assembly, on Windows loaded
   modules) - **on every OS**: on Windows they lock files, on macOS/Linux they would keep running on deleted files.
@@ -556,7 +556,7 @@ through the octo-cli command `GraphQl` (`-IncludeOutput` returns the answer per 
 
 ```powershell
 $q = '{ constructionKit { models(first:1) { totalCount } } }'
-Invoke-OctoTenantSweep -Context test2_octosystem -Tenant tecob,lkv -IncludeOutput `
+Invoke-OctoTenantSweep -Context <parent-tenant-context> -Tenant <tenantA>,<tenantB> -IncludeOutput `
     -CliArguments '-c','GraphQl','-tid','{tenant}','-q',$q
 ```
 
@@ -566,7 +566,7 @@ Details and examples: [docs/tenant-sweep.md](docs/tenant-sweep.md).
 
 octo-devstack is a background service that runs the local OctoMesh stack for several Claude Code sessions and
 exposes it as an MCP server. Its sources are the folder [`devstack/`](devstack/README.md) of this repository (until
-AB#9711 the separate repository meshmakers/octo-devstack, now retired); build and test it there with
+recently the separate repository meshmakers/octo-devstack, now retired); build and test it there with
 `dotnet build Octo.DevStack.sln` / `dotnet test Octo.DevStack.sln` (see [devstack/CLAUDE.md](devstack/CLAUDE.md)).
 Start it and register it once:
 
@@ -607,7 +607,7 @@ configuration `devstack.yaml` in the octo-tools config folder (`~/.config/octo-t
 `Get-OctoWorkspace` names it), written on the first start. A `~/.config/octo-devstack/devstack.yaml` of an older
 daemon is copied there once and left as it is.
 
-**One-time migration from the octo-devstack clone (AB#9711).** An installed daemon service (`Install-OctoDevStackDaemonService`)
+**One-time migration from the octo-devstack clone.** An installed daemon service (`Install-OctoDevStackDaemonService`)
 still points at the old clone (e.g. `~/dev/meshmakers/octo-devstack`). On macOS and Linux `Start-OctoDevStackDaemon`
 without `-Path` uses the path of the installed LaunchAgent or systemd unit; on Windows the logon task holds the old path
 (it runs `Start-OctoDevStackDaemon -Path <old clone>`). Move it once:
@@ -620,7 +620,7 @@ without `-Path` uses the path of the installed LaunchAgent or systemd unit; on W
    when that build is missing and starts the daemon.
 3. Check that `http://127.0.0.1:5090/health` shows the octo-tools commit, then reconnect the MCP server in Claude Code (`/mcp`).
 
-A daemon that ran a build from before AB#9657 comes back with renamed tools (`env_*` -> `lane_*`, `build_*` -> `job_*`).
+A daemon that ran a build from before the rename comes back with renamed tools (`env_*` -> `lane_*`, `build_*` -> `job_*`).
 
 # Tests
 

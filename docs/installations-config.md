@@ -1,3 +1,7 @@
+---
+description: "The per-developer octo-tools config file: installations, services templates, Rancher, Semaphore, Vault"
+applies_to: modules/Get-OctoToolsConfig.psm1, modules/Register-OctoCliContext.psm1
+---
 # octo-tools configuration
 
 Environment-specific values for the octo-tools PowerShell modules live in a
@@ -98,7 +102,7 @@ in your private profile override the config-file ones.
 
 | Field | Description |
 | --- | --- |
-| `url`  | Default `-AdapterUrl` for `Register-AiBastion` / `Get-AiBastionStatus`. |
+| `url`  | Reserved: no cmdlet reads it yet; `Register-AiBastion` / `Get-AiBastionStatus` take a mandatory `-AdapterUrl`. |
 
 ### `installations[]`
 
