@@ -605,6 +605,11 @@ public sealed partial class BuildQueue : IBuildGuard
         _jobs.Values.Where(j => j.State is "queued" or "running" && string.Equals(j.Request.Environment ?? j.Planned.Environment, env, StringComparison.Ordinal))
             .OrderBy(j => j.Sequence).Select(j => Describe(j, StatusView.Default)).ToList();
 
+    /// <summary>What repository builds and test projects usually take (job_stats), slowest first; optionally of one repository.</summary>
+    public IReadOnlyList<DurationStat> DurationStats(string? repo = null) =>
+        _history.Stats().Where(s => repo == null || string.Equals(s.Repo, repo, StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(s.Repo, "octo-" + repo, StringComparison.OrdinalIgnoreCase)).ToList();
+
     public IReadOnlyList<BuildRefusal> Refusals()
     {
         lock (_refusalLock)
@@ -1268,6 +1273,7 @@ public sealed partial class BuildQueue : IBuildGuard
             // The test projects with their failed tests; summary and hint speak of tests, the "repo" is the project.
             var tests = ExplainBuildReasons(TestProjects(events, data), job.Planned.TestFolder, job.Planned.Configuration);
             job.SetTests(tests);
+            RecordTestDurations(job, events);
             var interrupted = result.Canceled || result.TimedOut || result.IdleTimedOut;
             var failedTests = tests.Sum(t => t.Failed ?? 0);
             if (success)
@@ -1832,7 +1838,7 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
                 { Project = test ? r.Run.Repo : null })
             .ToList();
         BuildCurrentRepo Now(RepoRun run, double seconds, string? phase = null) =>
-            new(test ? null : run.Repo, seconds, phase) { Project = test ? run.Repo : null };
+            WithTypical(new BuildCurrentRepo(test ? null : run.Repo, seconds, phase) { Project = test ? run.Repo : null }, job);
         // Where the time went: the phases summed over every repo that reported them, and the slowest repo.
         var timed = rows.Where(r => r.Run.Seconds != null || r.Run.BuildSeconds != null).ToList();
         var slowest = timed.OrderByDescending(r => r.Run.Seconds ?? r.Run.BuildSeconds).FirstOrDefault();
@@ -1879,6 +1885,46 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
         {
             ProjectIndex = test ? index : null, ProjectCount = test ? count : null, Projects = test ? repos : null
         }, eta);
+    }
+
+    /// <summary>
+    ///     The durations of the test projects of a whole test run: a filter or rerunFailed runs only a part of a project, so such
+    ///     a run says nothing about what the project usually takes. Projects that ended with passed or failed count; an error, no
+    ///     tests or a project the run never finished do not.
+    /// </summary>
+    private void RecordTestDurations(BuildJob job, StepEvents events)
+    {
+        if (!string.IsNullOrWhiteSpace(job.Request.Filter) || job.Request.RerunFailed || TestedRepo(job) is not { } repo)
+        {
+            return;
+        }
+
+        foreach (var run in events.Repos.Where(r => r.TestState is "passed" or "failed" && r.Seconds != null))
+        {
+            _history.RecordTest(job.Planned.Lane ?? "", repo, run.Repo, job.Planned.Configuration, run.Seconds!.Value, run.FinishedAt);
+        }
+    }
+
+    /// <summary>The repository a test run tests (its folder's name), null for a build.</summary>
+    private static string? TestedRepo(BuildJob job) =>
+        !IsTest(job) ? null : job.Planned.TestFolder is { Length: > 0 } folder ? Path.GetFileName(folder.TrimEnd('/', '\\')) : job.Request.Repo;
+
+    /// <summary>
+    ///     A running repository (or test project) with what it usually takes: typicalSeconds (median), limitSeconds, and overdue
+    ///     once it runs longer than the limit - it probably hangs.
+    /// </summary>
+    private BuildCurrentRepo WithTypical(BuildCurrentRepo now, BuildJob job)
+    {
+        var stat = IsTest(job)
+            ? TestedRepo(job) is { } repo && now.Project is { } project ? _history.Typical(DurationKind.Test, repo, project, job.Planned.Configuration) : null
+            : now.Repo is { } built ? _history.Typical(DurationKind.Build, built, null, job.Planned.Configuration) : null;
+        return stat == null
+            ? now
+            : now with
+            {
+                TypicalSeconds = stat.MedianSeconds, LimitSeconds = stat.LimitSeconds,
+                Overdue = stat.LimitSeconds is { } limit && now.Seconds > limit ? true : null
+            };
     }
 
     private static string? MapPhase(string? phase) => phase switch

@@ -89,6 +89,26 @@ public static class Attention
             });
         }
 
+        // A running repo or test project far beyond what it usually takes probably hangs (job_stats limitSeconds).
+        foreach (var b in o.Builds.Where(b => b.State == "running" && b.Progress != null))
+        {
+            var test = b.Kind == "test";
+            var now = b.Progress!.Running ?? (b.Progress.Current is { } c ? [c] : []);
+            foreach (var item in now.Where(n => n.Overdue == true))
+            {
+                var name = item.Project ?? item.Repo ?? "";
+                var what = test
+                    ? $"Test project {name} has been running for {Span(item.Seconds)} ({Place(b.Target, o)})"
+                    : $"{name} has been building for {Span(item.Seconds)} in the build of {Place(b.Target, o)}";
+                items.Add(new AttentionItem("caution", "overdue", $"{what}; it usually takes {Span(item.TypicalSeconds ?? 0)} - it may hang.",
+                    "#/builds/" + Uri.EscapeDataString(b.Id))
+                {
+                    BuildId = b.Id,
+                    Hint = $"job_output(id=\"{b.Id}\", repo=\"{name}\") shows its log; job_cancel(id=\"{b.Id}\") stops the job (its owner {b.Owner}, or a session of its lane)."
+                });
+            }
+        }
+
         foreach (var refusal in o.BuildRefusals.Where(r => r.Conflicts.Count > 0).Take(3))
         {
             items.Add(new AttentionItem("caution", "refusal",
@@ -221,6 +241,18 @@ public static class Attention
         "session" => "Claude Code session",
         _ => origin.LauncherCommand ?? "Another process"
     };
+
+    /// <summary>A duration as the reader says it: 45 s, 7 min, 1 h 20 min.</summary>
+    internal static string Span(double seconds)
+    {
+        if (seconds < 90)
+        {
+            return $"{Math.Round(seconds)} s";
+        }
+
+        var minutes = (int)Math.Round(seconds / 60);
+        return minutes < 60 ? $"{minutes} min" : $"{minutes / 60} h {minutes % 60} min";
+    }
 
     private static string Count(int n, string one, string? many = null) => $"{n} {(n == 1 ? one : many ?? one + "s")}";
 

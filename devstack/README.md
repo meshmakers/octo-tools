@@ -251,7 +251,8 @@ the URL by hand. `dashboard_open` is for the developer: a session calls it only 
 the agent view (`/mcp?view=agent`) lists neither the tool nor the prompt.
 
 - **Stack** (`#/stack`, `#/stack/<slot>`): one sentence about the shared stack, then what needs attention, worst first
-  (exited or unanswering services, lane problems, failed builds and test runs, refused builds, profile drift,
+  (exited or unanswering services, lane problems, failed builds and test runs, running jobs whose repository or test
+  project is overdue, refused builds, profile drift,
   processes on service ports the daemon did not start) - each line links to the place that explains it. The daemon builds
   this list (`attention` in `GET /api/overview`); `stack_attention` returns the same one. A failed build or test run stays
   until a newer run of the same target succeeds - a run in a lane is another target than the same repository in the base
@@ -287,7 +288,9 @@ the agent view (`/mcp?view=agent`) lists neither the tool nor the prompt.
   `lane_list`) and the lane's **jobs** (builds and test runs with kind, state, owner, the evidence - `unchanged` or
   `changed`, short `HEAD` per repository - start and duration), each linked to the jobs view.
 - **Jobs** (`#/builds`, `#/builds/<id>`): refusals, running builds and test runs with progress per repository (test
-  project: *project i of n*), the history (also of earlier daemon runs); a queued job says what it waits for. Every job
+  project: *project i of n*) and what the running repository or test project usually takes (*usually 5m 10s, overdue
+  after 14m*; an overdue one turns the job *overdue* with a note), the history (also of earlier daemon runs), and
+  *Usual durations* (`job_stats`, folded); a queued job says what it waits for. Every job
   says its kind - *lane* (`lane_build`, `lane_test`) or *base* (`base_build`, `base_test`), build (with its kind) or test
   run, and how many repositories or test projects - and what it ran on (*Ran on*: `evidence.unchanged` and the short
   `HEAD` of its repositories). Finished runs whose lane or folder no longer exists (`gone`, see "Builds") are hidden from
@@ -370,6 +373,7 @@ The tools speak the vocabulary of octo-claude-pm (the server instructions say th
 | Jobs | `job_status(id, waitSeconds, repo, project, errorsOnly, include, live, includePassed)` | A build or test run in a compact shape (progress, ETA, seconds per repo and phase, parsed errors; a test run's failed tests by name); `waitSeconds` (max 900) waits until the job ends and says `timedOut` when it did not |
 | | `job_list` / `job_cancel(owner, id, lane?, session)` | Every job the daemon knows (also of earlier daemon runs); cancel your own (any session of a lane cancels the lane's jobs) |
 | | `job_output(id, repo?, lines)` / `job_refusals` | Up to 5000 log lines of one repo or the job (`GET /api/builds/<id>/output`); the builds refused in the last 2 hours with their conflicts |
+| | `job_stats(repo?)` | What repository builds and test projects usually take on this machine (median, p90, max, last, the overdue limit), slowest first - see "Usual durations and overdue jobs" |
 | | `build_plan(kind \| lane, ...)` | What a `base_build` or `lane_build` would do, read-only: order and mode per repo, the predicted action per repo of a lane, stale flags, conflicts with running services, warnings, gates (see "Builds") |
 | Stacks | `stack_status(lane?)` | Services with pid (the process the daemon started; on Windows the `cmd.exe` wrapper, and `processId` is the service's own process below it - the pid RabbitMQ and `stack_verify` report), the entry assembly each process really loaded (macOS/Linux; `entryAssemblyProblem` when it is not below the service's folder), state (healthy/starting/unhealthy/exited), the folder it runs from and `runsFrom` (`lane:<name>`, `base lane` or the folder of a source override), who started or overrode it (`startedBy` = the owner of that call, `startedBySession`, `startedVia`: `stack_start`, `service_start`, `service_restart` or the restart after a build - in a lane stack too, whose lease the lane holds), log file, exit code and log tail of crashed services; `baseLane` (the base lane it runs from) and `lane` (a lane stack's lane); lease (owner, session, last activity); `external` = processes the daemon did not start on service ports (e.g. a `Start-Octo` in a terminal); `slots` = every stack in one line; a lane stack's last setup |
 | | `stack_start(owner, lane?, profile, services, exclude, overrides, envVars, replace, waitForHealthy, timeoutSeconds, baseLane, configuration, session)` | Start the shared stack (from the base lane) or a lane stack (`lane`) from a `profile` and/or a service list; per-service `overrides` (`source` = `lane:<name>` or a folder, `args`, `extraArgs`, `envVars`, `variables`) and stack-wide `envVars`; `replace=true` switches a running stack; waits for health by default. Without `services` a lane stack leaves out what cannot run there - the frontends, an adapter whose tenant another running stack serves - and lists each in `leftOut` with the reason and how to include it (a named list is refused instead). Named services bring their `startAfter` dependencies that do not run yet (`added`, see "Start order") |
@@ -565,9 +569,19 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   summary ends with it ("...; test projects NOT compiled and no test ran (verifyTests=true compiles them, lane_test / base_test run
   them)"). Tests run with `lane_test` / `base_test` only.
 - **Progress** comes from the cmdlets' `-EventsFile` (JSON lines) or, with older octo-tools, from each repo's
-  `Invoke-Build.log`; the ETA from the last five durations per lane, repo and configuration (`build-history.json` in the
-  state folder). The errors of a failed repo are parsed when its build ends and its log is copied into the state folder
+  `Invoke-Build.log`; the ETA from the lane's last five durations of a repo and configuration, else from the median of
+  every lane's. The errors of a failed repo are parsed when its build ends and its log is copied into the state folder
   (the next build of the repo deletes `Invoke-Build.log`).
+- **Usual durations and overdue jobs**: the daemon keeps the last 30 durations of every successful repository build
+  (across lanes) and of every test project of an unfiltered test run (passed or failed; a run with `filter` or
+  `rerunFailed` runs only a part of a project and is not counted), per repository, test project and configuration
+  (`duration-history.json` in the state folder; the `build-history.json` of earlier daemons is taken over).
+  `job_stats(repo?)` lists them slowest first with samples, median, p90, min, max, the last duration and `limitSeconds`
+  = twice p90, at least median + 120 s, from three samples on. A running repository or test project beyond its limit is
+  **overdue** - it runs far longer than usual and probably hangs: `job_status` marks it in `progress.current` /
+  `progress.running` (`typicalSeconds`, `limitSeconds`, `overdue: true`), `stack_attention` lists it (kind `overdue`,
+  level caution, with the `job_output` and `job_cancel` calls), and the status page marks the job *overdue*. A filtered
+  test run is compared with the whole project's durations, so only a filtered run slower than a whole one is overdue.
 - **rootPath**: octo-tools' `profile.ps1` sets `$rootPath`/`ROOTPATH` to `<octo-tools>/../..` (for an octo-tools worktree
   `.../octo-tools/.claude/worktrees`), and the cmdlets resolve `-branch` against it. Every build call of the daemon sets
   them to the daemon's `rootPath` first, so `-branch` is always relative to the daemon's rootPath.

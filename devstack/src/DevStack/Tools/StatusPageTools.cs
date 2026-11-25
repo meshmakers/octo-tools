@@ -20,9 +20,10 @@ public sealed class StatusPageTools(StackSupervisor supervisor, BuildQueue build
                  "broken lanes, the newest job of a target when it failed or lost its process (it clears once a newer run of the same target " +
                  "succeeds - a failed build of repos also once later range or all builds of the same base lane built each of them; a run in a " +
                  "lane is another target than the same repo in the base lane; a job whose lane or folder is gone, or holds only the developer " +
-                 "tools octo-tools, octo-devstack and octo-claude-pm, is history and never listed), refused builds, profile drift of the " +
-                 "shared stack, and processes on service ports the daemon did not start. Per item: level stop|caution|foreign, kind " +
-                 "config|service|lane|build|test|refusal|drift|external, the text, slot/service/buildId, and hint = the call " +
+                 "tools octo-tools, octo-devstack and octo-claude-pm, is history and never listed), running jobs whose repo or test project " +
+                 "runs far longer than usual (overdue: beyond limitSeconds of job_stats - it probably hangs), refused builds, profile drift " +
+                 "of the shared stack, and processes on service ports the daemon did not start. Per item: level stop|caution|foreign, kind " +
+                 "config|service|lane|build|test|overdue|refusal|drift|external, the text, slot/service/buildId, and hint = the call " +
                  "that explains it. An empty list means nothing needs attention. Read-only.")]
     public Task<IReadOnlyList<AttentionItem>> Attention() =>
         ToolGuard.Run(async () => (await Overview.BuildAsync(supervisor, builds, store, environments)).Attention);

@@ -239,6 +239,72 @@ public sealed class TestRunTests : IDisposable
         done.Tests!.Projects.Single().Should().BeEquivalentTo(new { Project = "A.Tests", State = "passed", Total = 3, Seconds = 4.2 });
     }
 
+    // ---------- usual durations ----------
+
+    /// <summary>A run of octo-a whose projects end passed (A, 6.5 s), failed (B, 12 s) and noTests (C).</summary>
+    private void ThreeProjects() =>
+        _fake.Build = (body, _, _) =>
+        {
+            Event(body, "testProjectStart", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":3");
+            Event(body, "testProjectDone", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":3,\"success\":true,\"state\":\"passed\",\"total\":4,\"passed\":4,\"failed\":0,\"skipped\":0,\"seconds\":6.5");
+            Event(body, "testProjectDone", "\"repo\":\"octo-a\",\"project\":\"B.Tests\",\"index\":2,\"count\":3,\"success\":false,\"state\":\"failed\",\"total\":2,\"passed\":1,\"failed\":1,\"skipped\":0,\"seconds\":12");
+            Event(body, "testProjectDone", "\"repo\":\"octo-a\",\"project\":\"C.Tests\",\"index\":3,\"count\":3,\"success\":false,\"state\":\"noTests\",\"total\":0,\"passed\":0,\"failed\":0,\"skipped\":0,\"seconds\":1");
+            return Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun",
+                """{"success":false,"exitCode":1,"repo":"octo-a","totals":{"total":6,"passed":5,"failed":1,"skipped":0},"projects":[{"project":"A.Tests","state":"passed","success":true,"total":4,"passed":4,"failed":0,"skipped":0,"durationSeconds":6.5,"failedTests":[]},{"project":"B.Tests","state":"failed","success":false,"total":2,"passed":1,"failed":1,"skipped":0,"durationSeconds":12,"failedTests":[]},{"project":"C.Tests","state":"noTests","success":false,"total":0,"passed":0,"failed":0,"skipped":0,"durationSeconds":1,"failedTests":[]}]}""",
+                exitCode: 1));
+        };
+
+    [Fact]
+    public async Task A_whole_test_run_records_what_its_projects_took_and_a_filtered_run_records_nothing()
+    {
+        ThreeProjects();
+        var queue = Create();
+
+        await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        await WaitAsync(queue, (await queue.EnqueueAsync(new BuildRequest { Owner = "s1", Kind = BuildKind.Test, Repo = "octo-a", Filter = "Name~X" }, Ct)).Id);
+        await WaitAsync(queue, (await queue.EnqueueAsync(new BuildRequest { Owner = "s1", Kind = BuildKind.Test, Repo = "octo-a", RerunFailed = true }, Ct)).Id);
+
+        var stats = queue.DurationStats("a");
+        stats.Select(s => (s.Kind, s.Repo, s.Project, s.Samples, s.LastSeconds)).Should().BeEquivalentTo(
+            [(DurationKind.Test, "octo-a", "B.Tests", 1, 12.0), (DurationKind.Test, "octo-a", "A.Tests", 1, 6.5)],
+            "passed and failed projects count, a project without tests does not, and neither does a run of a filter or of the failed tests");
+        queue.DurationStats("octo-b").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_test_project_that_runs_far_longer_than_usual_is_overdue()
+    {
+        var history = new BuildHistory(new DevStackPaths(_checkout.StateDirectory));
+        foreach (var s in new[] { 10.0, 11, 12 })
+        {
+            history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", "DebugL", s);
+            history.RecordTest(_checkout.Lane, "octo-a", "B.Tests", "DebugL", s);
+        }
+
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _fake.Build = async (body, _, _) =>
+        {
+            // A.Tests started ten minutes ago; it usually takes 11 s, its limit is 132 s.
+            var ts = DateTimeOffset.UtcNow.AddMinutes(-10).ToString("O");
+            File.AppendAllText(FakePwsh.EventsFile(body)!,
+                $$"""{"schemaVersion":1,"ts":"{{ts}}","command":"Invoke-OctoTestRun","event":"testProjectStart","repo":"octo-a","project":"A.Tests","index":1,"count":2}""" + "\n");
+            await release.Task;
+            return FakePwsh.Ok("Invoke-OctoTestRun", Passed);
+        };
+        var queue = Create();
+        var job = await queue.EnqueueAsync(Tests("octo-a"), Ct);
+
+        var running = await WaitAsync(queue, job.Id, s => s.Progress?.Current != null);
+        running.Progress!.Current.Should().BeEquivalentTo(new { Project = "A.Tests", TypicalSeconds = (double?)11, LimitSeconds = (double?)131, Overdue = (bool?)true });
+        var json = JsonSerializer.SerializeToNode(running.Progress.Current, McpJsonUtilities.DefaultOptions)!.AsObject();
+        json["overdue"]!.GetValue<bool>().Should().BeTrue();
+        json["typicalSeconds"]!.GetValue<double>().Should().Be(11);
+
+        release.SetResult();
+        var done = await WaitAsync(queue, job.Id);
+        done.Progress!.Current.Should().BeNull("a finished run has no current project");
+    }
+
     // octo-tools AB#8832: runner per project, noMatch, noTests as a failure, the names of passed tests.
     private static readonly string GapsParams = FakePwsh.TestParams.Replace("\"rerunFailed\",", "\"rerunFailed\",\"includePassed\",\"maxPassed\",");
 

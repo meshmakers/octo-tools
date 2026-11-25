@@ -1,54 +1,84 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Meshmakers.Octo.DevStack.Common;
 
 namespace Meshmakers.Octo.DevStack.Builds;
 
 /// <summary>
-///     Durations of successful repository builds per lane, repo and configuration (the last five), persisted in the state
-///     folder; the ETA of a running job is computed from them.
+///     How long things usually take: the durations of successful repository builds (kind build) and of test projects of
+///     unfiltered test runs (kind test, the project of a repository), the last <see cref="Keep" /> per repository, project and
+///     configuration across every lane, persisted in the state folder (<c>duration-history.json</c>). The ETA of a running
+///     job comes from them (a lane's own durations first), and so do the statistics of <c>job_stats</c> and the limit beyond
+///     which a running repository or test project is overdue - it probably hangs.
 /// </summary>
 public sealed class BuildHistory
 {
-    private const int Keep = 5;
+    /// <summary>Durations kept per repository (or test project) and configuration, across lanes.</summary>
+    internal const int Keep = 30;
+
+    /// <summary>A lane's own estimate (the ETA) averages its last five durations.</summary>
+    private const int LaneWindow = 5;
+
+    /// <summary>Durations needed before a limit is set: fewer say too little about what is usual.</summary>
+    internal const int MinSamplesForLimit = 3;
+
+    /// <summary>The least a running item may exceed its usual time by before it counts as overdue.</summary>
+    internal const double MinGraceSeconds = 120;
+
+    private const string FileName = "duration-history.json";
+    private const string LegacyFileName = "build-history.json";
+
+    private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+
     private readonly string _file;
     private readonly Lock _lock = new();
-    private Dictionary<string, List<double>> _entries;
+    private readonly Dictionary<string, Series> _series;
 
     public BuildHistory(DevStackPaths paths)
     {
-        _file = Path.Combine(paths.StateDirectory, "build-history.json");
-        _entries = Load(_file);
+        _file = Path.Combine(paths.StateDirectory, FileName);
+        _series = Load(_file, Path.Combine(paths.StateDirectory, LegacyFileName));
     }
 
-    private static string Key(string lane, string repo, string configuration) =>
-        $"{PathScope.Normalize(lane).TrimEnd(Path.DirectorySeparatorChar)}|{repo.ToLowerInvariant()}|{configuration}";
+    private static string Key(string kind, string repo, string? project, string configuration) =>
+        $"{kind}|{repo.ToLowerInvariant()}|{project?.ToLowerInvariant() ?? ""}|{configuration}";
 
-    public void Record(string lane, string repo, string configuration, double seconds)
+    private static string LaneKey(string lane) => PathScope.Normalize(lane).TrimEnd(Path.DirectorySeparatorChar);
+
+    /// <summary>A repository built successfully in <paramref name="lane" />.</summary>
+    public void Record(string lane, string repo, string configuration, double seconds, DateTimeOffset? at = null) =>
+        Add(DurationKind.Build, lane, repo, null, configuration, seconds, at);
+
+    /// <summary>A test project of <paramref name="repo" /> ran to its end (passed or failed) in an unfiltered test run.</summary>
+    public void RecordTest(string lane, string repo, string project, string configuration, double seconds, DateTimeOffset? at = null) =>
+        Add(DurationKind.Test, lane, repo, project, configuration, seconds, at);
+
+    private void Add(string kind, string lane, string repo, string? project, string configuration, double seconds, DateTimeOffset? at)
     {
-        if (seconds <= 0 || double.IsNaN(seconds))
+        if (seconds <= 0 || double.IsNaN(seconds) || string.IsNullOrWhiteSpace(repo))
         {
             return;
         }
 
         lock (_lock)
         {
-            var key = Key(lane, repo, configuration);
-            if (!_entries.TryGetValue(key, out var list))
+            var key = Key(kind, repo, project, configuration);
+            if (!_series.TryGetValue(key, out var series))
             {
-                _entries[key] = list = [];
+                _series[key] = series = new Series { Kind = kind, Repo = repo, Project = project, Configuration = configuration };
             }
 
-            list.Add(Math.Round(seconds, 1));
-            if (list.Count > Keep)
+            series.Samples.Add(new Sample { At = at ?? DateTimeOffset.Now, Seconds = Math.Round(seconds, 1), Lane = LaneKey(lane) });
+            if (series.Samples.Count > Keep)
             {
-                list.RemoveRange(0, list.Count - Keep);
+                series.Samples.RemoveRange(0, series.Samples.Count - Keep);
             }
 
             try
             {
                 var temp = _file + ".tmp";
-                File.WriteAllText(temp, JsonSerializer.Serialize(_entries));
-                Common.SharedFile.Replace(temp, _file);
+                File.WriteAllText(temp, JsonSerializer.Serialize(new HistoryFile { Series = _series.Values.ToList() }, Json));
+                SharedFile.Replace(temp, _file);
             }
             catch (IOException)
             {
@@ -57,12 +87,22 @@ public sealed class BuildHistory
         }
     }
 
-    /// <summary>Average of the recorded durations, null when the repo was never built here.</summary>
+    /// <summary>
+    ///     What a build of the repo in this lane takes: the average of the lane's last five durations, else the median of every
+    ///     lane's; null when the repo was never built.
+    /// </summary>
     public double? Estimate(string lane, string repo, string configuration)
     {
         lock (_lock)
         {
-            return _entries.TryGetValue(Key(lane, repo, configuration), out var list) && list.Count > 0 ? list.Average() : null;
+            if (!_series.TryGetValue(Key(DurationKind.Build, repo, null, configuration), out var series) || series.Samples.Count == 0)
+            {
+                return null;
+            }
+
+            var laneKey = LaneKey(lane);
+            var own = series.Samples.Where(s => s.Lane == laneKey).TakeLast(LaneWindow).ToList();
+            return own.Count > 0 ? own.Average(s => s.Seconds) : Percentile(series.Samples.Select(s => s.Seconds).ToList(), 50);
         }
     }
 
@@ -90,17 +130,154 @@ public sealed class BuildHistory
         return Math.Round(rest);
     }
 
-    private static Dictionary<string, List<double>> Load(string file)
+    /// <summary>What is usual for a repository build (project null) or a test project; null when nothing was recorded.</summary>
+    public DurationStat? Typical(string kind, string repo, string? project, string configuration)
+    {
+        lock (_lock)
+        {
+            return _series.TryGetValue(Key(kind, repo, project, configuration), out var series) && series.Samples.Count > 0 ? Stat(series) : null;
+        }
+    }
+
+    /// <summary>Every recorded repository build and test project, slowest (by median) first.</summary>
+    public IReadOnlyList<DurationStat> Stats()
+    {
+        lock (_lock)
+        {
+            return _series.Values.Where(s => s.Samples.Count > 0).Select(Stat)
+                .OrderByDescending(s => s.MedianSeconds).ThenBy(s => s.Repo, StringComparer.OrdinalIgnoreCase).ThenBy(s => s.Project, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    ///     The limit beyond which a running item is overdue: twice the slowest usual time (p90), and at least two minutes more
+    ///     than the median - a short build that takes a minute longer is no hang. Null with fewer than three durations.
+    /// </summary>
+    internal static double? Limit(int samples, double median, double p90) =>
+        samples < MinSamplesForLimit ? null : Math.Round(Math.Max(2 * p90, median + MinGraceSeconds));
+
+    private static DurationStat Stat(Series series)
+    {
+        var values = series.Samples.Select(s => s.Seconds).ToList();
+        var median = Percentile(values, 50);
+        var p90 = Percentile(values, 90);
+        var last = series.Samples[^1];
+        return new DurationStat(series.Kind, series.Repo, series.Project, series.Configuration, values.Count, Math.Round(median, 1), Math.Round(p90, 1),
+            values.Min(), values.Max(), last.Seconds, last.At, Limit(values.Count, median, p90));
+    }
+
+    /// <summary>Nearest-rank percentile of a non-empty list.</summary>
+    internal static double Percentile(IReadOnlyList<double> values, int percent)
+    {
+        var sorted = values.OrderBy(v => v).ToList();
+        var rank = (int)Math.Ceiling(percent / 100.0 * sorted.Count);
+        return sorted[Math.Clamp(rank - 1, 0, sorted.Count - 1)];
+    }
+
+    private static Dictionary<string, Series> Load(string file, string legacyFile)
     {
         try
         {
-            return File.Exists(file)
-                ? JsonSerializer.Deserialize<Dictionary<string, List<double>>>(Common.SharedFile.ReadAllText(file)) ?? new()
-                : new();
+            if (File.Exists(file))
+            {
+                var stored = JsonSerializer.Deserialize<HistoryFile>(SharedFile.ReadAllText(file), Json)?.Series ?? [];
+                return stored.Where(s => s.Kind is DurationKind.Build or DurationKind.Test && !string.IsNullOrEmpty(s.Repo))
+                    .GroupBy(s => Key(s.Kind, s.Repo, s.Project, s.Configuration)).ToDictionary(g => g.Key, g => g.First());
+            }
+
+            return File.Exists(legacyFile) ? FromLegacy(legacyFile) : new Dictionary<string, Series>();
         }
         catch (Exception e) when (e is JsonException or IOException)
         {
-            return new();
+            return new Dictionary<string, Series>();
         }
     }
+
+    /// <summary>build-history.json of earlier daemons: "lane|repo|configuration" -> the last five seconds, without times.</summary>
+    private static Dictionary<string, Series> FromLegacy(string legacyFile)
+    {
+        var result = new Dictionary<string, Series>();
+        var legacy = JsonSerializer.Deserialize<Dictionary<string, List<double>>>(SharedFile.ReadAllText(legacyFile)) ?? new Dictionary<string, List<double>>();
+        foreach (var (key, values) in legacy)
+        {
+            var parts = key.Split('|');
+            if (parts.Length != 3 || parts[1].Length == 0)
+            {
+                continue;
+            }
+
+            var k = Key(DurationKind.Build, parts[1], null, parts[2]);
+            if (!result.TryGetValue(k, out var series))
+            {
+                result[k] = series = new Series { Kind = DurationKind.Build, Repo = parts[1], Configuration = parts[2] };
+            }
+
+            series.Samples.AddRange(values.Where(v => v > 0).Select(v => new Sample { Seconds = v, Lane = LaneKey(parts[0]) }));
+        }
+
+        foreach (var series in result.Values.Where(s => s.Samples.Count > Keep))
+        {
+            series.Samples.RemoveRange(0, series.Samples.Count - Keep);
+        }
+
+        return result;
+    }
+
+    private sealed class HistoryFile
+    {
+        public int SchemaVersion { get; set; } = 1;
+        public List<Series> Series { get; set; } = [];
+    }
+
+    private sealed class Series
+    {
+        public string Kind { get; set; } = DurationKind.Build;
+        public string Repo { get; set; } = "";
+        public string? Project { get; set; }
+        public string Configuration { get; set; } = "";
+        public List<Sample> Samples { get; set; } = [];
+    }
+
+    private sealed class Sample
+    {
+        /// <summary>When the item ended; null for durations taken over from build-history.json.</summary>
+        public DateTimeOffset? At { get; set; }
+
+        public double Seconds { get; set; }
+        public string Lane { get; set; } = "";
+    }
 }
+
+/// <summary>The kinds of durations the history keeps.</summary>
+public static class DurationKind
+{
+    /// <summary>A repository build (the repo's whole time in a build step).</summary>
+    public const string Build = "build";
+
+    /// <summary>A test project of an unfiltered test run.</summary>
+    public const string Test = "test";
+}
+
+/// <summary>
+///     What a repository build (kind build) or a test project (kind test, project = the test project of repo) usually takes in
+///     a configuration, from the last durations of every lane: samples, median, p90, min, max, the last one and when it ended
+///     (lastAt; absent for durations an earlier daemon recorded without a time), and limitSeconds - a running item beyond it is
+///     overdue and probably hangs (twice p90, at least median + 120 s; absent below three samples).
+/// </summary>
+public sealed record DurationStat(
+    string Kind,
+    string Repo,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Project,
+    string Configuration,
+    int Samples,
+    double MedianSeconds,
+    double P90Seconds,
+    double MinSeconds,
+    double MaxSeconds,
+    double LastSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    DateTimeOffset? LastAt,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    double? LimitSeconds);
