@@ -2,7 +2,6 @@
 
 - **Date:** 2026-05-30
 - **Status:** Approved (design) — pending implementation plan
-- **Author:** reimar + Claude
 - **Primary repo touched:** `octo-tools` (cmdlets + infra manifests). Consumes `octo-helm-core` (CRDs + operator chart, already cloned next to the other repos).
 
 ---

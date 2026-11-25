@@ -34,17 +34,17 @@ cause (`ProvisionCurrentUser -ttid <tenant>`). The sweep reports it as **Denied*
 
 ```powershell
 # What would run? (lists tenants and the exact octo-cli calls, runs nothing)
-Invoke-OctoTenantSweep  -CliArguments '-c','LibraryStatus','-io' -WhatIf
+Invoke-OctoTenantSweep -Installation <installation> -Tenant <tenantA>,<tenantB> -CliArguments '-c','LibraryStatus','-io' -WhatIf
 
 # Run it; one row per tenant: Tenant, Context, Outcome (Ok|Denied|Failed), ExitCode, Cause
-Invoke-OctoTenantSweep  -CliArguments '-c','LibraryStatus','-io'
+Invoke-OctoTenantSweep -Installation <installation> -Tenant <tenantA>,<tenantB> -CliArguments '-c','LibraryStatus','-io'
 
 # Commands with their own tenant argument: one context, {tenant} is substituted; tenants from GetTenants --all
 Invoke-OctoTenantSweep -Context <parent-tenant-context> -AllTenants -Exclude <parent-tenant> `
     -CliArguments '-c','ProvisionCurrentUser','-ttid','{tenant}'
 
 # Machine-readable (standard octo-tools envelope: data.summary + data.results)
-Invoke-OctoTenantSweep  -CliArguments '-c','ClearCache' -Json | ConvertFrom-Json
+Invoke-OctoTenantSweep -Installation <installation> -Tenant <tenantA>,<tenantB> -CliArguments '-c','ClearCache' -Json | ConvertFrom-Json
 ```
 
 | Parameter | Meaning |

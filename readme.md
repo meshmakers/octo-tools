@@ -325,9 +325,9 @@ that has a `test` script is a test project (named after the folder; two workspac
 their folder path relative to the repository, e.g. `apps.web`).
 
 ```powershell
-Invoke-OctoTestRun -branch branches/main -repo voest-app                    # ng test, headless, JUnit report
-Invoke-OctoTestRun -env ab8819-apps -repo energy-community -filter 'Billing' # a regular expression over suite and test names
-Invoke-OctoTestRun -branch branches/main -repo voest-app -rerunFailed       # only the spec files that held a failed test
+Invoke-OctoTestRun -branch branches/main -repo <app-repo>                    # ng test, headless, JUnit report
+Invoke-OctoTestRun -env apps -repo <app-repo> -filter 'Billing' # a regular expression over suite and test names
+Invoke-OctoTestRun -branch branches/main -repo <app-repo> -rerunFailed       # only the spec files that held a failed test
 ```
 
 It runs `npx ng test --watch=false --reporters=junit ...` in the app folder (after `npm ci` when there is no
