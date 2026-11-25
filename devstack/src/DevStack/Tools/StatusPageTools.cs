@@ -46,7 +46,7 @@ public sealed class StatusPageTools(StackSupervisor supervisor, BuildQueue build
                  "and parsed errors, and the last lines of one repo's log (repo=X, also after the build from the log the daemon kept) or of the " +
                  "job log. job_status(live=N) gives at most 200 lines; this gives up to 5000. Read-only.")]
     public BuildOutput Output(
-        [Description("Job id from base_build, lane_build, base_test or lane_test.")] string id,
+        [Description(BuildTools.IdDescription)] string id,
         [Description("Only this repo's log; omit for the job log.")] string? repo = null,
         [Description("Number of lines (default 400, max 5000).")] int lines = 400) =>
         ToolGuard.Run(() => builds.Output(id, string.IsNullOrWhiteSpace(repo) ? null : repo, Math.Clamp(lines, 1, 5000)));

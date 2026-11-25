@@ -49,15 +49,16 @@ say the same in short. Every changing call takes the same two values every time:
   something.
 
 Builds and test runs are jobs: `lane_build`, `lane_test`, `base_build` and `base_test` return one at once, and
-`job_status(id, waitSeconds=600)` answers when it ended (`timedOut` when it did not yet; waits up to 900 s).
+`job_status(id, waitSeconds=50)` answers when it ended (`timedOut` when it did not yet). 50 s is the maximum: a longer
+value is capped and a note says so - call it again (the MCP call of an in-process teammate times out after about 60 s).
 
 **UC-B, a work item in its own lane** (the flow of octo-claude-pm's "Code work in a feature environment"):
 
 ```text
 lane_create(owner, session, lane="ab8625-enum-null", repos=["octo-sdk"], branch="reimar/AB#8625_enum-null", workItem="AB#8625")
 lane_list(lane="ab8625-enum-null")                                    # repos[].path: edit there, in the lane's worktrees
-lane_build(owner, session, lane="ab8625-enum-null")                   -> job_status(id, waitSeconds=600)
-lane_test(owner, session, lane="ab8625-enum-null", repo="octo-sdk")   -> job_status(id, waitSeconds=600)
+lane_build(owner, session, lane="ab8625-enum-null")                   -> job_status(id, waitSeconds=50)
+lane_test(owner, session, lane="ab8625-enum-null", repo="octo-sdk")   -> job_status(id, waitSeconds=50)
 stack_start(owner, session, lane="ab8625-enum-null")                  # the lane stack: shifted ports, own system database
 stack_status(lane="ab8625-enum-null")                                 # healthy?  leftOut, setup, startedBy
 service_logs(service="assetRepoServices", lane="ab8625-enum-null", grep="error|exception")
@@ -90,7 +91,7 @@ lane_remove(owner, session, lane="ab8625-enum-null")                  # after th
 base lane):
 
 ```text
-lane_build(owner, session, lane="ab8625-mesh", repos=["octo-mesh-adapter"])   -> job_status(id, waitSeconds=600)
+lane_build(owner, session, lane="ab8625-mesh", repos=["octo-mesh-adapter"])   -> job_status(id, waitSeconds=50)
 lease_status()                                                                 # who holds the shared stack, idle for how long
 lease_acquire(owner, session, purpose="verify enum null handling", waitSeconds=600)
 service_restart(owner, session, services=["meshAdapter"], overrides={"meshAdapter": {"source": "lane:ab8625-mesh"}})
@@ -361,8 +362,8 @@ The tools speak the vocabulary of octo-claude-pm (the server instructions say th
 | Area | Tool | What it does |
 |---|---|---|
 | Lanes | `lane_list(lane?)` | The lanes (`<rootPath>/wt-<lane>` folders with a manifest): work item, base lane, owner, repos with their paths (edit there), the lane stack with health and lease (`lane:<name>`, its session, `lastActivityAt`, `idleMinutes`), queued/running jobs, `inSharedStack` (the shared stack's services that run the lane's build), problems; with `lane`: that one plus `Get-OctoEnvironment`'s details (per repo exists, dirty, unpushed) |
-| | `lane_create(owner, lane, repos, branch, workItem, session, addAffected, skipPackageCacheSeed)` | `New-OctoEnvironment`: feature worktrees on `branch`, own feed and package cache (filled from a local cache), its slot reserved |
-| | `lane_add_repo(owner, lane, repo \| path, role, addAffected, inPlace, session)` | `Add-OctoEnvironmentRepo`: a new feature/consumer worktree, or an existing worktree adopted; refused while the lane builds or a service of that repo runs in its stack |
+| | `lane_create(owner, lane, repos, branch, workItem, session, addAffected, skipPackageCacheSeed)` | `New-OctoEnvironment`: feature worktrees on `branch`, own feed and package cache (filled from a local cache), its slot reserved; a note names libraries outside the lane whose base-lane packages were built from a commit behind their upstream (nuspec commit, else the checkout HEAD), with the fix `lane_add_repo(role=consumer)`, and says when that check failed |
+| | `lane_add_repo(owner, lane, repo \| path, role, addAffected, inPlace, session)` | `Add-OctoEnvironmentRepo`: a new feature/consumer worktree, or an existing worktree adopted; waits up to 45 s for the lane's running or queued jobs (then `success=false`, `retryAfterJob=<id>`: call again after `job_status` says it ended); deletes the added repo's `obj/project.nuget.cache` so the next `lane_build` restores it against the lane feed; refused while a service of that repo runs in its stack; notes name stale base-lane packages |
 | | `lane_sync(owner, lane, session)` | `Sync-OctoEnvironment`: refresh the snapshot of the base lane's feed and catalogs; refused while a range/all build of the base lane runs or waits, or the lane builds |
 | | `lane_affected(lane, target?)` | `Get-OctoAffectedRepos [-target]`: the repos the lane's changes reach (read-only) |
 | | `lane_build(owner, lane, repos, skip, verifyTests = true, syncMain, stopServices, restartServices, buildUnchanged, includeTests, maxParallel, refreshCatalogs, dryRun, session)` | `Invoke-BuildEnvironment`: the lane's repos that changed into its own feed, test projects compiled; a job (see "Lanes") |
@@ -370,8 +371,8 @@ The tools speak the vocabulary of octo-claude-pm (the server instructions say th
 | | `lane_remove(owner, lane, keepData, keepBranches, session)` | Remove a lane, leaving nothing behind: refused while a process the daemon did not start holds files below it; stop the lane stack, release its lease, `Remove-OctoEnvironment` (refuses dirty or unpushed worktrees), then drop the lane stack's data (`dataDrop`; `leftovers` list what remains) and delete the feature branches without commits (`branches`) - see "Removing a lane" |
 | Base lane | `base_build(owner, kind = repo \| range \| all \| profile, path, baseLane, from, to, include, exclude, profile, publish, confirm, stopServices, restartServices, ..., session)` | Builds of the base lane (see "Builds"); `range` (`publish=true`) and `all` (`confirm=true`) only with the developer's go |
 | | `base_test(owner, repo, baseLane?, project, filter, rerunFailed, ..., session)` | `Invoke-OctoTestRun` of one repo of the base lane as a job |
-| Jobs | `job_status(id, waitSeconds, repo, project, errorsOnly, include, live, includePassed)` | A build or test run in a compact shape (progress, ETA, seconds per repo and phase, parsed errors; a test run's failed tests by name); `waitSeconds` (max 900) waits until the job ends and says `timedOut` when it did not |
-| | `job_list` / `job_cancel(owner, id, lane?, session)` | Every job the daemon knows (also of earlier daemon runs); cancel your own (any session of a lane cancels the lane's jobs) |
+| Jobs | `job_status(id, waitSeconds, repo, project, errorsOnly, include, live, includePassed)` | A build or test run in a compact shape (progress, ETA, seconds per repo and phase, parsed errors; a test run's failed tests by name); `waitSeconds` (max 50, a longer value is capped with a note) waits until the job ends and says `timedOut` when it did not. `job_status` / `job_output` / `job_cancel` take the full id (`b351-081503`) or the short one (`b351`, `351`; exactly that sequence, an ambiguous one is refused) |
+| | `job_list(lane?, limit=20)` / `job_cancel(owner, id, lane?, session)` | One line per job the daemon knows (also of earlier daemon runs), newest first - id, kind, state, lane, target, summary, queued, seconds, owner; cancel your own (any session of a lane cancels the lane's jobs) |
 | | `job_output(id, repo?, lines)` / `job_refusals` | Up to 5000 log lines of one repo or the job (`GET /api/builds/<id>/output`); the builds refused in the last 2 hours with their conflicts |
 | | `job_stats(repo?)` | What repository builds and test projects usually take on this machine (median, p90, max, last, the overdue limit), slowest first - see "Usual durations and overdue jobs" |
 | | `build_plan(kind \| lane, ...)` | What a `base_build` or `lane_build` would do, read-only: order and mode per repo, the predicted action per repo of a lane, stale flags, conflicts with running services, warnings, gates (see "Builds") |
@@ -605,7 +606,9 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
     build stopped are in the job file and are started again);
   - **queued** builds wait again in their order (their preflight - conflicts, leases - runs when they start);
   - **finished** builds stay answerable: `job_status` / `job_list` and the status page keep the last 50 for 14 days,
-    with the logs of their repos.
+    with the logs of their repos, and always the last build and the last test run of every lane that still exists.
+  - **macOS**: while a job runs the daemon keeps the machine awake with `caffeinate -i -w <job pid>`; it ends with the
+    job's process (also across a daemon restart). Other systems: nothing.
   A build started by a daemon version without job files (only a pid in `state.json`) is taken over too: it is `running`
   in its queue class (an environment build holds back only its own environment), its owner can cancel it, and when it
   ends its result comes from its events file (`... the process left no exit code; result from its build events`) - there
@@ -627,7 +630,7 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
   workspaces of a repository share a folder name, their project names are the repository-relative paths with dots
   (`apps.web`); pass that name as `project`.
 - **Runners, filters, states** (octo-tools AB#8832): every project says its `runner` (`vstest`, `mtp` = Microsoft.Testing.Platform
-  with TUnit or xunit.v3, `ng`; known when the run ended). `filter` is handed over as given and never translated: VSTest takes
+  with TUnit or xunit.v3, `ng`, `pester`; known when the run ended). `filter` is handed over as given and never translated: VSTest takes
   an expression (`FullyQualifiedName~X`), TUnit and xunit.v3 on MTP a tree filter (`/*/*/Class/*`); a project whose runner
   cannot take the given form is not started (`noMatch`, the note names the form it takes). With a filter a project in which
   nothing matched is `noMatch` - a success; the run fails only when nothing matched anywhere ("the filter matched no test in
@@ -638,6 +641,19 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
 - **What runs**: every test project of the repository, or the ones in `project`; `filter` is a `dotnet test --filter`
   expression; `rerunFailed=true` runs only the tests that failed in each project's last result. No full rebuild: a
   project whose build is current runs with `--no-build`, otherwise `dotnet test` builds it incrementally (`buildReason`).
+  A repository with `tests/*.Tests.ps1` has the test project `Pester` (runner `pester`; Pester 5 in a pwsh of its own).
+- **rerunFailed** reruns the failed tests of one job: the newest finished test run of the repository in that lane; only its
+  projects with failed tests run, and a note names the job. Refused before a job exists when that run had no failed test
+  (the refusal names an earlier run that had), when octo-devstack knows no such run, or while a run of the repository
+  waits or runs. A run in which no test ran is failed, never succeeded. Pester runs whole test files: its failed tests are
+  not run again (the note says so); when only Pester failed, rerunFailed is refused and names `project="Pester"` without it.
+- **Stopped projects**: a project ended by `job_cancel` is `canceled`, one the idle watchdog or the timeout ended
+  `terminated` (never `error`); the summary names it and what the finished projects passed before. VSTest projects run
+  with `--logger console;verbosity=normal`: a line per test in the project's log, which the idle watchdog counts as
+  progress (suites that write their TRX only at the end are not taken for a hang).
+- **Frontend preconditions**: `lane_test` of an octo-frontend-* repository is refused before it builds when the lane does
+  not hold octo-frontend-libraries or `TELERIK_LICENSE` (devstack.yaml `buildVariables`) is not set for the daemon's
+  builds - checked by name, never by value.
 - **Queue class**: the lane (`lane_test`), or the base lane folder for `base_test`. A test run waits for a build or test run
   of the same environment or lane and for an exclusive lane build; it does not count against the limit of two parallel
   environment builds. An exclusive lane build waits for running test runs too.
@@ -678,7 +694,7 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
   `progress.projects` with `project` (and `projectIndex` / `projectCount`, `current.project`) where a build has `repos`
   with `repo` - plus `tests`:
   `total`/`passed`/`failed`/`skipped` and per project (failed ones first) state
-  (`pending|running|passed|failed|error|noTests|skipped|notRun`), counts, seconds, `buildReason` (a "no DebugL build
+  (`pending|running|passed|failed|error|noTests|skipped|notRun|canceled|terminated`), counts, seconds, `buildReason` (a "no DebugL build
   output of X" while `X.dll` exists below `<repo>/bin/DebugL` says that octo-tools looks only below
   `<project>/bin/DebugL`, so the run compiled the test projects again - harmless, an octo-tools follow-up), `docker`, the failed
   tests by full name with the first error message and stack frame (20 per project, `moreFailed` counts the rest;
@@ -934,7 +950,7 @@ was adopted in place (`<repo>/.claude/worktrees/<name>`, a flat `wt-<lane>-<repo
 
 ```text
 lane_create(owner, session, lane="ab8625-enum-null", repos=["octo-sdk"], workItem="AB#8625", branch="<user>/AB#8625_enum-null")
-lane_build(owner, session, lane="ab8625-enum-null")                       -> job_status(id, waitSeconds=600)
+lane_build(owner, session, lane="ab8625-enum-null")                       -> job_status(id, waitSeconds=50)
 stack_start(owner, session, lane="ab8625-enum-null", profile="core-data")
 service_logs(service="assetRepoServices", lane="ab8625-enum-null", grep="error")
 lane_remove(owner, session, lane="ab8625-enum-null")
@@ -944,7 +960,8 @@ lane_remove(owner, session, lane="ab8625-enum-null")
   with the next free index - shifted ports, own system database and prefixes as every slot. `${checkout}` is the environment
   folder, so catalogs and logs come from it; the logs go to `<rootPath>/wt-<lane>/logFiles` (no slot subfolder). A service whose repo the
   environment holds runs from the repo's manifest path; every other service runs from the base lane (`<base>/<repo>`, normally
-  `branches/main`). An explicit `overrides.<service>.source` still wins.
+  `branches/main`). An explicit `overrides.<service>.source` still wins. A repo added to a running lane stack
+  (`lane_add_repo`) runs from the lane on its service's next `service_start`.
 - **Claims**: the lane claim of an environment's slot (`local-stack-<slot>.md`) lives in the base lane's `.octo/claims`, never
   in the environment folder.
 - **Builds that stop services**: a service a build stopped stays part of the stack (`stopped-for-build` in `stack_status`);
@@ -984,7 +1001,8 @@ lane_remove(owner, session, lane="ab8625-enum-null")
   build.ps1 in its root - octo-tools' "No solution file found", e.g. octo-frontend-libraries in `Invoke-BuildAll`) is never
   `done`: it is `skipped` with reason `nothingToBuild`, and its detail names the repo whose build.ps1 builds it ("built by
   octo-frontend-refinery-studio") where one of the job does (AB#9384); the cmdlet's stale warnings (a skipped repo whose packages are now older than what it consumes) are notes
-  starting with `stale:`. The status page shows skipped repos as "skipped: unchanged since its last build". A repo that
+  starting with `stale:`; `lane_build` warnings name stale base-lane packages as `lane_create` does (`feedSnapshot`; package
+  ids follow MSBuild: `PackageId`, else `AssemblyName`, else the project name). The status page shows skipped repos as "skipped: unchanged since its last build". A repo that
   is definitely not built (`notSelected`, `excluded`) is no conflict with services running out of it. With an octo-tools
   checkout that lacks these parameters, `repos` / `skip` / `buildUnchanged` are refused with that reason and a plain
   environment build works as before.
@@ -1002,6 +1020,9 @@ lane_remove(owner, session, lane="ab8625-enum-null")
   and reserves it after; when the reservation still fails (no index fits any more), it takes the fresh lane
   away again (`Remove-OctoEnvironment`, its `.octo` folder, its feature branches) and answers with a failure that names why;
   when that roll-back fails too, the notes name the lane folder and branches that are left to remove by hand.
+  `lane_create` and `lane_add_repo` run to their end when the caller's MCP call times out (AB#9808): the caller only
+  loses the answer, `lane_list` shows the lane, its repos and its reserved slot. While one of them runs, a second
+  `lane_create` / `lane_add_repo` of that lane and a new `lane_build` / `lane_test` of it are refused with who runs what since when.
   A `stack_start` that fails gives back the lease it took for the call when nothing of it runs (a lease held before stays).
   `lane_create` reserves the environment's slot (index, port offset, prefix in the answer); `lane_list` shows the reserved slot or,
   for an environment created outside the daemon, the slot the next start would get. A fresh lane stack sets itself up

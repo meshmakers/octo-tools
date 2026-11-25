@@ -8,6 +8,11 @@ namespace Meshmakers.Octo.DevStack.Tools;
 [McpServerToolType]
 public sealed class BuildTools(BuildQueue queue)
 {
+    /// <summary>The longest job_status wait (AB#9808): an in-process teammate's MCP call times out after about 60 s.</summary>
+    internal const int MaxWaitSeconds = 50;
+
+    internal const string IdDescription = "Job id from base_build, lane_build, base_test or lane_test: the full one ('b351-081503') or the short one ('b351').";
+
     private const string KindDescription =
         "'repo' (Invoke-Build of one folder: a repo of the base lane or a worktree, whole solution incl. tests), 'range' (Invoke-BuildRange over " +
         "a slice of the base lane's build order; refreshes the base lane's 999.0.0 packages for every session - library changes), 'all' " +
@@ -165,7 +170,8 @@ public sealed class BuildTools(BuildQueue queue)
     [Description("Builds a lane (octo-tools Invoke-BuildEnvironment) into its own feed as a queued job: its feature repos and the consumer " +
                  "repos rebuilt against them, with the test projects compiled (verifyTests=true by default; no test runs - lane_test runs " +
                  "them). Only the repos that changed since their last build are built (job_status shows the others as skipped with the " +
-                 "reason; notes starting with 'stale:' name what a skipped repo may leave outdated); repos / skip narrow it, buildUnchanged=true " +
+                 "reason; notes starting with 'stale:' name what a skipped repo may leave outdated; warnings name stale base-lane packages (fix: " +
+                 "lane_add_repo role=consumer) and a stale-package check that failed); repos / skip narrow it, buildUnchanged=true " +
                  "builds everything. Returns the job at once - wait with job_status(id, waitSeconds). Lane builds run next to each other (one " +
                  "per lane, at most 2) and need no developer's go; nothing changes for the base lane or other lanes. When services of the " +
                  "lane's stack run from a repo it builds, pass stopServices=true (restartServices=true starts them again). syncMain=true first " +
@@ -201,8 +207,10 @@ public sealed class BuildTools(BuildQueue queue)
 
     [McpServerTool(Name = "job_status", ReadOnly = true)]
     [Description("Shows a job - a build (base_build, lane_build) or a test run (base_test, lane_test) - in a compact shape (normally < 2 KB); " +
-                 "waitSeconds=N waits until the job ends or N seconds passed (max 900) and then answers, with timedOut saying which " +
-                 "happened - wait this way instead of polling. state queued|running|succeeded|failed|canceled, success, kind " +
+                 "waitSeconds=N waits until the job ends or N seconds passed (max 50 - a longer value is cut to 50, so the answer comes " +
+                 "before the MCP call timeout of about 60 s an in-process teammate has) and then answers, with timedOut saying which " +
+                 "happened (a note says when the wait was capped) - wait this way instead of polling: call again while timedOut is true. id: the full id ('b351-081503') or the " +
+                 "short one ('b351'). state queued|running|succeeded|failed|canceled, success, kind " +
                  "repo|range|all|profile|lane|test, lane, queue position and what a queued job waits for, times (local) with elapsedSeconds " +
                  "and etaSeconds, progress (phase stopping|catalogs|build|tests|packages|restarting, or lock while a test run waits for the " +
                  "docker test lock; repoIndex/repoCount, repos and current.repo for a build - a test run counts and lists its test projects " +
@@ -221,7 +229,7 @@ public sealed class BuildTools(BuildQueue queue)
                  "includePassed; tests.docker (the cmdlet's Docker check) and tests.dockerWarning (the daemon's look at the Docker VM). " +
                  "live=N adds the last N lines of the output (field 'live') of the repo or test project that runs now, or of repo/project=X " +
                  "(also afterwards). Jobs survive a daemon restart: a running one goes on and is re-attached (a note says so), a queued one " +
-                 "keeps its place, finished ones stay answerable (the last 50, 14 days). evidence: what the job ran on - per repository it covers " +
+                 "keeps its place, finished ones stay answerable (the last 50, 14 days, and the last build and test run of every lane). evidence: what the job ran on - per repository it covers " +
                  "(a build's plan repos, a test run's tested repository) its path and, at the start and at the end of the job, head (full SHA), " +
                  "branch, clean at that point in time (git status: untracked files count, ignored ones do not; changes counts the entries) and " +
                  "fingerprint (the changed files' names and content); unchanged = the same head and the same changed files at start and end - " +
@@ -229,8 +237,8 @@ public sealed class BuildTools(BuildQueue queue)
                  "made before the job is fine; one made while it ran is not). A job with more than ten repositories lists only those that are " +
                  "not fine (omitted counts the rest; repo=X or include=['raw'] shows them). Read-only.")]
     public Task<BuildStatus> Status(
-        [Description("Job id from base_build, lane_build, base_test or lane_test.")] string id,
-        [Description("Seconds to wait for the job to end before answering (0-900, default 0 = answer at once).")] int waitSeconds = 0,
+        [Description(IdDescription)] string id,
+        [Description("Seconds to wait for the job to end before answering (0-50, default 0 = answer at once; more is cut to 50).")] int waitSeconds = 0,
         [Description("A build: only this repo - its progress row and up to 100 of its errors.")] string? repo = null,
         [Description("A test run: only this test project, with all its failed tests.")] string? project = null,
         [Description("Only state, outcome and diagnostics.")] bool errorsOnly = false,
@@ -252,13 +260,17 @@ public sealed class BuildTools(BuildQueue queue)
         });
 
     /// <summary>
-    ///     job_status(waitSeconds): waits until the job ends or the time is up, then the normal answer; timedOut says which (null
-    ///     without a wait). Polls the job state once a second.
+    ///     job_status(waitSeconds): waits until the job ends or the time is up - at most <see cref="MaxWaitSeconds"/>
+    ///     (<paramref name="maxWait"/> in tests) - then the normal answer; timedOut says which (null without a wait). Polls the
+    ///     job state once a second. The id may be short ('b351').
     /// </summary>
     internal static async Task<BuildStatus> WaitAsync(BuildQueue queue, string id, int waitSeconds, Func<BuildStatus> answer, CancellationToken cancellationToken,
-        TimeSpan? pollInterval = null)
+        TimeSpan? pollInterval = null, TimeSpan? maxWait = null)
     {
-        var wait = TimeSpan.FromSeconds(Math.Clamp(waitSeconds, 0, 900));
+        var cap = maxWait ?? TimeSpan.FromSeconds(MaxWaitSeconds);
+        var wait = TimeSpan.FromSeconds(Math.Max(waitSeconds, 0));
+        var capped = wait > cap;
+        wait = capped ? cap : wait;
         if (wait == TimeSpan.Zero)
         {
             return answer();
@@ -266,12 +278,21 @@ public sealed class BuildTools(BuildQueue queue)
 
         var waited = System.Diagnostics.Stopwatch.StartNew(); // monotonic: a clock set back must not stretch the wait
         var poll = pollInterval ?? TimeSpan.FromSeconds(1);
+        id = queue.ResolveId(id);
         while (!BuildStatus.IsFinal(queue.Get(id, errorsOnly: true).State))
         {
             var left = wait - waited.Elapsed;
             if (left <= TimeSpan.Zero)
             {
-                return answer() with { TimedOut = true };
+                var timedOut = answer() with { TimedOut = true };
+                // Said in the answer, so a caller that asked for more loops instead of taking the job for stuck.
+                return capped
+                    ? timedOut with
+                    {
+                        Notes = [..timedOut.Notes, $"waitSeconds={waitSeconds} was capped at {cap.TotalSeconds:0} s (the MCP call of an in-process " +
+                                                   $"teammate times out after about 60 s); the job still runs - call job_status(\"{id}\", waitSeconds={MaxWaitSeconds}) again."]
+                    }
+                    : timedOut;
             }
 
             await Task.Delay(left < poll ? left : poll, cancellationToken);
@@ -281,11 +302,16 @@ public sealed class BuildTools(BuildQueue queue)
     }
 
     [McpServerTool(Name = "job_list", ReadOnly = true)]
-    [Description("Lists all jobs - builds and test runs - the daemon knows, newest first, in the compact job_status shape: this run's and those " +
-                 "of earlier daemon runs (the last 50 finished ones, 14 days; a job that ran across a restart is 'running' with a note). A " +
-                 "finished job whose lane or base lane folder no longer exists carries 'gone' with the reason: history, not a current failure " +
-                 "(the status page hides it by default). Read-only.")]
-    public List<BuildStatus> List() => queue.List();
+    [Description("Lists the jobs - builds and test runs - the daemon knows, newest first, one line per job: id, kind, state, lane, target, " +
+                 "summary, when it was queued, seconds and owner (job_status(id) gives the details). lane=X only the jobs of that lane; limit " +
+                 "(default 20, max 200). The daemon keeps this run's jobs and those of earlier daemon runs (the last 50 finished ones, 14 days) " +
+                 "and always the last build and the last test run of every lane that still exists; a job that ran across a restart is " +
+                 "'running' with a note. A finished job whose lane or base lane folder no longer exists says '(gone: reason)': history, not " +
+                 "a current failure. Read-only.")]
+    public List<string> List(
+        [Description("Only the jobs of this lane (lane_list).")] string? lane = null,
+        [Description("At most this many lines (default 20, max 200).")] int limit = 20) =>
+        queue.ListLines(lane, limit);
 
     [McpServerTool(Name = "job_stats", ReadOnly = true)]
     [Description("Shows how long jobs usually take on this machine, slowest first: per repository build (kind build, every lane) and per test " +
@@ -305,7 +331,7 @@ public sealed class BuildTools(BuildQueue queue)
                  "partially updated.")]
     public BuildStatus Cancel(
         [Description(StackTools.OwnerDescription)] string owner,
-        [Description("Job id.")] string id,
+        [Description(IdDescription)] string id,
         [Description("The lane of the job: any session of it may cancel the lane's jobs.")] string? lane = null,
         [Description(StackTools.SessionDescription)] string? session = null) =>
         ToolGuard.Run(() =>

@@ -327,11 +327,7 @@ public sealed partial class BuildQueue
     /// </summary>
     public BuildOutput Output(string id, string? repo = null, int lines = 400)
     {
-        if (!_jobs.TryGetValue(id, out var job))
-        {
-            throw new InvalidOperationException(UnknownJob(id));
-        }
-
+        var job = Find(id);
         var snapshot = job.Snapshot();
         var rows = Rows(job);
         var repos = rows.Select((r, index) =>
@@ -663,11 +659,23 @@ public sealed partial class BuildQueue
 
     private void Trim()
     {
-        foreach (var old in _jobs.Values.Where(j => j.FinishedAt != null).OrderByDescending(j => j.FinishedAt).Skip(KeepFinishedJobs).ToList())
+        var kept = LastOfLanes();
+        foreach (var old in _jobs.Values.Where(j => j.FinishedAt != null).OrderByDescending(j => j.FinishedAt).Skip(KeepFinishedJobs)
+                     .Where(j => !kept.Contains(j.Id)).ToList())
         {
             Forget(old);
         }
     }
+
+    /// <summary>
+    ///     AB#9808: the ids of the last finished build and the last finished test run of every lane whose folder still exists -
+    ///     kept beyond <see cref="KeepFinishedJobs"/> and the 14 days, so a quiet lane's last result stays readable.
+    /// </summary>
+    private HashSet<string> LastOfLanes() =>
+        _jobs.Values.Where(j => j.FinishedAt != null && LaneOf(j) != null && (j.Planned.EnvironmentPath ?? j.Planned.Lane) is { } folder && Directory.Exists(folder))
+            .GroupBy(j => (Lane: LaneOf(j)!, Test: j.Request.Kind == BuildKind.Test))
+            .Select(g => g.OrderByDescending(j => j.FinishedAt).ThenByDescending(j => j.Sequence).First().Id)
+            .ToHashSet(StringComparer.Ordinal);
 
     private void Forget(BuildJob job)
     {
@@ -680,7 +688,8 @@ public sealed partial class BuildQueue
     /// <summary>Finished jobs are kept for 14 days (at most <see cref="KeepFinishedJobs"/>); files no job owns go after the same time.</summary>
     private void CleanOldFiles()
     {
-        foreach (var old in _jobs.Values.Where(j => j.FinishedAt != null && DateTimeOffset.Now - j.FinishedAt > KeepFilesFor).ToList())
+        var kept = LastOfLanes();
+        foreach (var old in _jobs.Values.Where(j => j.FinishedAt != null && DateTimeOffset.Now - j.FinishedAt > KeepFilesFor && !kept.Contains(j.Id)).ToList())
         {
             Forget(old);
         }

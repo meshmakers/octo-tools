@@ -1189,6 +1189,10 @@ public sealed class SlotRun
         var warnings = new List<string>();
         var notes = new List<string>();
 
+        // AB#9808: a lane's repos are read from its manifest on every start, not only when the stack started - a repo
+        // lane_add_repo added to a running lane stack runs from the lane's worktree, not from the base lane.
+        RefreshLaneRepos(stack);
+
         foreach (var name in names.Where(n => !config.Services.ContainsKey(n)))
         {
             throw new InvalidOperationException($"Unknown service '{name}'. Configured: {string.Join(", ", config.Services.Keys)}.");
@@ -1263,7 +1267,7 @@ public sealed class SlotRun
                     throw new InvalidOperationException(
                         $"{name} runs out of {repoPath}, which job {hit.JobId} ({(hit.TestRun ? "a test run" : "a build")} of {hit.Owner}: {hit.Target}) is " +
                         $"working on{(hit.TestRun ? " - the run stopped the services of that repository and starts them again when it ends" : "")}. " +
-                        $"Wait for the job to end (job_status(\"{hit.JobId}\", waitSeconds=600)) and start {name} afterwards.");
+                        $"Wait for the job to end (job_status(\"{hit.JobId}\", waitSeconds=50)) and start {name} afterwards.");
                 }
             }
         }
@@ -1910,10 +1914,26 @@ public sealed class SlotRun
 
     private static string Shorten(string text) => text.Length <= 160 ? text : text[..157] + "...";
 
+    /// <summary>
+    ///     The lane's repos as its manifest lists them now (AB#9808): a stack run keeps the context of its first start, and a repo
+    ///     added to the lane since then would otherwise run from the base lane. A manifest that cannot be read keeps the old list.
+    /// </summary>
+    private static void RefreshLaneRepos(StackRun stack)
+    {
+        if (stack.Context.Environment == null ||
+            Discovery.EnvironmentDiscovery.OfCheckout(stack.Context.Checkout, stack.Context.RootPath) is not { Problem: null } lane)
+        {
+            return;
+        }
+
+        stack.Context = stack.Context with { EnvironmentRepos = lane.RepoPaths() };
+    }
+
     private sealed class StackRun(StackContext context, DateTimeOffset startedAt, string? startedBy, Dictionary<string, string?>? providerEnv,
         Dictionary<string, string?> requestEnv)
     {
-        public StackContext Context { get; } = context;
+        /// <summary>Where the stack runs; its lane repos are refreshed from the manifest on every start (<see cref="RefreshLaneRepos" />).</summary>
+        public StackContext Context { get; set; } = context;
         public DateTimeOffset StartedAt { get; } = startedAt;
         public string? StartedBy { get; } = startedBy;
         public Dictionary<string, string?>? ProviderEnv { get; set; } = providerEnv;

@@ -726,83 +726,155 @@ function ConvertTo-OctoBaseDriftRow {
     }
 }
 
+function Get-OctoPackageSourceCommit {
+    <#
+        The git commit a 999.0.0 package of the feed was built from: the commit attribute of <repository> in its nuspec
+        (SourceLink writes it at pack time). The first of $ids whose package exists in one of $feeds (in that order) and
+        carries a commit wins. $null when none does (no package, not a zip, no commit attribute).
+    #>
+    param([string[]]$feeds = @(), [string[]]$ids = @())
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    foreach ($feed in $feeds) {
+        if (-not $feed -or -not (Test-Path -LiteralPath $feed -PathType Container)) { continue }
+        foreach ($id in $ids) {
+            $file = Join-Path $feed "$id.999.0.0.nupkg"
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            $zip = $null
+            try {
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($file)
+                $entry = @($zip.Entries | Where-Object { $_.FullName -notmatch '/' -and $_.Name.EndsWith('.nuspec', [StringComparison]::OrdinalIgnoreCase) }) | Select-Object -First 1
+                if ($null -eq $entry) { continue }
+                $reader = [System.IO.StreamReader]::new($entry.Open())
+                try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                if ($text -match '<repository\b[^>]*\bcommit\s*=\s*"([0-9a-fA-F]{7,40})"') { return $Matches[1].ToLowerInvariant() }
+            }
+            catch { continue }   # not a zip (a test feed), unreadable: no commit from this package
+            finally { if ($zip) { $zip.Dispose() } }
+        }
+    }
+    return $null
+}
+
 function Get-OctoEnvironmentFeedSnapshotReport {
     <#
-        The environment's feed is a snapshot of the base lane's packages, built there from the LOCAL checkouts. With
-        worktrees based on origin (the default) two things can be out of step:
-          - rebuildInEnvironment: environment repositories whose worktree is newer than the base lane checkout. Their seeded packages are older than their sources; Invoke-BuildEnvironment
-            rebuilds them into the environment feed.
-          - staleProducers: libraries OUTSIDE the environment that an environment repository consumes (transitively)
-            and whose base lane checkout is behind its upstream (fetched here; a failed fetch uses the ref as last fetched). Their
-            seeded packages can lack what the newer consumers need (CS0246); nothing in the environment rebuilds them.
-        Both are derived from the manifest (every repository of the environment, not only the ones a call added):
-        a worktree is newer when its baseCommit has commits the base lane checkout's HEAD lacks.
-        Returns { rebuildInEnvironment; staleProducers = @({ repo; behind; upstream; consumedBy }); hints }.
+        The environment's feed is a snapshot of the base lane's packages, built there from the LOCAL checkouts - at
+        whatever commit they had when the base lane was built last. With worktrees based on origin (the default) two
+        things can be out of step:
+          - rebuildInEnvironment: environment repositories whose worktree is newer than what the base lane built: its
+            package's commit in the base lane's feed (Get-OctoPackageSourceCommit; never the environment feed, which a
+            lane build fills from the worktree), or the base lane checkout's HEAD for a repository without a package (a
+            service). Their seeded packages are older than their sources; Invoke-BuildEnvironment rebuilds
+            them into the environment feed.
+          - staleProducers: libraries OUTSIDE the environment that an environment repository consumes (transitively;
+            checked when rebuildInEnvironment is not empty; consumedBy names every environment repository that reaches
+            it) and whose package in the feed was built from a commit behind its upstream (the package's commit; the
+            base lane checkout's HEAD when the package names none). The upstream is fetched
+            first unless -noFetch (a failed fetch uses the ref as last fetched). Their seeded packages can lack what the
+            newer consumers need (CS0246, CS1061); nothing in the environment rebuilds them.
+        Both are derived from the manifest (every repository of the environment, not only the ones a call added).
+        A check that cannot be made is reported, never an empty list in its place (AB#9808): checked = $false and
+        errors name what failed (a git call, the package graph), and a hint says the result is incomplete.
+        Returns { checked; errors; rebuildInEnvironment; staleProducers = @({ repo; behind; upstream; builtFrom;
+        builtFromSource = package|checkout; consumedBy }); hints }.
     #>
     param(
         [Parameter(Mandatory = $true)] [string]$env,
         [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$manifest,
-        [Parameter(Mandatory = $true)] [string]$basePath
+        [Parameter(Mandatory = $true)] [string]$basePath,
+        # Invoke-BuildEnvironment: compare with the upstream refs as last fetched (no network call per build).
+        [switch]$noFetch
     )
     $rebuild = @()
-    foreach ($repo in $manifest['repos']) {
-        if (-not $repo['baseCommit'] -or (Test-OctoEnvironmentToolRepo -repo $repo['name'])) { continue }
-        $source = Get-OctoEnvironmentRepoSource -repo ([string]$repo['name']) -basePath $basePath
-        if (-not $source) { continue }
-        $newer = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--count', "HEAD..$($repo['baseCommit'])")
-        if ($newer.ExitCode -eq 0 -and [int]($newer.Output | Select-Object -Last 1) -gt 0) { $rebuild += [string]$repo['name'] }
-    }
     $stale = @()
-    if ($rebuild.Count -gt 0) {
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $environmentPath = Get-OctoEnvironmentPath -env $env
+    $feeds = @((Join-Path $environmentPath 'nuget'), (Join-Path $basePath 'nuget'))
+    try {
         $inEnvironment = @($manifest['repos'] | ForEach-Object { $_['name'] })
         $set = @(Get-OctoEnvironmentRepoSet -manifest $manifest -basePath $basePath)
         $graph = Get-OctoAffectedRepoGraph -repos $set -features @()
-        # producersOf[consumer] = producers it references
-        $producersOf = @{}
-        foreach ($producer in $graph.Consumers.Keys) {
-            foreach ($edge in $graph.Consumers[$producer]) {
-                if (-not $producersOf.ContainsKey($edge.Consumer)) { $producersOf[$edge.Consumer] = [System.Collections.Generic.List[string]]::new() }
-                if (-not $producersOf[$edge.Consumer].Contains($producer)) { $producersOf[$edge.Consumer].Add($producer) }
-            }
+        # The commit repository $name was packed from in the first of $from that holds its package, or $null.
+        $packageCommit = {
+            param([string]$name, [string[]]$from = $feeds)
+            if (-not $graph.Info.Contains($name)) { return $null }
+            return Get-OctoPackageSourceCommit -feeds $from -ids @($graph.Info[$name].Produces)
         }
-        $consumedBy = @{}
-        foreach ($name in $rebuild) {
-            $seen = @{ $name = $true }
-            $queue = [System.Collections.Generic.Queue[string]]::new()
-            $queue.Enqueue($name)
-            while ($queue.Count -gt 0) {
-                $current = $queue.Dequeue()
-                if (-not $producersOf.ContainsKey($current)) { continue }
-                foreach ($producer in $producersOf[$current]) {
-                    if ($seen.ContainsKey($producer)) { continue }
-                    $seen[$producer] = $true
-                    $queue.Enqueue($producer)
-                    if ($inEnvironment -contains $producer) { continue }
-                    if (-not $consumedBy.ContainsKey($producer)) { $consumedBy[$producer] = [System.Collections.Generic.List[string]]::new() }
-                    if (-not $consumedBy[$producer].Contains($name)) { $consumedBy[$producer].Add($name) }
+        foreach ($repo in $manifest['repos']) {
+            if (-not $repo['baseCommit'] -or (Test-OctoEnvironmentToolRepo -repo $repo['name'])) { continue }
+            $source = Get-OctoEnvironmentRepoSource -repo ([string]$repo['name']) -basePath $basePath
+            if (-not $source) { continue }
+            # Against the base lane's package only: a lane build packs the repository from its worktree into the lane feed,
+            # which would hide that the base lane built it from an older commit - and with it the staleProducers walk below.
+            $built = & $packageCommit ([string]$repo['name']) @(Join-Path $basePath 'nuget')
+            $newer = if ($built) { Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--count', "$built..$($repo['baseCommit'])") }
+            # A package commit git does not know (packed in another clone) falls back to the checkout's HEAD.
+            if (-not $built -or $newer.ExitCode -ne 0) { $newer = Invoke-OctoEnvironmentGit -path $source -arguments @('rev-list', '--count', "HEAD..$($repo['baseCommit'])") }
+            if ($newer.ExitCode -ne 0) { $errors.Add("$($repo['name']): git rev-list against $($repo['baseCommit']) failed: $(($newer.Output | Select-Object -Last 1))"); continue }
+            if ([int]($newer.Output | Select-Object -Last 1) -gt 0) { $rebuild += [string]$repo['name'] }
+        }
+        if ($rebuild.Count -gt 0) {
+            # producersOf[consumer] = producers it references
+            $producersOf = @{}
+            foreach ($producer in $graph.Consumers.Keys) {
+                foreach ($edge in $graph.Consumers[$producer]) {
+                    if (-not $producersOf.ContainsKey($edge.Consumer)) { $producersOf[$edge.Consumer] = [System.Collections.Generic.List[string]]::new() }
+                    if (-not $producersOf[$edge.Consumer].Contains($producer)) { $producersOf[$edge.Consumer].Add($producer) }
+                }
+            }
+            # Every environment repository is rebuilt against the feed, not only the newer ones: all of them that reach a stale
+            # producer are named (AB#9808 - a consumer added in step with origin fails with CS1061 just the same).
+            $consumedBy = @{}
+            foreach ($name in @($inEnvironment | Where-Object { -not (Test-OctoEnvironmentToolRepo -repo $_) })) {
+                $seen = @{ $name = $true }
+                $queue = [System.Collections.Generic.Queue[string]]::new()
+                $queue.Enqueue($name)
+                while ($queue.Count -gt 0) {
+                    $current = $queue.Dequeue()
+                    if (-not $producersOf.ContainsKey($current)) { continue }
+                    foreach ($producer in $producersOf[$current]) {
+                        if ($seen.ContainsKey($producer)) { continue }
+                        $seen[$producer] = $true
+                        $queue.Enqueue($producer)
+                        if ($inEnvironment -contains $producer) { continue }
+                        if (-not $consumedBy.ContainsKey($producer)) { $consumedBy[$producer] = [System.Collections.Generic.List[string]]::new() }
+                        if (-not $consumedBy[$producer].Contains($name)) { $consumedBy[$producer].Add($name) }
+                    }
+                }
+            }
+            foreach ($entry in $set) {
+                if (-not $consumedBy.ContainsKey($entry.Name)) { continue }
+                $upstream = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
+                $ref = if ($upstream.ExitCode -eq 0) { [string]($upstream.Output | Select-Object -Last 1) } else { 'origin/main' }
+                if (-not $noFetch -and $ref -match '^([^/]+)/(.+)$') { [void](Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('fetch', '--quiet', $Matches[1], $Matches[2]) -noPrompt) }
+                $built = & $packageCommit $entry.Name
+                $builtSource = 'package'
+                $count = if ($built) { Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-list', '--count', "$built..refs/remotes/$ref") }
+                if (-not $built -or $count.ExitCode -ne 0) {
+                    $built = [string]((Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-parse', 'HEAD')).Output | Select-Object -Last 1)
+                    $builtSource = 'checkout'
+                    $count = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-list', '--count', "HEAD..refs/remotes/$ref")
+                }
+                if ($count.ExitCode -ne 0) { $errors.Add("$($entry.Name): git rev-list HEAD..refs/remotes/$ref failed: $(($count.Output | Select-Object -Last 1))"); continue }
+                $behind = [int]($count.Output | Select-Object -Last 1)
+                if ($behind -gt 0) {
+                    $stale += [ordered]@{ repo = $entry.Name; behind = $behind; upstream = $ref; builtFrom = $built; builtFromSource = $builtSource; consumedBy = @($consumedBy[$entry.Name]) }
                 }
             }
         }
-        foreach ($entry in $set) {
-            if (-not $consumedBy.ContainsKey($entry.Name)) { continue }
-            $upstream = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
-            $ref = if ($upstream.ExitCode -eq 0) { [string]($upstream.Output | Select-Object -Last 1) } else { 'origin/main' }
-            if ($ref -match '^([^/]+)/(.+)$') { [void](Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('fetch', '--quiet', $Matches[1], $Matches[2]) -noPrompt) }
-            $count = Invoke-OctoEnvironmentGit -path $entry.Path -arguments @('rev-list', '--count', "HEAD..refs/remotes/$ref")
-            if ($count.ExitCode -ne 0) { continue }
-            $behind = [int]($count.Output | Select-Object -Last 1)
-            if ($behind -gt 0) { $stale += [ordered]@{ repo = $entry.Name; behind = $behind; upstream = $ref; consumedBy = @($consumedBy[$entry.Name]) } }
-        }
     }
+    catch { $errors.Add("the stale-package check failed: $($_.Exception.Message)") }
     $hints = @()
     if ($rebuild.Count -gt 0) {
         $hints += "The feed was seeded with the packages $basePath built from its local checkouts; $($rebuild -join ', ') start from a newer commit than those packages. Invoke-BuildEnvironment -env $env rebuilds them into the environment feed."
     }
     if ($stale.Count -gt 0) {
         $first = $stale[0]['repo']
-        $hints += "Libraries outside the environment are behind their upstream in ${basePath}: $(@($stale | ForEach-Object { "$($_['repo']) ($($_['behind']) behind $($_['upstream']), consumed by $($_['consumedBy'] -join ', '))" }) -join '; '). Their seeded packages may lack what the newer consumers need (CS0246). Either add them (Add-OctoEnvironmentRepo -env $env -repo $first -role consumer, then Invoke-BuildEnvironment), or update and rebuild them in the base lane and run Sync-OctoEnvironment -env $env."
+        $hints += "Libraries outside the environment have packages older than their upstream: $(@($stale | ForEach-Object { "$($_['repo']) (built from $(([string]$_['builtFrom']).Substring(0, [Math]::Min(8, ([string]$_['builtFrom']).Length))), $($_['behind']) behind $($_['upstream']), consumed by $($_['consumedBy'] -join ', '))" }) -join '; '). Their seeded packages may lack what the newer consumers need (CS0246, CS1061). Either add them (Add-OctoEnvironmentRepo -env $env -repo $first -role consumer, then Invoke-BuildEnvironment), or update and rebuild them in the base lane and run Sync-OctoEnvironment -env $env."
     }
-    return [ordered]@{ rebuildInEnvironment = $rebuild; staleProducers = $stale; hints = $hints }
+    if ($errors.Count -gt 0) {
+        $hints += "The stale-package check is incomplete - $($errors -join '; '). Libraries outside the environment may be stale without being listed."
+    }
+    return [ordered]@{ checked = $errors.Count -eq 0; errors = @($errors); rebuildInEnvironment = $rebuild; staleProducers = $stale; hints = $hints }
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1366,6 +1438,40 @@ function Write-OctoEnvironmentSyncSummary {
 
 $script:PackageScanSkippedFolders = [System.Collections.Generic.HashSet[string]]::new([string[]]@('node_modules', 'bin', 'obj', '.git', '.vs', '.idea', 'TestResults', 'packages', '.nuget-packages', 'dist', '.angular', 'artifacts', 'coverage', '.nx', '.cache'), [StringComparer]::OrdinalIgnoreCase)
 
+function Clear-OctoRestoreNoOpCache {
+    <#
+        Deletes the obj/project.nuget.cache files below a worktree (AB#9808). An adopted worktree was restored somewhere
+        else - against the base lane's feed and another package cache - and with that file in place a restore can report
+        "no-op" and keep the old assets, so the lane build compiles against packages that are not the lane's. Without it
+        the first lane build restores every project against the lane feed. project.assets.json stays (the restore
+        rewrites it). The walk never enters node_modules, bin, .git or the other folders the package scan skips, nor
+        symbolic links. Returns the number of files deleted.
+    #>
+    param([Parameter(Mandatory = $true)] [string]$path)
+    $removed = 0
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($path)
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
+        try {
+            foreach ($child in [IO.Directory]::EnumerateDirectories($directory)) {
+                if (([IO.File]::GetAttributes($child) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                $name = [IO.Path]::GetFileName($child)
+                if ($name -ieq 'obj') {
+                    $cache = Join-Path $child 'project.nuget.cache'
+                    if ([IO.File]::Exists($cache)) { [IO.File]::Delete($cache); $removed++ }
+                    continue
+                }
+                if ($script:PackageScanSkippedFolders.Contains($name)) { continue }
+                $stack.Push($child)
+            }
+        }
+        catch [System.UnauthorizedAccessException] { continue }
+        catch [System.IO.IOException] { continue }
+    }
+    return $removed
+}
+
 function Get-OctoPackageScanFiles {
     <#
         The files the package graph reads for one repository: every *.csproj and *.props below the repository root
@@ -1411,7 +1517,13 @@ function Get-OctoRepoPackageInfo {
         }
         if ($file.Extension -ne '.csproj') { continue }
         if ($text -match '<IsPackable>\s*false\s*</IsPackable>') { continue }
-        $id = if ($text -match '<PackageId>\s*([^<$]+?)\s*</PackageId>') { $Matches[1] } else { [IO.Path]::GetFileNameWithoutExtension($file.Name) }
+        # The package id as MSBuild derives it: PackageId, else AssemblyName, else the project name. Without the
+        # AssemblyName step a library such as octo-construction-kit-engine-mongodb (Runtime.Engine.MongoDb.csproj,
+        # AssemblyName Meshmakers.Octo.Runtime.Engine.MongoDb) produced nothing its consumers reference, so they were
+        # neither affected nor rebuilt after a change in it (AB#9808).
+        $id = if ($text -match '<PackageId>\s*([^<$]+?)\s*</PackageId>') { $Matches[1] }
+        elseif ($text -match '<AssemblyName>\s*([^<$]+?)\s*</AssemblyName>') { $Matches[1] }
+        else { [IO.Path]::GetFileNameWithoutExtension($file.Name) }
         [void]$produces.Add($id)
     }
     foreach ($id in $produces) { [void]$references.Remove($id) }   # a repository does not consume itself
@@ -1823,7 +1935,9 @@ function Invoke-OctoEnvironmentPackageCacheSeed {
     existing branch).
     The feed is seeded from the base lane's packages, which were built from the LOCAL checkouts: the output says which
     environment repositories are newer than those packages (Invoke-BuildEnvironment rebuilds them) and which
-    libraries outside the environment are behind their upstream in the base lane, with what to do (-Json: feedSnapshot).
+    libraries outside the environment have packages built from a commit behind their upstream (the commit their nuspec
+    names, else the base lane checkout's HEAD), with what to do (-Json: feedSnapshot; checked = $false and errors when
+    the check could not be made).
 
     Package cache (AB#8831): <env>/.nuget-packages is filled from a local cache - the base lane's .nuget-packages,
     else ~/.nuget/packages - instead of downloading 2-5 GB on the first restore: third-party packages only, never
@@ -2232,7 +2346,9 @@ function Add-OctoEnvironmentRepo {
             $new = Add-OctoEnvironmentWorktree -basePath $basePath -environmentPath $environmentPath -repo $item.Name -role $item.Role -branchName $branchName -localBase:$localBase
             $manifest['repos'] = @($manifest['repos']) + @($new.Entry)
             Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
-            $added += [ordered]@{ name = $item.Name; role = $item.Role; baseRef = $new.Entry['baseRef']; baseCommit = $new.Entry['baseCommit'] }
+            # AB#9808: whatever obj/ the new worktree has, its first lane build restores it against the lane feed.
+            $cleared = Clear-OctoRestoreNoOpCache -path ([string]$new.Entry['path'])
+            $added += [ordered]@{ name = $item.Name; role = $item.Role; baseRef = $new.Entry['baseRef']; baseCommit = $new.Entry['baseCommit']; restoreCachesCleared = $cleared }
             $warnings += @($new.Base.Warnings)
             if ($new.Base.Commit -ne $new.Base.LocalCommit) { $drift += ConvertTo-OctoBaseDriftRow -added $new }
         }
@@ -2242,7 +2358,7 @@ function Add-OctoEnvironmentRepo {
     try { $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath }
     catch {
         $warnings += "The feed snapshot report is not available: $($_.Exception.Message)"
-        $feedSnapshot = [ordered]@{ rebuildInEnvironment = @(); staleProducers = @(); hints = @() }
+        $feedSnapshot = [ordered]@{ checked = $false; errors = @($_.Exception.Message); rebuildInEnvironment = @(); staleProducers = @(); hints = @("The stale-package check failed: $($_.Exception.Message)") }
     }
     $toolRepos = @($added | Where-Object { Test-OctoEnvironmentToolRepo -repo $_['name'] } | ForEach-Object { $_['name'] })
     $success = $errors.Count -eq 0
@@ -2307,13 +2423,17 @@ function Add-OctoEnvironmentExistingWorktree {
     Write-OctoEnvironmentManifest -environmentPath $environmentPath -manifest $manifest
     $global:LASTEXITCODE = 0
     $newPath = [string]$entry['path']
+    # Restored elsewhere before: the first lane build restores it again, against the lane feed (AB#9808).
+    $restoreCachesCleared = Clear-OctoRestoreNoOpCache -path $newPath
     if ($Json) {
         Write-OctoJson -Command 'Add-OctoEnvironmentRepo' -Data (New-OctoActionResult -Success $true -ExitCode 0 -Extra @{
                 environment = $env; added = @([ordered]@{ name = $info.Repo; role = $role }); repo = $info.Repo
                 oldPath = $oldPath; newPath = $newPath; inPlace = [bool]$inPlace; branch = $entry['branch']; errors = @()
+                restoreCachesCleared = $restoreCachesCleared
             })
         return
     }
+    if ($restoreCachesCleared -gt 0) { Write-Host "Cleared $restoreCachesCleared obj/project.nuget.cache file(s): the next build restores against the environment feed." -ForegroundColor DarkGray }
     if ($inPlace) {
         Write-Host "Recorded $($info.Repo) in $env in place: $oldPath" -ForegroundColor Green
         Write-Warning "Invoke-BuildEnvironment builds it with the environment's feed and cache; a plain dotnet build or Rider in $oldPath is not isolated."
@@ -2699,7 +2819,9 @@ function Remove-OctoEnvironment {
     -repos <names> builds only these repositories (still in build order), -skip <names> leaves repositories out;
     both take exact names or the name without "octo-", and refuse a name that is no repository of the environment.
     A left-out repository between a library that is built and a consumer that is built (or one that changed itself)
-    means stale packages: a warning names it (-Json: staleWarnings).
+    means stale packages: a warning names it (-Json: staleWarnings). Libraries outside the environment whose seeded
+    packages are older than their upstream are named as New-OctoEnvironment does (Get-OctoEnvironmentFeedSnapshotReport
+    with the refs as last fetched; -Json: feedSnapshot, with checked = $false when the check could not be made).
     -Json reports per repository status (built | skipped | failed), reason (unchanged, notSelected, excluded,
     nothingToBuild, neverBuilt, sourcesChanged, packagesChanged, propertiesChanged, testsNotCompiled, noBuildOutput,
     noGitState, always)
@@ -2845,6 +2967,11 @@ function Invoke-BuildEnvironment {
         if (-not $Json) { Write-Host "Synced $env from $basePath" -ForegroundColor Green; Write-OctoEnvironmentSyncSummary -sync $sync }
     }
 
+    # AB#9808: the build names base-lane packages older than the lane's worktrees too (as New-OctoEnvironment and
+    # Add-OctoEnvironmentRepo do), with the upstream refs as last fetched - no network call per build.
+    $feedSnapshot = Get-OctoEnvironmentFeedSnapshotReport -env $env -manifest $manifest -basePath $basePath -noFetch
+    if (-not $Json) { foreach ($message in $feedSnapshot.hints) { Write-Warning $message } }
+
     # Dependencies from the package graph of the lane (environment worktrees in place of their base folders): the feed
     # packages each repository consumes go into its build stamp, the repositories it depends on into the prediction
     # and the stale-package warnings. Without a graph Invoke-BuildRange hashes the whole feed per repository.
@@ -2953,6 +3080,7 @@ function Invoke-BuildEnvironment {
     $data['synced'] = $null -ne $sync
     $data['selection'] = [ordered]@{ repos = @($selection.Build); skipped = $selection.Skipped; buildUnchanged = [bool]$buildUnchanged }
     $data['staleWarnings'] = @($staleWarnings)
+    $data['feedSnapshot'] = $feedSnapshot
     $data['killDotnet'] = $kill
     if ($null -ne $sync) { $data['sync'] = ConvertTo-OctoSyncReport -sync $sync -detailed:$Detailed }
     $global:LASTEXITCODE = $exitCode

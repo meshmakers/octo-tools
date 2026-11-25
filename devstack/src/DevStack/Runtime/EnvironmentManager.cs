@@ -87,6 +87,13 @@ public sealed record EnvironmentCommandResult(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SlotDataDrop? DataDrop { get; init; }
 
+    /// <summary>
+    ///     lane_add_repo that did not run because a job of the lane still ran after the in-call wait (AB#9808): the job to wait for
+    ///     with job_status before calling again.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RetryAfterJob { get; init; }
+
     /// <summary>lane_remove: the lane's feature branches - deleted when they held nothing, else kept with the reason and the command.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<LaneBranch>? Branches { get; init; }
@@ -132,11 +139,15 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
 
     /// <summary>
     ///     Add-OctoEnvironmentRepo: a repo as a new feature/consumer worktree (repo), or an existing worktree adopted (path,
-    ///     inPlace keeps it where it is). Refused while the environment builds or a service of that repo runs in its slot.
+    ///     inPlace keeps it where it is). Waits for the lane's running or queued jobs (at most <see cref="AddRepoJobWait" />), and
+    ///     answers with retryAfterJob when one still runs then; refused while a service of that repo runs in its slot.
     /// </summary>
     public async Task<EnvironmentCommandResult> AddRepoAsync(string owner, string env, string? repo, string? path, string? role, bool addAffected, bool inPlace,
         CancellationToken cancellationToken)
     {
+        // AB#9808: the work runs to its end when the caller's MCP call times out - a cancelled cmdlet run would leave a half-added
+        // repo; the caller only loses the answer (lane_list shows the result).
+        cancellationToken = CancellationToken.None;
         RequireOwner(owner);
         var config = store.Load();
         var info = EnvironmentDiscovery.Find(config, env);
@@ -177,7 +188,20 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             throw new InvalidOperationException($"Add-OctoEnvironmentRepo of the daemon's octo-tools takes no -{(role != null && !caps.AddRepoRole ? "role" : "addAffected")}.");
         }
 
-        RefuseWhileBuilding(env);
+        // AB#9808: one change of a lane at a time; no new job of the lane starts while it runs (it may outlive its caller's call).
+        using var change = supervisor.Changes.Begin(info.Name, "lane_add_repo", owner);
+        var (waited, waitedFor, stillActive) = await WaitForJobsAsync(env, cancellationToken);
+        if (stillActive.Count > 0)
+        {
+            // AB#9808: no bare refusal - the answer names the jobs to wait for; nothing was added.
+            var first = stillActive[0].Id;
+            return new EnvironmentCommandResult(false, 0, "Add-OctoEnvironmentRepo (not run: the lane's jobs still run)", null, null,
+            [
+                $"Nothing was added yet: job(s) of lane '{env}' still run or wait after {waited:0} s ({string.Join(", ", stillActive.Select(b => $"{b.Id} {b.State}"))}). " +
+                $"Retry lane_add_repo after job_status(\"{first}\", waitSeconds) ended (or job_cancel(owner, \"{first}\", lane=\"{env}\") it)."
+            ], null) { RetryAfterJob = first };
+        }
+
         var repoName = repo ?? (Common.PathScope.IsWorktree(fullPath!) ? CheckoutDiscovery.ReadWorktree(Path.Combine(fullPath!, ".git")).Repo : null) ?? Path.GetFileName(fullPath!);
         var services = config.Services.Where(s => string.Equals(s.Value.Repo, repoName, StringComparison.OrdinalIgnoreCase)).Select(s => s.Key).ToHashSet();
         if (supervisor.Registry.Known().Any(k => k.Slot.Name == info.Slot))
@@ -211,8 +235,18 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
         var (success, exitCode, command, data, tail) = await RunAsync(config, string.Join(' ', parts) + " -Json", "Add-OctoEnvironmentRepo", cancellationToken);
         logger?.LogInformation("{Owner} added {Repo} to environment {Env}: {Result}", owner, repoName, env, success ? "ok" : $"failed ({exitCode})");
         var row = success ? (await ListAsync(null, cancellationToken)).FirstOrDefault(r => r.Name == env) : null;
-        return new EnvironmentCommandResult(success, exitCode, command, row, data,
-            success ? [$"Build it: lane_build(owner, lane=\"{env}\")."] : [], success ? null : tail);
+        var notes = FeedSnapshot.Notes((data as JsonObject)?["feedSnapshot"], env);
+        if (waitedFor.Count > 0)
+        {
+            notes.Insert(0, $"Waited {waited:0} s for the lane's job(s) {string.Join(", ", waitedFor)} to end before adding the repo.");
+        }
+
+        if (success)
+        {
+            notes.Add($"Build it: lane_build(owner, lane=\"{env}\").");
+        }
+
+        return new EnvironmentCommandResult(success, exitCode, command, row, data, notes, success ? null : tail);
     }
 
     /// <summary>Sync-OctoEnvironment: refresh the snapshot of the base lane's feed and catalogs; refused like lane_build syncMain=true.</summary>
@@ -254,10 +288,38 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
         return new EnvironmentCommandResult(success, exitCode, command, null, data, [], success ? null : tail);
     }
 
-    private void RefuseWhileBuilding(string env)
+    /// <summary>
+    ///     How long lane_add_repo waits in the call for the lane's running or queued jobs (AB#9808): below the ~60 s after which an
+    ///     agent's MCP call times out.
+    /// </summary>
+    public TimeSpan AddRepoJobWait { get; set; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>How often the wait looks at the lane's jobs again (tests shorten it).</summary>
+    public TimeSpan JobPollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    ///     lane_add_repo while a build or test run of the lane runs or waits: wait for them to end, at most <see cref="AddRepoJobWait" />
+    ///     (AB#9808). Returns the seconds waited, the jobs waited for, and the jobs that still run or wait (empty: go on). Refused when
+    ///     the lane is being removed.
+    /// </summary>
+    private async Task<(double Seconds, List<string> WaitedFor, List<BuildStatus> StillActive)> WaitForJobsAsync(string env, CancellationToken cancellationToken)
     {
         supervisor.Removals.Refuse(env); // AB#9673: a lane that is being removed takes no change
-        RefuseWhileJobs(env);
+        var waitedFor = new List<string>();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (queue.ActiveFor(env) is { Count: > 0 } active)
+        {
+            waitedFor.AddRange(active.Select(b => b.Id).Where(id => !waitedFor.Contains(id)));
+            if (clock.Elapsed >= AddRepoJobWait)
+            {
+                return (clock.Elapsed.TotalSeconds, waitedFor, active);
+            }
+
+            await Task.Delay(JobPollInterval, cancellationToken);
+        }
+
+        supervisor.Removals.Refuse(env);
+        return (waitedFor.Count == 0 ? 0 : clock.Elapsed.TotalSeconds, waitedFor, []);
     }
 
     private void RefuseWhileJobs(string env)
@@ -380,6 +442,10 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
     public async Task<EnvironmentCommandResult> CreateAsync(string owner, string name, IReadOnlyList<string> repos, string? workItem, string? branchName,
         bool addAffected, CancellationToken cancellationToken, bool skipPackageCacheSeed = false)
     {
+        // AB#9808: the work runs to its end when the caller's MCP call times out (a lane with many repos takes longer than a
+        // teammate's ~60 s): a cancellation between New-OctoEnvironment and the slot reservation left a lane without its slot, and
+        // the next lane_create got the same index. The caller only loses the answer (lane_list shows the lane and its slot).
+        cancellationToken = CancellationToken.None;
         RequireOwner(owner);
         var config = store.Load();
         CheckName(name);
@@ -390,6 +456,8 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             throw new InvalidOperationException($"lane_create needs the cmdlet {EnvironmentCapabilities.Unavailable(probed, "New-OctoEnvironment")}.");
         }
 
+        // AB#9808: a second lane_create of the same name while the first runs (its caller timed out and asked again) is refused.
+        using var change = supervisor.Changes.Begin(name, "lane_create", owner);
         if (EnvironmentDiscovery.Discover(config).Any(e => e.Name == name))
         {
             throw new InvalidOperationException($"Lane '{name}' exists already (lane_list).");
@@ -472,6 +540,7 @@ public sealed class EnvironmentManager(ConfigStore store, StackSupervisor superv
             row = Row(created, await supervisor.SummariesAsync());
             // The row carries the manifest already; the cmdlet's copy would double the answer.
             (data as JsonObject)?.Remove("manifest");
+            notes.AddRange(FeedSnapshot.Notes((data as JsonObject)?["feedSnapshot"], name));
             notes.Add($"Edit in the repo paths of lane_list(lane=\"{name}\"). Build it: lane_build(owner, lane=\"{name}\"); test it: lane_test(owner, lane=\"{name}\", repo=...). " +
                       $"Run it: stack_start(owner, lane=\"{name}\", profile=...) - its own stack (slot '{created.Slot}'), lease held by {created.LeaseOwner}.");
         }

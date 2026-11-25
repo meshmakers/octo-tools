@@ -396,8 +396,9 @@ internal static class ServerInstructions
         "with stopServices) needs that lease; it expires 30 minutes after the holder's last changing call (lease_status: lastActivityAt, " +
         "idleMinutes). " +
         "UC-C, roles: one lane per work item, created and owned by the task's lead; its developer agents work in that lane only. " +
-        "Waiting: lane_build, base_build, lane_test and base_test return a job at once; job_status(id, waitSeconds=600) answers when the job " +
-        "ended (timedOut says when it did not yet). job_list, job_output, job_cancel; builds never run tests. " +
+        "Waiting: lane_build, base_build, lane_test and base_test return a job at once; job_status(id, waitSeconds=50) answers when the job " +
+        "ended (timedOut says when it did not yet - call it again; 50 s is the maximum, the MCP call of an in-process teammate times out " +
+        "after about 60 s). job_list(lane, limit), job_output, job_cancel (short ids such as 'b351' work); builds never run tests. " +
         "Coordinators only read (/mcp?view=agent lists no admin_* tool): stack_status, stack_attention (what needs attention), stack_list, lane_list, lane_affected, " +
         "workspace_list, job_status, job_list, job_output, job_refusals, job_stats, build_plan, profile_list, profile_get, config_get, service_logs, " +
         "service_env, lease_status, test_lock, infra_status, daemon_status, setup_check. " +

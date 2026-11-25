@@ -28,7 +28,9 @@ public sealed class LaneTools(EnvironmentManager environments)
                  "repos on 'branch', its own Octo.User.props (own package cache), a snapshot of the base lane's feed and catalogs, the manifest " +
                  "and its own stack slot; the package cache is filled from a local cache (a note says how much, how and how long). Nothing " +
                  "builds or runs yet. The flow: edit in the paths lane_list shows, lane_build(lane), lane_test(lane, repo), stack_start(lane), " +
-                 "verify, lane_remove(lane) after the merge. The name also names the lane's stack (lowercase letters, digits, '-'). Refused while " +
+                 "verify, lane_remove(lane) after the merge. The name also names the lane's stack (lowercase letters, digits, '-'). A note names " +
+                 "libraries outside the lane whose base-lane packages were built from a commit behind their upstream (CS0246/CS1061 in the lane's " +
+                 "consumers), with the fix lane_add_repo(role=consumer), and says when that check could not be made. Refused while " +
                  "the daemon's octo-tools lacks the cmdlet.")]
     public Task<EnvironmentCommandResult> Create(
         [Description(StackTools.OwnerDescription)] string owner,
@@ -51,8 +53,12 @@ public sealed class LaneTools(EnvironmentManager environments)
     [McpServerTool(Name = "lane_add_repo")]
     [Description("Adds a repo to a lane with octo-tools Add-OctoEnvironmentRepo: 'repo' creates a feature worktree (or a consumer one, detached at " +
                  "the base commit, with role=consumer; addAffected also adds the repos that consume it), 'path' adopts an existing worktree (a " +
-                 "flat wt-<lane>-<repo> or <repo>/.claude/worktrees/<name>; inPlace keeps it where it is). Refused while the lane builds or a " +
-                 "service of that repo runs in the lane's stack (stop it first). Build afterwards with lane_build.")]
+                 "flat wt-<lane>-<repo> or <repo>/.claude/worktrees/<name>; inPlace keeps it where it is). While a build or test run of the lane " +
+                 "runs or waits, the call waits for it up to 45 s (a note says how long); a job still running then is named in " +
+                 "retryAfterJob - nothing was added, call again after job_status(<id>, waitSeconds) ended. Refused while a service of that " +
+                 "repo runs in the lane's stack (stop it first). The added repo's obj/project.nuget.cache files are deleted, so the next " +
+                 "lane_build restores it against the lane feed. Notes name stale base-lane packages as lane_create does. Build afterwards " +
+                 "with lane_build.")]
     public Task<EnvironmentCommandResult> AddRepo(
         [Description(StackTools.OwnerDescription)] string owner,
         [Description(LaneName)] string lane,

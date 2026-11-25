@@ -1061,7 +1061,7 @@ public sealed class BuildQueueTests : IDisposable
         await WaitAsync(queue, job.Id, b => b.State == "running");
 
         var start = () => supervisor.StartStackAsync("s1", null, null, false, false, TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
-        await start.Should().ThrowAsync<InvalidOperationException>().WithMessage($"*sleeper*job {job.Id} (a build of s2*job_status(\"{job.Id}\", waitSeconds=600)*");
+        await start.Should().ThrowAsync<InvalidOperationException>().WithMessage($"*sleeper*job {job.Id} (a build of s2*job_status(\"{job.Id}\", waitSeconds=50)*");
         release.SetResult();
         (await WaitAsync(queue, job.Id)).State.Should().Be("succeeded");
         await start(); // free again

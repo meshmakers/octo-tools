@@ -849,10 +849,11 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.lock.acquired | Should -BeTrue
             $doc.data.lock.path | Should -Be $script:LockPath
 
-            # dotnet test <csproj> -c DebugL --no-build --results-directory <run> --logger trx -nodeReuse:false
+            # dotnet test <csproj> -c DebugL --no-build --results-directory <run> --logger trx --logger console;verbosity=normal -nodeReuse:false
+            # (the console logger prints a line per test: progress for octo-devstack's idle watchdog, AB#9808)
             $script:Calls[0].Arguments[0] | Should -Be 'test'
             $script:Calls[0].Arguments[1] | Should -Be (Join-Path $ws.Repo 'tests/Sample.UnitTests/Sample.UnitTests.csproj')
-            ($script:Calls[0].Arguments -join ' ') | Should -Match '-c DebugL --no-build --results-directory .+ --logger trx;LogFileName=results\.trx -nodeReuse:false$'
+            ($script:Calls[0].Arguments -join ' ') | Should -Match '-c DebugL --no-build --results-directory .+ --logger trx;LogFileName=results\.trx --logger console;verbosity=normal -nodeReuse:false$'
             $script:Calls[0].Filter | Should -BeNullOrEmpty
             # a legacy lane: no lane environment
             $script:Calls[0].NugetPackages | Should -BeNullOrEmpty
@@ -1412,6 +1413,87 @@ Describe 'Invoke-OctoTestRun' {
             $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo octo-sample-services -project Sample.IntegrationTests -lockPath $script:LockPath -Json)
             @($doc.data.projects[0].passedTests).Count | Should -Be 0
             $doc.data.projects[0].passedTruncated | Should -BeFalse
+        }
+    }
+
+    Context 'Pester tests of a repository (AB#9808)' {
+        BeforeEach {
+            Set-Content -Path (Join-Path $ws.Repo 'tests/Sample.Tests.ps1') -Value "Describe 'x' { It 'y' { 1 | Should -Be 1 } }"
+            $script:PesterCalls = [System.Collections.Generic.List[object]]::new()
+            Mock -ModuleName OctoTests Test-OctoPester5 { $true }
+            Mock -ModuleName OctoTests Invoke-OctoPesterTest {
+                $script:PesterCalls.Add([pscustomobject]@{ Directory = $directory; LogFile = $logFile })
+                Add-Content -LiteralPath $logFile -Value 'Sample.Tests.ps1: 3 passed, 1 failed'
+                [ordered]@{ total = 4; passed = 3; failed = 1; skipped = 0; success = $false; failedTests = @([ordered]@{ name = 'x.y fails'; message = 'Expected 1, but got 2.' }) } |
+                    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $resultFile
+                return 1
+            }
+        }
+
+        It 'runs tests/*.Tests.ps1 as the project Pester and counts its tests like the other projects' {
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo sample-services -project Pester -lockPath $script:LockPath -Json)
+
+            $script:PesterCalls.Count | Should -Be 1
+            $script:PesterCalls[0].Directory | Should -Be (Join-Path $ws.Repo 'tests')
+            Split-Path -Leaf $script:PesterCalls[0].LogFile | Should -Be 'pester-test.log'
+            $script:Calls.Count | Should -Be 0
+            $project = @($doc.data.projects) | Where-Object project -EQ 'Pester'
+            $project.runner | Should -Be 'pester'
+            $project.state | Should -Be 'failed'
+            $project.total | Should -Be 4
+            $project.failed | Should -Be 1
+            $project.failedTests[0].name | Should -Be 'x.y fails'
+            $project.failedTests[0].message | Should -Be 'Expected 1, but got 2.'
+            $doc.data.failedProject | Should -Be 'Pester'
+            $doc.data.failedStep | Should -Be 'tests'
+        }
+
+        It 'fails with a clear message when Pester 5 is missing' {
+            Mock -ModuleName OctoTests Test-OctoPester5 { $false }
+
+            $doc = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo sample-services -project Pester -lockPath $script:LockPath -Json)
+
+            $script:PesterCalls.Count | Should -Be 0
+            $project = @($doc.data.projects) | Where-Object project -EQ 'Pester'
+            $project.state | Should -Be 'error'
+            @($project.errors) | Should -Contain 'Pester 5 is not installed for pwsh - install it with: Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force'
+            $doc.data.success | Should -BeFalse
+        }
+
+        It 'starts the Pester child without the lane build variables, which the dotnet projects of the run keep' {
+            Set-Content -Path (Join-Path $ws.EnvRepo 'tests/Sample.Tests.ps1') -Value "Describe 'x' { It 'y' { 1 | Should -Be 1 } }"
+            Mock -ModuleName OctoTests Invoke-OctoPesterTest {
+                $script:PesterCalls.Add([pscustomobject]@{ NugetPackages = $env:NUGET_PACKAGES; RestoreSources = $env:RestoreSources; NodeReuse = $env:MSBUILDDISABLENODEREUSE })
+                [ordered]@{ total = 1; passed = 1; failed = 0; skipped = 0; success = $true; failedTests = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $resultFile
+                return 0
+            }
+            try {
+                $doc = Get-Doc (Invoke-OctoTestRun -env feat-a -repo sample-services -lockPath $script:LockPath -Json)
+            }
+            finally { Remove-Item (Join-Path $ws.EnvRepo 'tests/Sample.Tests.ps1') }
+
+            $doc.data.lane.isolated | Should -BeTrue
+            $script:PesterCalls.Count | Should -Be 1
+            $script:PesterCalls[0].NugetPackages | Should -BeNullOrEmpty
+            $script:PesterCalls[0].RestoreSources | Should -BeNullOrEmpty
+            $script:PesterCalls[0].NodeReuse | Should -BeNullOrEmpty
+            $script:Calls.Count | Should -BeGreaterThan 0
+            foreach ($call in $script:Calls) {
+                $call.NugetPackages | Should -Be (Join-Path $ws.EnvPath '.nuget-packages')
+                $call.RestoreSources | Should -Be "$(Join-Path $ws.EnvPath 'nuget');https://api.nuget.org/v3/index.json"
+            }
+            $env:NUGET_PACKAGES | Should -BeNullOrEmpty
+            $env:RestoreSources | Should -BeNullOrEmpty
+        }
+
+        It 'leaves Pester out of a filtered run, and a repository without *.Tests.ps1 has no Pester project' {
+            $filtered = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo sample-services -filter 'FullyQualifiedName~Order' -lockPath $script:LockPath -Json)
+            (@($filtered.data.projects) | Where-Object project -EQ 'Pester').state | Should -Be 'noMatch'
+            $script:PesterCalls.Count | Should -Be 0
+
+            Remove-Item (Join-Path $ws.Repo 'tests/Sample.Tests.ps1')
+            $plain = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo sample-services -lockPath $script:LockPath -Json)
+            @($plain.data.projects | Where-Object project -EQ 'Pester').Count | Should -Be 0
         }
     }
 

@@ -190,12 +190,12 @@ public sealed class TestRunTests : IDisposable
 
         var job = await queue.EnqueueAsync(new BuildRequest
         {
-            Owner = "s1", Kind = BuildKind.Test, Repo = "octo-a", Projects = ["A.Tests", "B.Tests"], Filter = "Category!=Slow", RerunFailed = true
+            Owner = "s1", Kind = BuildKind.Test, Repo = "octo-a", Projects = ["A.Tests", "B.Tests"], Filter = "Category!=Slow"
         }, Ct);
         var done = await WaitAsync(queue, job.Id);
 
         _fake.BuildCalls.Single().Should().StartWith(
-            "Invoke-OctoTestRun -branch 'branches/main' -repo 'octo-a' -project 'A.Tests','B.Tests' -filter 'Category!=Slow' -rerunFailed -Json -EventsFile ");
+            "Invoke-OctoTestRun -branch 'branches/main' -repo 'octo-a' -project 'A.Tests','B.Tests' -filter 'Category!=Slow' -Json -EventsFile ");
         done.Kind.Should().Be("test");
         done.Target.Should().Be("branches/main: tests of octo-a");
         done.State.Should().Be("failed");
@@ -1085,16 +1085,18 @@ public sealed class TestRunTests : IDisposable
         again.Notes.Should().ContainSingle(n => n.Contains($"already running as {first.Id}") && n.Contains("no second run was added"));
         queue.Get(first.Id).Notes.Should().BeEmpty("the note belongs to the answer, not to the job");
 
-        // Another owner, another filter or another mode is another run.
+        // Another owner or another filter is another run.
         var other = await queue.EnqueueAsync(Request("s2"), Ct);
         var filtered = await queue.EnqueueAsync(Request(filter: "Billing"), Ct);
-        var rerun = await queue.EnqueueAsync(Request() with { RerunFailed = true }, Ct);
-        new[] { other.Id, filtered.Id, rerun.Id }.Should().OnlyHaveUniqueItems().And.NotContain(first.Id);
+        new[] { other.Id, filtered.Id }.Should().OnlyHaveUniqueItems().And.NotContain(first.Id);
+        // rerunFailed waits for no run of the repository: the running one decides which tests failed (AB#9808).
+        var rerun = () => queue.EnqueueAsync(Request() with { RerunFailed = true }, Ct);
+        (await rerun.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Contain($"test run {first.Id} of octo-a is running");
         // A queued one is recognised too.
         (await queue.EnqueueAsync(Request("s2"), Ct)).Id.Should().Be(other.Id);
 
         release.SetResult();
-        foreach (var id in new[] { first.Id, other.Id, filtered.Id, rerun.Id })
+        foreach (var id in new[] { first.Id, other.Id, filtered.Id })
         {
             await WaitAsync(queue, id);
         }
@@ -1105,7 +1107,7 @@ public sealed class TestRunTests : IDisposable
         await WaitAsync(queue, fresh.Id);
         lock (started)
         {
-            started.Should().HaveCount(5);
+            started.Should().HaveCount(4);
         }
     }
 
@@ -1152,7 +1154,7 @@ public sealed class TestRunTests : IDisposable
         queued.Notes.Should().Contain(n => n.StartsWith("The run stops alpha of the shared stack first") && n.Contains("MSB3027"));
         during!.State.Should().Be("stopped-for-build", "the tests ran while alpha was stopped");
         guard.Should().Contain("alpha runs out of").And.Contain(queued.Id, "nothing starts from the tested repository while the run goes on")
-            .And.Contain($"which job {queued.Id} (a test run of s1:").And.Contain($"job_status(\"{queued.Id}\", waitSeconds=600)").And.NotContain("which build");
+            .And.Contain($"which job {queued.Id} (a test run of s1:").And.Contain($"job_status(\"{queued.Id}\", waitSeconds=50)").And.NotContain("which build");
         done.State.Should().Be("failed");
         done.StoppedServices.Should().Equal("alpha");
         done.Notes.Should().Contain("restarted alpha", "a test run starts the services again whatever its result");
@@ -1330,5 +1332,287 @@ public sealed class TestRunTests : IDisposable
         queue.Get(done.Id, "APPS.WEB").Tests!.Projects.Single().FailedTests.Single().Name.Should().Be("src/app/a.spec.ts :: A > works");
         queue.Output(done.Id, "apps.web").Log.Should().BeEquivalentTo(new { Selected = "apps.web", Source = "kept" });
         Path.GetFileName(done.Logs.PerRepo!["apps.web"]).Should().Be($"{done.Id}.apps.web.log");
+    }
+
+    // ---------- honest results (AB#9808) ----------
+
+    /// <summary>A run of octo-a in which B.Tests has 2 failed tests and A.Tests passed.</summary>
+    private const string BFailed =
+        """{"success":false,"exitCode":1,"failedStep":"tests","failedProject":"B.Tests","projects":[{"project":"A.Tests","state":"passed","success":true,"total":3,"passed":3,"failed":0,"skipped":0,"durationSeconds":1,"failedTests":[]},{"project":"B.Tests","state":"failed","success":false,"total":4,"passed":2,"failed":2,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"B.Tests.X"},{"name":"B.Tests.Y"}]}]}""";
+
+    private void Answer(params string[] documents)
+    {
+        var answers = new Queue<string>(documents);
+        _fake.Build = (_, _, _) =>
+        {
+            var data = answers.Count > 1 ? answers.Dequeue() : answers.Peek();
+            return Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", data, exitCode: data.Contains("\"success\":false", StringComparison.Ordinal) ? 1 : 0));
+        };
+    }
+
+    [Fact]
+    public async Task RerunFailed_reruns_the_failed_projects_of_the_last_run_and_names_it()
+    {
+        Answer(BFailed, Passed);
+        var queue = Create();
+        var failed = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        var rerun = await queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+        await WaitAsync(queue, rerun.Id);
+
+        _fake.BuildCalls.Last().Should().StartWith("Invoke-OctoTestRun -branch 'branches/main' -repo 'octo-a' -project 'B.Tests' -rerunFailed -Json",
+            "only the project with failed tests of that run, whose last result is that run's");
+        rerun.Notes.Should().Contain($"rerunFailed: runs the 2 failed test(s) of {failed.Id} again, in B.Tests.");
+    }
+
+    [Fact]
+    public async Task RerunFailed_after_a_later_run_without_failures_is_refused_and_names_both_jobs()
+    {
+        // b376 failed, b377/b378 ran the same project later and passed: their results are what -rerunFailed reads (b383: 0 tests).
+        Answer(BFailed, Passed);
+        var queue = Create();
+        var failed = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        var later = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a") with { Filter = "Name~Z" }, Ct)).Id);
+
+        var rerun = () => queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+
+        var refused = await rerun.Should().ThrowAsync<InvalidOperationException>();
+        refused.Which.Message.Should().StartWith($"rerunFailed refused, nothing was queued: the last test run of octo-a in {_checkout.Lane}, {later.Id} (succeeded")
+            .And.Contain($"{failed.Id} had failed tests (B.Tests), but {later.Id} ran later");
+        _fake.BuildCalls.Should().HaveCount(2, "nothing was started");
+    }
+
+    [Fact]
+    public async Task RerunFailed_without_an_earlier_run_or_for_a_project_without_failures_is_refused()
+    {
+        Answer(BFailed);
+        var queue = Create();
+
+        var first = () => queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+        (await first.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .Contain("knows no finished test run of octo-a").And.Contain("Run the tests without rerunFailed first");
+
+        var failed = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        var passedProject = () => queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true, Projects = ["A.Tests"] }, Ct);
+        (await passedProject.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .Be($"rerunFailed refused, nothing was queued: A.Tests had no failed test in {failed.Id}, the last test run of octo-a in {_checkout.Lane} (failed there: B.Tests).");
+    }
+
+    [Fact]
+    public async Task RerunFailed_leaves_failed_Pester_tests_out_and_says_so_or_refuses_when_only_Pester_failed()
+    {
+        // Pester runs whole test files: the cmdlet skips it on -rerunFailed, so a rerun must neither promise nor pretend it.
+        var documents = new Queue<string>([
+            """{"success":false,"exitCode":1,"failedStep":"tests","failedProject":"B.Tests","projects":[{"project":"B.Tests","runner":"vstest","state":"failed","success":false,"total":4,"passed":2,"failed":2,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"B.Tests.X"},{"name":"B.Tests.Y"}]},{"project":"Pester","runner":"pester","state":"failed","success":false,"total":5,"passed":4,"failed":1,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"x.y"}]}]}""",
+            Passed,
+            """{"success":false,"exitCode":1,"failedStep":"tests","failedProject":"Pester","projects":[{"project":"B.Tests","runner":"vstest","state":"passed","success":true,"total":4,"passed":4,"failed":0,"skipped":0,"durationSeconds":1,"failedTests":[]},{"project":"Pester","runner":"pester","state":"failed","success":false,"total":5,"passed":4,"failed":1,"skipped":0,"durationSeconds":1,"failedTests":[{"name":"x.y"}]}]}"""
+        ]);
+        _fake.Build = (body, _, _) =>
+        {
+            Event(body, "plan", "\"repo\":\"octo-a\",\"environment\":null,\"projects\":[{\"project\":\"B.Tests\",\"docker\":false,\"noBuild\":true,\"skip\":false,\"runner\":\"vstest\"},{\"project\":\"Pester\",\"docker\":false,\"noBuild\":true,\"skip\":false,\"runner\":\"pester\"}],\"count\":2");
+            var data = documents.Dequeue();
+            return Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", data, exitCode: data.Contains("\"success\":false", StringComparison.Ordinal) ? 1 : 0));
+        };
+        var queue = Create();
+        var both = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        var rerun = await queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+        await WaitAsync(queue, rerun.Id);
+        _fake.BuildCalls.Last().Should().StartWith("Invoke-OctoTestRun -branch 'branches/main' -repo 'octo-a' -project 'B.Tests' -rerunFailed -Json");
+        rerun.Notes.Should().Contain(n => n.StartsWith($"rerunFailed: runs the 2 failed test(s) of {both.Id} again, in B.Tests.", StringComparison.Ordinal) &&
+                                          n.Contains("Pester failed too but runs whole test files: run it with project=\"Pester\" and without rerunFailed"));
+
+        var onlyPester = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        var refused = () => queue.EnqueueAsync(Tests("octo-a") with { RerunFailed = true }, Ct);
+        (await refused.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .StartWith($"rerunFailed refused, nothing was queued: the failed tests of {onlyPester.Id}").And.Contain("are Pester tests")
+            .And.Contain("project=\"Pester\" and without rerunFailed");
+        _fake.BuildCalls.Should().HaveCount(3, "the refused rerun started nothing");
+    }
+
+    [Fact]
+    public async Task A_run_in_which_no_test_ran_is_not_a_success()
+    {
+        Answer("""{"success":true,"exitCode":0,"repo":"octo-a","totals":{"total":0,"passed":0,"failed":0,"skipped":0},"projects":[{"project":"A.Tests","state":"skipped","success":true,"note":"no failed test in the last result","total":0,"passed":0,"failed":0,"skipped":0,"failedTests":[]}]}""");
+        var queue = Create();
+
+        var done = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        done.State.Should().Be("failed", "0 tests ran (b383 was 'succeeded' with '0 test(s) passed in 0 project(s)')");
+        done.Outcome.Should().BeEquivalentTo(new { FailedStep = "tests", Summary = "no test ran in A.Tests (skipped: no failed test in the last result)" });
+    }
+
+    [Fact]
+    public async Task A_canceled_test_run_names_the_canceled_project_and_no_error_next_to_the_passed_ones()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _fake.Build = async (body, _, ct) =>
+        {
+            Event(body, "testProjectStart", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":2,\"noBuild\":true");
+            Event(body, "testProjectDone", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":2,\"success\":true,\"state\":\"passed\",\"total\":24,\"passed\":24,\"failed\":0,\"skipped\":0,\"seconds\":1");
+            Event(body, "testProjectStart", "\"repo\":\"octo-a\",\"project\":\"B.Tests\",\"index\":2,\"count\":2,\"noBuild\":true");
+            started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // job_cancel ends the run.
+            }
+
+            return new PwshResult(-1, "", false, true);
+        };
+        var queue = Create();
+        var job = await queue.EnqueueAsync(Tests("octo-a"), Ct);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(20), Ct);
+
+        queue.Cancel(job.Id, "s1");
+        var done = await WaitAsync(queue, job.Id);
+
+        done.State.Should().Be("canceled");
+        done.Outcome!.Summary.Should().Be("canceled while running (B.Tests canceled while it ran); before that 24 test(s) passed in 1 finished project(s)");
+        done.Tests!.Projects.Select(p => (p.Project, p.State)).Should().Equal(("B.Tests", "canceled"), ("A.Tests", "passed"));
+        done.Progress!.Projects!.Select(p => (p.Project, p.State)).Should().Equal(("A.Tests", "done"), ("B.Tests", "canceled"));
+    }
+
+    [Fact]
+    public async Task A_test_run_the_watchdog_ends_calls_the_running_project_terminated()
+    {
+        _fake.Build = (body, _, _) =>
+        {
+            Event(body, "testProjectStart", "\"repo\":\"octo-a\",\"project\":\"A.Tests\",\"index\":1,\"count\":1,\"noBuild\":true");
+            return Task.FromResult(new PwshResult(-1, "", false, false, IdleTimedOut: true));
+        };
+        var queue = Create(idleTimeout: TimeSpan.FromMinutes(20));
+
+        var done = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+
+        done.Outcome!.FailedStep.Should().Be("timeout");
+        done.Outcome.Summary.Should().EndWith("the test run was terminated (A.Tests terminated while it ran)");
+        done.Tests!.Projects.Single().State.Should().Be("terminated", "not 'error': the watchdog stopped it");
+    }
+
+    // ---------- finding jobs (AB#9808) ----------
+
+    [Fact]
+    public async Task Short_ids_resolve_and_job_list_gives_one_line_per_job_of_a_lane()
+    {
+        Env("ab1-one", "octo-a");
+        Answer(Passed);
+        var queue = Create();
+        var inLane = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a", "ab1-one"), Ct)).Id);
+        var inBase = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        var shortId = inLane.Id.Split('-')[0];
+
+        queue.Get(shortId).Id.Should().Be(inLane.Id);
+        queue.Get(shortId[1..]).Id.Should().Be(inLane.Id, "the bare sequence works too");
+        queue.Output(shortId).Id.Should().Be(inLane.Id);
+        queue.Cancel(shortId, "s1").Id.Should().Be(inLane.Id);
+        var unknown = () => queue.Get("b999");
+        unknown.Should().Throw<InvalidOperationException>().WithMessage("Unknown job 'b999'*");
+
+        var lines = new BuildTools(queue).List(lane: "ab1-one");
+        lines.Should().ContainSingle().Which.Should().StartWith($"{inLane.Id} test succeeded lane=ab1-one tests of octo-a | 3 test(s) passed in 1 project(s) | queued ")
+            .And.EndWith(", owner s1");
+        new BuildTools(queue).List(limit: 1).Should().ContainSingle().Which.Should().StartWith(inBase.Id + " ");
+        new BuildTools(queue).List().Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void A_short_id_names_exactly_one_sequence_and_an_ambiguous_one_is_refused()
+    {
+        (string, long)[] jobs = [("b351-081503", 351), ("b35-070000", 35), ("b7-090000", 7), ("b7-100000", 7)];
+
+        BuildQueue.ShortIdOf("b351", jobs).Should().Be("b351-081503");
+        BuildQueue.ShortIdOf("35", jobs).Should().Be("b35-070000", "never the prefix of b351");
+        BuildQueue.ShortIdOf("b36", jobs).Should().BeNull();
+        BuildQueue.ShortIdOf("b351-08", jobs).Should().BeNull("not a short id");
+        var ambiguous = () => BuildQueue.ShortIdOf("b7", jobs);
+        ambiguous.Should().Throw<InvalidOperationException>().WithMessage("Job id 'b7' is ambiguous: b7-090000, b7-100000 - pass the full id.");
+    }
+
+    [Fact]
+    public async Task Job_status_waits_at_most_the_cap_and_resolves_a_short_id()
+    {
+        var (release, _) = Block();
+        var queue = Create();
+        var job = await queue.EnqueueAsync(Tests("octo-a"), Ct);
+
+        BuildTools.MaxWaitSeconds.Should().BeLessThan(60, "an in-process teammate's MCP call times out after about 60 s");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var waited = await BuildTools.WaitAsync(queue, job.Id.Split('-')[0], 900, () => queue.Get(job.Id), Ct, TimeSpan.FromMilliseconds(20),
+            maxWait: TimeSpan.FromMilliseconds(300));
+
+        waited.TimedOut.Should().BeTrue();
+        watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "waitSeconds=900 is cut to the cap");
+        waited.Notes.Should().ContainSingle(n => n.StartsWith("waitSeconds=900 was capped at", StringComparison.Ordinal) &&
+                                                 n.Contains($"call job_status(\"{job.Id}\", waitSeconds=50) again"), "the caller is told to loop");
+        (await BuildTools.WaitAsync(queue, job.Id, 1, () => queue.Get(job.Id), Ct, TimeSpan.FromMilliseconds(20), maxWait: TimeSpan.FromSeconds(5)))
+            .Notes.Should().NotContain(n => n.Contains("capped"), "a wait within the cap was not capped");
+        release.SetResult();
+        (await BuildTools.WaitAsync(queue, job.Id, 30, () => queue.Get(job.Id), Ct, TimeSpan.FromMilliseconds(20))).TimedOut.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_last_build_and_test_run_of_an_existing_lane_outlive_the_fifty_kept_jobs()
+    {
+        Env("ab1-one", "octo-a");
+        Answer(Passed);
+        var queue = Create();
+        var laneRun = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a", "ab1-one"), Ct)).Id);
+        for (var i = 0; i < 51; i++)
+        {
+            await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a") with { Filter = $"Name~N{i}" }, Ct)).Id);
+        }
+
+        queue.Get(laneRun.Id).State.Should().Be("succeeded", "the last test run of lane ab1-one stays readable");
+        queue.List().Should().HaveCount(52, "the 50 newest finished ones when the last run was queued, the lane's last one and that last run");
+
+        Directory.Delete(Path.Combine(_checkout.Root, "wt-ab1-one"), recursive: true);
+        await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a") with { Filter = "Name~Last" }, Ct)).Id);
+        var gone = () => queue.Get(laneRun.Id);
+        gone.Should().Throw<InvalidOperationException>("a removed lane's jobs age out like any other");
+    }
+
+    // ---------- frontend lane tests fail fast (AB#9808) ----------
+
+    [Fact]
+    public async Task A_frontend_lane_test_without_the_libraries_in_the_lane_is_refused_before_anything_builds()
+    {
+        Env("ab1-one", "octo-frontend-refinery-studio");
+        var queue = Create();
+
+        var run = () => queue.EnqueueAsync(Tests("octo-frontend-refinery-studio", "ab1-one"), Ct);
+
+        (await run.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .StartWith("Test run of octo-frontend-refinery-studio refused before it built anything: lane ab1-one does not hold octo-frontend-libraries")
+            .And.Contain("lane_add_repo(owner, lane=\"ab1-one\", repo=\"octo-frontend-libraries\")");
+        _fake.BuildCalls.Should().BeEmpty();
+        queue.List().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_frontend_lane_test_without_the_telerik_license_is_refused_naming_the_variable_but_never_a_value()
+    {
+        Env("ab1-one", "octo-frontend-libraries", "octo-frontend-refinery-studio");
+        var set = new List<string>();
+        _fake.Build = (body, _, _) => body.Contains("GetEnvironmentVariable", StringComparison.Ordinal)
+            ? Task.FromResult(new PwshResult(0, PwshRunner.Marker + JsonSerializer.Serialize(new { set, profile = "/home/me/private.ps1" }) + "\n", false, false))
+            : Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", Passed));
+        var queue = Create();
+
+        var run = () => queue.EnqueueAsync(Tests("octo-frontend-refinery-studio", "ab1-one"), Ct);
+
+        (await run.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .StartWith("Test run of octo-frontend-refinery-studio refused before it built anything: TELERIK_LICENSE is not set for the daemon's builds")
+            .And.Contain("$env:TELERIK_LICENSE = '<value>' to /home/me/private.ps1");
+        _fake.BuildCalls.Should().NotContain(c => c.StartsWith("Invoke-OctoTestRun", StringComparison.Ordinal));
+
+        set.Add("TELERIK_LICENSE");
+        var done = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-frontend-refinery-studio", "ab1-one"), Ct)).Id);
+        done.State.Should().Be("succeeded", "with the variable set the run starts");
+        var backend = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a"), Ct)).Id);
+        backend.State.Should().Be("succeeded", "a backend repo is not checked");
     }
 }
