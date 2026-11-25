@@ -455,6 +455,22 @@ public sealed partial class BuildQueue : IBuildGuard
             };
         }
         var planned = await _planner.PlanAsync(request, forPlanTool: false, cancellationToken);
+        string? rerunNote = null;
+        if (request.Kind == BuildKind.Test && request.RerunFailed)
+        {
+            (var narrowed, rerunNote) = RerunOf(request, planned);
+            if (!narrowed.Projects.SequenceEqual(request.Projects))
+            {
+                request = narrowed;
+                planned = await _planner.PlanAsync(request, forPlanTool: false, cancellationToken);
+            }
+        }
+
+        if (request.Kind == BuildKind.Test)
+        {
+            await FrontendPreflightAsync(planned, cancellationToken);
+        }
+
         var conflicts = await _planner.ConflictsAsync(planned);
         var gates = _planner.Gates(planned, conflicts);
         var unmet = gates.Unmet.Where(u => !u.StartsWith("the stack lease", StringComparison.Ordinal)).ToList();
@@ -520,6 +536,11 @@ public sealed partial class BuildQueue : IBuildGuard
                 job.AddNote(warning);
             }
 
+            if (rerunNote != null)
+            {
+                job.AddNote(rerunNote);
+            }
+
             _jobs[id] = job;
             Track(job);
             lock (_scheduleLock)
@@ -567,22 +588,70 @@ public sealed partial class BuildQueue : IBuildGuard
     }
 
     /// <param name="live">Lines of the output to add (0 = none): of <paramref name="repo"/>, else of the repo that builds or is tested right now.</param>
-    public BuildStatus Get(string id, string? repo = null, bool errorsOnly = false, bool raw = false, int tailLines = 40, int live = 0, bool includePassed = false)
+    public BuildStatus Get(string id, string? repo = null, bool errorsOnly = false, bool raw = false, int tailLines = 40, int live = 0, bool includePassed = false) =>
+        Describe(Find(id), new StatusView(repo, errorsOnly, raw, tailLines, Math.Clamp(live, 0, MaxLiveLines), includePassed));
+
+    /// <summary>
+    ///     The job of an id (AB#9808): the full one ('b351-081503') or the short one - 'b351' or '351', the sequence every
+    ///     id starts with (unique: the sequence goes on across daemon restarts).
+    /// </summary>
+    private BuildJob Find(string id)
     {
-        if (_jobs.TryGetValue(id, out var job))
+        var key = id.Trim();
+        if (_jobs.TryGetValue(key, out var job))
         {
-            return Describe(job, new StatusView(repo, errorsOnly, raw, tailLines, Math.Clamp(live, 0, MaxLiveLines), includePassed));
+            return job;
+        }
+
+        if (ShortId().Match(key) is { Success: true } m && long.TryParse(m.Groups[1].Value, out var sequence) &&
+            _jobs.Values.FirstOrDefault(j => j.Sequence == sequence) is { } bySequence)
+        {
+            return bySequence;
         }
 
         throw new InvalidOperationException(UnknownJob(id));
     }
 
+    [System.Text.RegularExpressions.GeneratedRegex(@"^[bB]?(\d+)$")]
+    private static partial System.Text.RegularExpressions.Regex ShortId();
+
+    /// <summary>The full id of a job id (short or full); throws for an unknown one.</summary>
+    public string ResolveId(string id) => Find(id).Id;
+
     /// <summary>Every job the daemon knows, newest first: this run's and the kept ones of earlier runs.</summary>
     public List<BuildStatus> List() =>
         _jobs.Values.OrderByDescending(j => j.QueuedAt).ThenByDescending(j => j.Sequence).Select(j => Describe(j, StatusView.Default)).ToList();
 
+    /// <summary>
+    ///     job_list (AB#9808): one line per job, newest first, optionally only the jobs of one lane, at most
+    ///     <paramref name="limit"/> (1-200).
+    /// </summary>
+    public List<string> ListLines(string? lane = null, int limit = 20)
+    {
+        var name = string.IsNullOrWhiteSpace(lane) ? null : lane.Trim();
+        return _jobs.Values.Where(j => name == null || string.Equals(LaneOf(j), name, StringComparison.Ordinal))
+            .OrderByDescending(j => j.QueuedAt).ThenByDescending(j => j.Sequence).Take(Math.Clamp(limit, 1, 200))
+            .Select(j => JobLine(Describe(j, StatusView.Default))).ToList();
+    }
+
+    /// <summary>The lane of a job: the one it names, or the one its folder belongs to (checkout=wt-&lt;lane&gt;).</summary>
+    private static string? LaneOf(BuildJob job) => job.Request.Environment ?? job.Planned.Environment;
+
+    /// <summary>"b351-081503 test failed lane=ab6209 octo-x | 1 of 10 test(s) failed ... | queued 25.11. 08:15:03, 437 s, owner o".</summary>
+    internal static string JobLine(BuildStatus s)
+    {
+        var at = s.Times.QueuedAt;
+        var what = s.Kind == "test" ? s.Target[(s.Target.IndexOf(": ", StringComparison.Ordinal) is var i and >= 0 ? i + 2 : 0)..] : s.Target;
+        var lane = s.Env != null ? $" lane={s.Env}" : "";
+        var summary = s.Outcome?.Summary is { Length: > 0 } text ? " | " + (text.Length > 160 ? text[..157] + "..." : text) : "";
+        var seconds = s.Times.ElapsedSeconds is { } elapsed ? $", {elapsed:0} s" : "";
+        var gone = s.Gone != null ? $" (gone: {s.Gone})" : "";
+        return $"{s.Id} {s.Kind} {s.State}{lane} {what}{summary} | queued {at:dd.MM. HH:mm:ss}{seconds}, owner {s.Owner}{gone}";
+    }
+
     private static string UnknownJob(string id) =>
-        $"Unknown job '{id}': the daemon keeps the last {KeepFinishedJobs} finished jobs (job_list shows them), also across its restarts.";
+        $"Unknown job '{id}': the daemon keeps the last {KeepFinishedJobs} finished jobs and the last build and test run of every lane (job_list shows them), " +
+        "also across its restarts.";
 
     /// <summary>A queued or running test run of the same owner for the same environment or lane, repo, projects, filter and mode.</summary>
     private BuildJob? SameTestRun(BuildRequest request)
@@ -624,11 +693,8 @@ public sealed partial class BuildQueue : IBuildGuard
     /// <param name="env">The environment the caller works in: every session of an environment may cancel its builds.</param>
     public BuildStatus Cancel(string id, string owner, string? env = null)
     {
-        if (!_jobs.TryGetValue(id, out var job))
-        {
-            throw new InvalidOperationException(UnknownJob(id));
-        }
-
+        var job = Find(id);
+        id = job.Id;
         var sameEnvironment = env != null && job.Request.Environment != null && string.Equals(job.Request.Environment, env, StringComparison.Ordinal);
         if (!sameEnvironment && !string.Equals(job.Request.Owner, owner, StringComparison.OrdinalIgnoreCase))
         {
@@ -849,7 +915,8 @@ public sealed partial class BuildQueue : IBuildGuard
             var result = await RunStepAsync(job, step, octoTools, token);
             if (result.Canceled)
             {
-                return ("canceled", new BuildOutcome(job.CurrentRepo(), null, "canceled while running", null), stopped);
+                // The step's own summary: a test run names the project it stopped and what ran before (AB#9808).
+                return ("canceled", new BuildOutcome(job.CurrentRepo(), null, step.Outcome?.Summary ?? "canceled while running", null), stopped);
             }
 
             if (!step.Success)
@@ -1072,6 +1139,8 @@ public sealed partial class BuildQueue : IBuildGuard
             using var process = launched.Process;
             step.SetProcess(launched.Pid, launched.ProcessStart);
             job.Pid = launched.Pid;
+            // No sleep while the job runs (macOS): caffeinate ends with the step's process.
+            KeepAwake.While(launched.Pid)?.Dispose();
             PersistRunning();
             return await WatchAsync(job, step, process, token);
         }
@@ -1199,8 +1268,10 @@ public sealed partial class BuildQueue : IBuildGuard
             }
         }
 
+        // AB#9808: the test project job_cancel or the watchdog stopped did not fail - it was canceled or terminated, and says so.
+        var stoppedAs = step.Spec.Kind != BuildKind.Test ? null : result.Canceled ? "canceled" : result.TimedOut || result.IdleTimedOut ? "terminated" : null;
         if (!success && failedRepo != null && events.Repos.FirstOrDefault(r => string.Equals(r.Repo, failedRepo, StringComparison.OrdinalIgnoreCase)) is { } failed &&
-            failed.State is "building" or "pending" or "done")
+            failed.State is "building" or "pending" or "done" && !(stoppedAs != null && failed.State == "building"))
         {
             failed.State = "failed";
         }
@@ -1209,7 +1280,7 @@ public sealed partial class BuildQueue : IBuildGuard
         {
             if (run.State == "building")
             {
-                run.State = "failed";
+                run.State = stoppedAs ?? "failed";
             }
 
             if (!success && run.State == "pending")
@@ -1229,7 +1300,7 @@ public sealed partial class BuildQueue : IBuildGuard
         // writes none, and an older one (an earlier Invoke-Build of the repo) would report another build's errors
         // (AB#9464: MSB1003 for a frontend repo whose build.ps1 failed). Without a log of its own, a failed repo of such a
         // step keeps the step's output.
-        foreach (var run in events.Repos.Where(r => r.State is "failed" or "done"))
+        foreach (var run in events.Repos.Where(r => r.State is "failed" or "done" or "canceled" or "terminated"))
         {
             var plan = step.Spec.Repos.FirstOrDefault(p => string.Equals(p.Name, run.Repo, StringComparison.OrdinalIgnoreCase));
             // A build.ps1 or nothing-to-build step (its own result document) never writes <repo>/Invoke-Build.log, so one there
@@ -1276,7 +1347,16 @@ public sealed partial class BuildQueue : IBuildGuard
             RecordTestDurations(job, events);
             var interrupted = result.Canceled || result.TimedOut || result.IdleTimedOut;
             var failedTests = tests.Sum(t => t.Failed ?? 0);
-            if (success)
+            if (success && NoTestRan(tests))
+            {
+                // AB#9808: a run in which no test ran is never green (b383: a rerunFailed whose last results held no failed test).
+                success = false;
+                failedStep = "tests";
+                summary = tests.Count == 0
+                    ? "no test ran: the run reported no test project"
+                    : $"no test ran in {string.Join(", ", tests.Select(t => $"{t.Project} ({t.State}{(t.Note is { Length: > 0 } note ? ": " + note : "")})"))}";
+            }
+            else if (success)
             {
 summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => t.State is "passed" or "noTests")} project(s)" +
                           (tests.Sum(t => t.Skipped ?? 0) is > 0 and var skipped ? $", {skipped} skipped" : "") +
@@ -1309,6 +1389,22 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
                 if (failedTests > 0)
                 {
                     hint = $"job_status(id, project=\"{failedRepo}\") lists the failed tests of a project; lane_test / base_test(..., rerunFailed=true) runs only those again.";
+                }
+            }
+            else
+            {
+                // Canceled or terminated: which project was stopped, and what the projects before it did - never a bare "error".
+                var stopped = tests.Where(t => t.State is "canceled" or "terminated").Select(t => t.Project).ToList();
+                var finished = tests.Where(t => t.State is "passed" or "failed").ToList();
+                if (stopped.Count > 0)
+                {
+                    summary += $" ({string.Join(", ", stopped)} {stoppedAs} while it ran)";
+                }
+
+                if (finished.Count > 0)
+                {
+                    summary += $"; before that {finished.Sum(t => t.Passed ?? 0)} test(s) passed" +
+                               (failedTests > 0 ? $" and {failedTests} failed" : "") + $" in {finished.Count} finished project(s)";
                 }
             }
         }
@@ -1780,7 +1876,7 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
         var lockWait = finished ? null : job.Steps.Select(s => job.ReadEvents(s, finished: false).LockWait).FirstOrDefault(w => w != null);
         var shown = projects
             .Where(p => view.Repo == null || string.Equals(p.Project, view.Repo, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(p => p.State is "failed" or "error" ? 0 : p.State == "running" ? 1 : 2)
+            .OrderBy(p => p.State is "failed" or "error" or "canceled" or "terminated" ? 0 : p.State == "running" ? 1 : 2)
             // The names of passed tests only when asked for; the count says that there are some.
             .Select(p => p.PassedTests == null ? p : p with { PassedListed = p.PassedTests.Count > 0 ? p.PassedTests.Count : null, PassedTests = view.Passed && p.PassedTests.Count > 0 ? p.PassedTests : null })
             .Select(p => view.Repo != null || p.FailedTests.Count <= FailedTestsPerProjectInStatus
