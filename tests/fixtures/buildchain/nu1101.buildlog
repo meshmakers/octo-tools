@@ -1,0 +1,2 @@
+C:\work\octo-sdk\src\Sdk.Common\Sdk.Common.csproj : error NU1101: Unable to find package Meshmakers.Common.Shared. No packages exist with this id in source(s): C:\work\nuget
+C:\work\octo-sdk\src\Sdk.Common\Sdk.Common.csproj : error NU1101: Unable to find package Meshmakers.Common.Shared. No packages exist with this id in source(s): C:\work\nuget

@@ -1,0 +1,5 @@
+  Restore complete (4.2s)
+/work/octo-asset-repo-services/src/Asset.Service/Asset.Service.csproj : error NU1102: Unable to find package Meshmakers.Octo.Sdk.Common with version (>= 999.0.0) [net10.0]
+/work/octo-asset-repo-services/src/Asset.Service/Asset.Service.csproj : error NU1102:   - Found 0 version(s) in /work/nuget LOG-SECRET-MARKER
+/work/octo-asset-repo-services/src/Asset.Service/Asset.Service.csproj : error NU1102: Unable to find package Meshmakers.Octo.Sdk.Common with version (>= 999.0.0) [net10.0]
+/work/octo-asset-repo-services/src/Asset.Service/Asset.Service.csproj : error NU1101: Unable to find package Some.Third.Party. No packages exist with this id in source(s): nuget.org
