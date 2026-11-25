@@ -909,8 +909,12 @@ function testsBlock(t) {
     if (!t) return null;
     const num = (v) => (v === undefined || v === null ? "" : String(v));
     const failing = t.projects.filter((p) => p.failedTests.length || (p.errors || []).length);
+    // AB#9841: a running project reports its counts only when it ends (VSTest writes its result at the end).
+    const countless = t.projects.filter((p) => p.state === "running" && p.total == null).map((p) => p.project);
     return el("div", { class: "build-tests" },
-        el("p", { class: "sub", text: `${count(t.total, "test")}: ${t.passed} passed, ${t.failed} failed, ${t.skipped} skipped.` }),
+        t.selection ? el("p", { class: "sub", text: `Runs: ${t.selection}.` }) : null,
+        el("p", { class: "sub", text: `${count(t.total, "test")}: ${t.passed} passed, ${t.failed} failed, ${t.skipped} skipped` +
+            (countless.length ? ` so far - ${countless.join(", ")} ${countless.length > 1 ? "report their counts when they end" : "reports its counts when it ends"}.` : ".") }),
         t.lockWait ? note(`${t.lockWait}.`, "caution") : null,
         t.dockerWarning ? note(t.dockerWarning, "caution") : null,
         t.docker ? note(`Docker check ${t.docker.check}` +

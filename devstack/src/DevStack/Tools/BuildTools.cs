@@ -221,7 +221,8 @@ public sealed class BuildTools(BuildQueue queue)
                  "(how the remote CK catalogs were read), outcome (failedRepo, failedStep, summary, hint), diagnostics (error/warning counts " +
                  "and up to 20 parsed errors per repo: file, line, col, code, message, project), stopped services, notes and log paths. " +
                  "repo=X returns up to 100 errors of that repo. A BUILD NEVER RUNS TESTS: per built repo 'tests' says notCompiled or compiled. " +
-                 "A test run has 'tests': total/passed/failed/skipped, lockWait (who holds the docker test lock), and per test project (failed " +
+                 "A test run has 'tests': total/passed/failed/skipped, selection (what it runs: projects, filter, rerunFailed, includeSlow), " +
+                 "lockWait (who holds the docker test lock now, read from the lock file), and per test project (failed " +
                  "ones first) its state (pending|running|passed|failed|error|noTests|noMatch|skipped|notRun; noMatch = the filter matched " +
                  "nothing there, a success; noTests = no test ran without a filter, a failure), runner (vstest|mtp|ng), counts, seconds, " +
                  "buildReason (why the run compiled the project first), excludedCategories (the slow test categories a run without filter " +

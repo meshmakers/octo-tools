@@ -1896,7 +1896,9 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
     {
         var finished = snapshot.FinishedAt != null;
         var projects = snapshot.Tests ?? Rows(job).Select(r => FromEvents(r.Run, finished)).ToList();
-        var lockWait = finished ? null : job.Steps.Select(s => job.ReadEvents(s, finished: false).LockWait).FirstOrDefault(w => w != null);
+        // AB#9841: the cmdlet names the holder once, when the wait starts; the lock file says who holds it now.
+        var waiting = finished ? null : job.Steps.Select(s => job.ReadEvents(s, finished: false)).FirstOrDefault(e => e.LockWait != null);
+        var lockWait = waiting == null ? null : BuildEventReader.CurrentLockOwner(waiting.LockPath) ?? waiting.LockWait;
         var shown = projects
             .Where(p => view.Repo == null || string.Equals(p.Project, view.Repo, StringComparison.OrdinalIgnoreCase))
             .OrderBy(p => p.State is "failed" or "error" or "canceled" or "terminated" ? 0 : p.State == "running" ? 1 : 2)
@@ -1908,7 +1910,31 @@ summary = $"{tests.Sum(t => t.Passed ?? 0)} test(s) passed in {tests.Count(t => 
             .ToList();
         return new BuildTests(projects.Sum(p => p.Total ?? 0), projects.Sum(p => p.Passed ?? 0), projects.Sum(p => p.Failed ?? 0), projects.Sum(p => p.Skipped ?? 0),
             lockWait == null ? null : $"waiting for the docker test lock held by {lockWait}", shown,
-            Docker: snapshot.Results.Select(r => DockerOf(r["data"] as JsonObject ?? r)).LastOrDefault(d => d != null));
+            Docker: snapshot.Results.Select(r => DockerOf(r["data"] as JsonObject ?? r)).LastOrDefault(d => d != null),
+            Selection: Selection(job.Request));
+    }
+
+    /// <summary>
+    ///     What a test run runs (AB#9841), so a filtered run does not look like a whole suite: the projects it names, its filter,
+    ///     a rerun of the failed tests, or every test - without the slow categories unless includeSlow (octo-tools AB#9829).
+    /// </summary>
+    internal static string Selection(BuildRequest request)
+    {
+        var projects = request.Projects.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()).ToList();
+        var scope = projects.Count > 0 ? $"projects {string.Join(", ", projects)}" : "every test project";
+        if (request.RerunFailed)
+        {
+            return $"{scope}: only the tests that failed in the last run" + (string.IsNullOrWhiteSpace(request.Filter) ? "" : $", within filter {request.Filter.Trim()}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Filter))
+        {
+            return $"{scope}: filter {request.Filter.Trim()}";
+        }
+
+        return request.IncludeSlow
+            ? $"{scope}: every test, including the slow categories (includeSlow)"
+            : $"{scope}: every test except the slow categories Performance and Stress (includeSlow=true runs them)";
     }
 
     /// <summary>Every repo of the job in plan order (then the ones only its events name), with the step it belongs to.</summary>

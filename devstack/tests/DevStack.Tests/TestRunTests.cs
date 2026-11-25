@@ -735,6 +735,62 @@ public sealed class TestRunTests : IDisposable
     }
 
     [Fact]
+    public async Task A_waiting_run_names_the_current_holder_of_the_lock_file_not_the_one_at_the_start_of_the_wait()
+    {
+        // AB#9841: the cmdlet sends lockWait once; the holder changes while the run waits.
+        var lockFile = Path.Combine(Directory.CreateDirectory(Path.Combine(_checkout.StateDirectory, "locks")).FullName, "docker-tests.lock");
+        File.WriteAllText(lockFile, """{"schemaVersion":1,"pid":5150,"since":"2026-11-25T15:48:00Z","command":"Invoke-OctoTestRun","environment":"ab9776","repo":"octo-c","projects":["C.Tests"]}""");
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _fake.Build = async (body, _, _) =>
+        {
+            Event(body, "plan", "\"repo\":\"octo-a\",\"environment\":null,\"projects\":[{\"project\":\"A.Tests\",\"docker\":true,\"noBuild\":true,\"skip\":false}],\"count\":1");
+            Event(body, "lockWait",
+                "\"path\":" + JsonSerializer.Serialize(lockFile) + ",\"timeoutSeconds\":1800,\"owner\":{\"pid\":4711,\"since\":\"2026-11-25T15:08:00Z\",\"command\":\"Invoke-OctoTestRun\",\"environment\":\"ab8673\",\"repo\":\"octo-b\"}");
+            await release.Task;
+            Event(body, "lockAcquired", "\"path\":" + JsonSerializer.Serialize(lockFile) + ",\"waitedSeconds\":3");
+            return FakePwsh.Ok("Invoke-OctoTestRun", Passed);
+        };
+        var queue = Create();
+
+        var job = await queue.EnqueueAsync(Tests("octo-a"), Ct);
+        var waiting = await WaitAsync(queue, job.Id, s => s.Tests?.LockWait != null);
+
+        waiting.Tests!.LockWait.Should().StartWith("waiting for the docker test lock held by Invoke-OctoTestRun of ab9776 octo-c (pid 5150, since ",
+            "the lock file names who holds it now");
+
+        // An unreadable or empty lock file keeps the holder the event named.
+        File.WriteAllText(lockFile, "");
+        queue.Get(job.Id).Tests!.LockWait.Should().StartWith("waiting for the docker test lock held by Invoke-OctoTestRun of ab8673 octo-b (pid 4711, since ");
+
+        release.SetResult();
+        (await WaitAsync(queue, job.Id)).Tests!.LockWait.Should().BeNull();
+    }
+
+    [Fact]
+    public void The_selection_of_a_test_run_says_what_it_runs()
+    {
+        BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a" })
+            .Should().Be("every test project: every test except the slow categories Performance and Stress (includeSlow=true runs them)");
+        BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a", IncludeSlow = true })
+            .Should().Be("every test project: every test, including the slow categories (includeSlow)");
+        BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a", Projects = ["A.IntegrationTests"], Filter = " FullyQualifiedName~X|FullyQualifiedName~Y " })
+            .Should().Be("projects A.IntegrationTests: filter FullyQualifiedName~X|FullyQualifiedName~Y");
+        BuildQueue.Selection(new BuildRequest { Owner = "s", Kind = BuildKind.Test, Repo = "octo-a", RerunFailed = true })
+            .Should().Be("every test project: only the tests that failed in the last run");
+    }
+
+    [Fact]
+    public async Task A_test_run_carries_its_selection_in_the_status()
+    {
+        _fake.Build = (_, _, _) => Task.FromResult(FakePwsh.Ok("Invoke-OctoTestRun", Passed));
+        var queue = Create();
+
+        var done = await WaitAsync(queue, (await queue.EnqueueAsync(Tests("octo-a") with { Filter = "FullyQualifiedName~X" }, Ct)).Id);
+
+        done.Tests!.Selection.Should().Be("every test project: filter FullyQualifiedName~X");
+    }
+
+    [Fact]
     public async Task A_run_with_container_tests_on_a_small_docker_vm_next_to_kind_carries_a_warning()
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -700,7 +700,13 @@ kind `test` in `job_list`, cancelled with `job_cancel`, kept across a daemon res
 - **Docker**: projects that start containers (Testcontainers) run one at a time on the machine - the cmdlet takes the
   machine-wide test lock. While a run waits for it, `job_status` shows `progress.phase: lock` and
   `tests.lockWait` ("waiting for the docker test lock held by Invoke-OctoTestRun of ab8797 octo-b (pid 4711, since
-  10:48)"); the idle timeout is suspended meanwhile. `test_lock` returns `Get-OctoTestLock` (locked, stale, owner).
+  10:48)"); the idle timeout is suspended meanwhile. The holder is read from the lock file on every status call (AB#9841):
+  when the holder changes while the run waits, `lockWait` names the current one; an unreadable lock file falls back to
+  the holder the cmdlet named when the wait started. `test_lock` returns `Get-OctoTestLock` (locked, stale, owner).
+- **Selection**: `tests.selection` says what the run runs - the projects it names (or every test project), its
+  `filter`, `rerunFailed`, or every test except the slow categories (or with them, `includeSlow`). The dashboard shows it
+  as "Runs: ...", so a filtered run does not look like a whole suite; while a project runs and has no counts yet the
+  dashboard says that it reports them when it ends (VSTest writes its result at the end).
 - **Result**: `job_status(id)` of a test run is the build shape - its progress rows are the test projects, so they are
   `progress.projects` with `project` (and `projectIndex` / `projectCount`, `current.project`) where a build has `repos`
   with `repo` - plus `tests`:

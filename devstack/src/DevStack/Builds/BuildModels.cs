@@ -136,7 +136,10 @@ public sealed record BuildTests(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? DockerWarning = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    BuildTestDocker? Docker = null);
+    BuildTestDocker? Docker = null,
+    // AB#9841: what the run runs - projects, filter, rerunFailed, includeSlow - so a filtered run does not read as a whole suite.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Selection = null);
 
 /// <summary>
 ///     What the cmdlet's Docker check found before the Docker projects of a test run (octo-tools AB#8835): check
