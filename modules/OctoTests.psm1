@@ -1524,8 +1524,9 @@ function Format-OctoTestDuration {
     environment) runs with NUGET_PACKAGES=<lane>/.nuget-packages, MSBUILDDISABLENODEREUSE=1 and, in DebugL for a
     repository without its own <RestoreSources>, RestoreSources=<lane>/nuget;nuget.org. An in-place worktree of an
     environment gets the environment's RestoreSources, RestorePackagesPath and OctoLocalCatalogRootPath as global
-    properties, credentials in an owner-only RestoreConfigFile that is deleted afterwards. The process environment
-    is restored after the run.
+    properties, credentials in an owner-only RestoreConfigFile that is deleted afterwards. These variables are for
+    dotnet only: the Pester project starts with the session's own values. The process environment is restored after
+    the run.
 
     Docker-heavy projects (a Testcontainers package reference in the project or a project it references; -dockerLock
     Always / Never overrides the detection) run one at a time on this machine: the run takes the machine-wide test
@@ -2054,7 +2055,11 @@ function Invoke-OctoTestRun {
                 }
                 else {
                     "Invoke-OctoTestRun: Pester tests of $($item.Project.Directory)" | Add-Content -LiteralPath $logFile
-                    $exitCode = Invoke-OctoPesterTest -directory $item.Project.Directory -resultFile $pesterResult -logFile $logFile
+                    # The lane's build variables (RestoreSources, NUGET_PACKAGES, ...) are for dotnet only: the Pester
+                    # child starts with the session's own values, else tests that read them see the lane's.
+                    Restore-OctoBuildEnvironment -saved $savedEnvironment
+                    try { $exitCode = Invoke-OctoPesterTest -directory $item.Project.Directory -resultFile $pesterResult -logFile $logFile }
+                    finally { $null = Set-OctoBuildEnvironment -environment $runEnvironment }
                 }
             }
             $mtp = $item.Runner -eq 'mtp'

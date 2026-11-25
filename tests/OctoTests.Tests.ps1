@@ -1460,6 +1460,32 @@ Describe 'Invoke-OctoTestRun' {
             $doc.data.success | Should -BeFalse
         }
 
+        It 'starts the Pester child without the lane build variables, which the dotnet projects of the run keep' {
+            Set-Content -Path (Join-Path $ws.EnvRepo 'tests/Sample.Tests.ps1') -Value "Describe 'x' { It 'y' { 1 | Should -Be 1 } }"
+            Mock -ModuleName OctoTests Invoke-OctoPesterTest {
+                $script:PesterCalls.Add([pscustomobject]@{ NugetPackages = $env:NUGET_PACKAGES; RestoreSources = $env:RestoreSources; NodeReuse = $env:MSBUILDDISABLENODEREUSE })
+                [ordered]@{ total = 1; passed = 1; failed = 0; skipped = 0; success = $true; failedTests = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $resultFile
+                return 0
+            }
+            try {
+                $doc = Get-Doc (Invoke-OctoTestRun -env feat-a -repo sample-services -lockPath $script:LockPath -Json)
+            }
+            finally { Remove-Item (Join-Path $ws.EnvRepo 'tests/Sample.Tests.ps1') }
+
+            $doc.data.lane.isolated | Should -BeTrue
+            $script:PesterCalls.Count | Should -Be 1
+            $script:PesterCalls[0].NugetPackages | Should -BeNullOrEmpty
+            $script:PesterCalls[0].RestoreSources | Should -BeNullOrEmpty
+            $script:PesterCalls[0].NodeReuse | Should -BeNullOrEmpty
+            $script:Calls.Count | Should -BeGreaterThan 0
+            foreach ($call in $script:Calls) {
+                $call.NugetPackages | Should -Be (Join-Path $ws.EnvPath '.nuget-packages')
+                $call.RestoreSources | Should -Be "$(Join-Path $ws.EnvPath 'nuget');https://api.nuget.org/v3/index.json"
+            }
+            $env:NUGET_PACKAGES | Should -BeNullOrEmpty
+            $env:RestoreSources | Should -BeNullOrEmpty
+        }
+
         It 'leaves Pester out of a filtered run, and a repository without *.Tests.ps1 has no Pester project' {
             $filtered = Get-Doc (Invoke-OctoTestRun -branch branches/main -repo sample-services -filter 'FullyQualifiedName~Order' -lockPath $script:LockPath -Json)
             (@($filtered.data.projects) | Where-Object project -EQ 'Pester').state | Should -Be 'noMatch'
