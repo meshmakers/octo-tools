@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using FluentAssertions;
 using Meshmakers.Octo.DevStack.Builds;
 using Meshmakers.Octo.DevStack.Common;
@@ -288,6 +289,116 @@ public sealed class BuildParsingTests : IDisposable
         // pending: octo-b (50) and unknown octo-x (median of 50,160 -> 160); current octo-a at 60 s of 160.
         reloaded.Eta("DebugL", [(_checkout.Lane, "octo-b"), (_checkout.Lane, "octo-x")], (_checkout.Lane, "octo-a"), 60).Should().Be(50 + 160 + 100);
         reloaded.Eta("DebugL", [(_checkout.Lane, "octo-y")], null, 0).Should().BeNull("nothing known for Release/unknown");
+    }
+
+    [Fact]
+    public void Durations_are_kept_per_repo_across_lanes_and_a_new_lane_estimates_with_their_median()
+    {
+        var paths = new DevStackPaths(_checkout.StateDirectory);
+        var history = new BuildHistory(paths);
+        var other = Path.Combine(_checkout.Root, "wt-ab1");
+        foreach (var s in new[] { 100.0, 120, 300 })
+        {
+            history.Record(other, "octo-a", "DebugL", s);
+        }
+
+        history.Estimate(_checkout.Lane, "octo-a", "DebugL").Should().Be(120, "a lane without own durations takes the median of every lane");
+        history.Record(_checkout.Lane, "octo-a", "DebugL", 50);
+        history.Estimate(_checkout.Lane, "octo-a", "DebugL").Should().Be(50, "the lane's own durations come first");
+
+        for (var i = 0; i < BuildHistory.Keep + 5; i++)
+        {
+            history.Record(other, "octo-b", "DebugL", 10 + i);
+        }
+
+        new BuildHistory(paths).Typical(DurationKind.Build, "octo-b", null, "DebugL")!.Samples.Should().Be(BuildHistory.Keep);
+    }
+
+    [Fact]
+    public void Statistics_give_median_p90_and_the_overdue_limit_from_three_samples_on()
+    {
+        var paths = new DevStackPaths(_checkout.StateDirectory);
+        var history = new BuildHistory(paths);
+        var at = new DateTimeOffset(2026, 11, 25, 9, 0, 0, TimeSpan.FromHours(1));
+        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", null, "DebugL", 300, at);
+        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", null, "DebugL", 280, at);
+        history.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL")!.LimitSeconds.Should().BeNull("two durations say too little");
+
+        foreach (var s in new[] { 320.0, 310, 290, 330, 305, 295, 315, 600 })
+        {
+            history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", null, "DebugL", s, at.AddMinutes(1));
+        }
+
+        history.Record(_checkout.Lane, "octo-a", "DebugL", 20);
+        history.Record(_checkout.Lane, "octo-a", "DebugL", 25);
+        history.Record(_checkout.Lane, "octo-a", "DebugL", 30);
+
+        var stats = new BuildHistory(paths).Stats();
+        stats.Select(s => (s.Kind, s.Project)).Should().Equal([(DurationKind.Test, "A.Tests"), (DurationKind.Build, (string?)null)], "slowest first");
+        stats[0].Should().BeEquivalentTo(new
+        {
+            Repo = "octo-a", Configuration = "DebugL", Samples = 10, MedianSeconds = 305.0, P90Seconds = 330.0, MinSeconds = 280.0, MaxSeconds = 600.0,
+            LastSeconds = 600.0, LastAt = (DateTimeOffset?)at.AddMinutes(1), LimitSeconds = (double?)660
+        }, "one slow run moves neither the median nor p90 much; the limit is twice p90");
+        stats[1].LimitSeconds.Should().Be(145, "a short build gets at least two minutes more than its median");
+        history.Typical(DurationKind.Test, "octo-a", "B.Tests", "DebugL").Should().BeNull();
+        history.Typical(DurationKind.Build, "OCTO-A", null, "DebugL").Should().NotBeNull("repo names are compared without case");
+    }
+
+    [Fact]
+    public void A_test_project_that_compiles_first_is_never_compared_with_its_runs_on_the_last_build()
+    {
+        var paths = new DevStackPaths(_checkout.StateDirectory);
+        var history = new BuildHistory(paths);
+        foreach (var s in new[] { 20.0, 21, 22 })
+        {
+            history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", false, "DebugL", s);
+        }
+
+        history.RecordTest(_checkout.Lane, "octo-a", "A.Tests", true, "DebugL", 180);
+
+        var reloaded = new BuildHistory(paths);
+        reloaded.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL", compilesFirst: false)
+            .Should().BeEquivalentTo(new { Samples = 3, MedianSeconds = 21.0, LimitSeconds = (double?)141, CompilesFirst = (bool?)false });
+        reloaded.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL", compilesFirst: true)
+            .Should().BeEquivalentTo(new { Samples = 1, MedianSeconds = 180.0, LimitSeconds = (double?)null, CompilesFirst = (bool?)true },
+                "a run that compiles first has its own durations, so a 3 min compile run is not overdue against 20 s runs");
+        reloaded.Typical(DurationKind.Test, "octo-a", "A.Tests", "DebugL").Should().BeNull("unknown is a third kind");
+        reloaded.Stats().Select(s => s.CompilesFirst).Should().BeEquivalentTo(new bool?[] { true, false });
+    }
+
+    [Fact]
+    public void A_damaged_history_file_starts_an_empty_history_instead_of_failing()
+    {
+        Directory.CreateDirectory(_checkout.StateDirectory);
+        var file = Path.Combine(_checkout.StateDirectory, "duration-history.json");
+        File.WriteAllText(file,
+            """{"SchemaVersion":1,"Series":[null,{"Kind":"build","Repo":"octo-a","Configuration":"DebugL","Samples":[null,{"Seconds":12,"Lane":"/x"}]},{"Kind":"build","Repo":"octo-b","Configuration":"DebugL","Samples":null}]}""");
+
+        var history = new BuildHistory(new DevStackPaths(_checkout.StateDirectory));
+
+        history.Stats().Should().ContainSingle().Which.Should().BeEquivalentTo(new { Repo = "octo-a", Samples = 1 }, "null entries are dropped");
+
+        File.WriteAllText(file, "{ not json");
+        new BuildHistory(new DevStackPaths(_checkout.StateDirectory)).Stats().Should().BeEmpty();
+        File.Delete(file);
+        File.WriteAllText(Path.Combine(_checkout.StateDirectory, "build-history.json"), """{"x|octo-a|DebugL":null}""");
+        new BuildHistory(new DevStackPaths(_checkout.StateDirectory)).Stats().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void The_build_history_of_an_earlier_daemon_is_taken_over()
+    {
+        var lane = _checkout.Lane;
+        Directory.CreateDirectory(_checkout.StateDirectory);
+        File.WriteAllText(Path.Combine(_checkout.StateDirectory, "build-history.json"),
+            JsonSerializer.Serialize(new Dictionary<string, List<double>> { [$"{lane}|octo-a|DebugL"] = [40, 60, 50], ["broken"] = [1] }));
+
+        var history = new BuildHistory(new DevStackPaths(_checkout.StateDirectory));
+
+        history.Estimate(lane, "octo-a", "DebugL").Should().Be(50);
+        history.Typical(DurationKind.Build, "octo-a", null, "DebugL").Should().BeEquivalentTo(new { Samples = 3, MedianSeconds = 50.0, LastAt = (DateTimeOffset?)null });
+        history.Stats().Should().ContainSingle();
     }
 
     // ---------- paths ----------

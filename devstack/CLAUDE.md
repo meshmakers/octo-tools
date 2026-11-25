@@ -75,7 +75,8 @@ Azure Pipelines definition `devstack/azure-pipelines.yml` runs these tests on ev
   code in `<id>.<step>.exit`, so a build needs no daemon), `BuildJobStore` (`builds/<id>.job.json`), `BuildPlanner`
   (request -> cmdlet steps via `-WhatIf`/`-DryRun`, conflicts, stale flags, gates), `BuildCapabilities` (probe of the
   cmdlets' parameters; degrade when octo-tools lacks them), `BuildEvents` (`-EventsFile` reader, log-poll fallback),
-  `BuildLogParser`, `BuildHistory` (ETA), `GitWorkTree` (a job's evidence: `git status --porcelain=v2` of every repo it
+  `BuildLogParser`, `BuildHistory` (`duration-history.json`: the usual durations of repo builds and test projects - the
+  ETA, `job_stats` and the overdue limit of a running repo or test project), `GitWorkTree` (a job's evidence: `git status --porcelain=v2` of every repo it
   covers at its start and end with a fingerprint of the changed files' content, in `JobRecord.Evidence`; `unchanged` is the
   verdict, `clean` belongs to each point in time); pwsh runs go through `IPwshRunner`
 - `src/DevStack/Discovery` - lanes (`Octo.User.props`) and git worktrees (`.git` file); `EnvironmentDiscovery` (feature

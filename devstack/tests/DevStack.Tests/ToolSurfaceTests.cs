@@ -34,7 +34,7 @@ public sealed class ToolSurfaceTests
         Tools.Select(t => t.Name).Should().BeEquivalentTo(
             "lane_list", "lane_create", "lane_add_repo", "lane_sync", "lane_affected", "lane_build", "lane_test", "lane_remove",
             "base_build", "base_test",
-            "job_status", "job_list", "job_cancel", "job_output", "job_refusals", "build_plan",
+            "job_status", "job_list", "job_cancel", "job_output", "job_refusals", "job_stats", "build_plan",
             "stack_status", "stack_start", "stack_stop", "stack_attention", "stack_list", "stack_setup", "stack_verify",
             "service_start", "service_stop", "service_restart", "service_logs", "service_env",
             "lease_status", "lease_acquire", "lease_release",

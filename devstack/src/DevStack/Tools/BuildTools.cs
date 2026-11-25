@@ -287,6 +287,17 @@ public sealed class BuildTools(BuildQueue queue)
                  "(the status page hides it by default). Read-only.")]
     public List<BuildStatus> List() => queue.List();
 
+    [McpServerTool(Name = "job_stats", ReadOnly = true)]
+    [Description("Shows how long jobs usually take on this machine, slowest first: per repository build (kind build, every lane) and per test " +
+                 "project of a repository (kind test, unfiltered lane_test / base_test runs only; compilesFirst true/false keeps the runs " +
+                 "that compile the project first apart from those on its last build) and configuration - samples (the last 30), " +
+                 "medianSeconds, p90Seconds, min, max, the last duration and when it ended, and limitSeconds (twice p90, at least median + " +
+                 "120 s; from three samples on). A running repo or test project beyond its limit is overdue: job_status marks it " +
+                 "(progress.current/running overdue, typicalSeconds) and stack_attention lists it - it probably hangs. Read-only.")]
+    public IReadOnlyList<DurationStat> Stats(
+        [Description("Only this repository (exact name or without 'octo-'); omit for all.")] string? repo = null) =>
+        queue.DurationStats(string.IsNullOrWhiteSpace(repo) ? null : repo.Trim());
+
     [McpServerTool(Name = "job_cancel", Destructive = true)]
     [Description("Cancels your own queued or running job (build or test run) - also one that was re-attached after a daemon restart: the process " +
                  "tree the daemon started is terminated (its pid is verified first) and services the build stopped are started again. Any " +

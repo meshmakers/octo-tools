@@ -399,7 +399,7 @@ internal static class ServerInstructions
         "Waiting: lane_build, base_build, lane_test and base_test return a job at once; job_status(id, waitSeconds=600) answers when the job " +
         "ended (timedOut says when it did not yet). job_list, job_output, job_cancel; builds never run tests. " +
         "Coordinators only read (/mcp?view=agent lists no admin_* tool): stack_status, stack_attention (what needs attention), stack_list, lane_list, lane_affected, " +
-        "workspace_list, job_status, job_list, job_output, job_refusals, build_plan, profile_list, profile_get, config_get, service_logs, " +
+        "workspace_list, job_status, job_list, job_output, job_refusals, job_stats, build_plan, profile_list, profile_get, config_get, service_logs, " +
         "service_env, lease_status, test_lock, infra_status, daemon_status, setup_check. " +
         "Only with the developer's go: base_build kind=range (publish=true: it changes the base lane's 999.0.0 packages for every session; a " +
         "lane builds its library changes into its own feed instead) and kind=all (confirm=true, 30-90 min), lease_release(force=true), and " +

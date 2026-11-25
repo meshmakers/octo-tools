@@ -235,6 +235,39 @@ public sealed class ApiParityTests : IDisposable
 
     private static ToolBridge.ToolMethod Tool(string name) => ToolBridge.All.Single(t => t.Name == name);
 
+    [Fact]
+    public void A_running_repo_or_test_project_beyond_its_usual_time_is_listed_as_overdue()
+    {
+        var late = new BuildCurrentRepo("octo-asset-repo-services", 1260, "build") { TypicalSeconds = 300, LimitSeconds = 840, Overdue = true };
+        var onTime = new BuildCurrentRepo("octo-sdk", 200, "build") { TypicalSeconds = 180, LimitSeconds = 400 };
+        var build = Build("b20", "lane", "/root/wt-ab1", "running", "") with
+        {
+            Outcome = null, Progress = new BuildProgress("build", 2, 4, late, [], "events", Running: [late, onTime])
+        };
+        var project = new BuildCurrentRepo(null, 4000, "tests") { Project = "Asset.IntegrationTests", TypicalSeconds = 600, LimitSeconds = 1500, Overdue = true };
+        var test = Build("b21", "test", "ab1: tests of octo-asset-repo-services", "running", "") with
+        {
+            Outcome = null, Progress = new BuildProgress("tests", null, null, project, null, "events") { ProjectIndex = 1, ProjectCount = 2 }
+        };
+        var finished = Build("b19", "lane", "/root/wt-ab2", "succeeded", "built") with
+        {
+            Progress = new BuildProgress("build", 1, 1, late, [], "events")
+        };
+
+        var items = Attention.Of(Overview(builds: [test, build, finished]));
+
+        items.Select(i => (i.Kind, i.BuildId)).Should().BeEquivalentTo([("overdue", "b21"), ("overdue", "b20")], "only running jobs, only the overdue item");
+        var b = items.Single(i => i.BuildId == "b20");
+        b.Level.Should().Be("caution");
+        b.Text.Should().Be("octo-asset-repo-services has been building for 21 min in the build of wt-ab1; it usually takes 5 min - it may hang.");
+        b.Hint.Should().Contain("job_output(id=\"b20\", repo=\"octo-asset-repo-services\")")
+            .And.Contain("job_cancel(owner=\"a\", id=\"b20\")", "job_cancel requires owner").And.EndWith("(only its owner).");
+        var laneJob = build with { Id = "b22", Env = "ab1" };
+        Attention.Of(Overview(builds: [laneJob])).Single().Hint.Should().EndWith("(or a session of lane ab1 with lane=\"ab1\").");
+        items.Single(i => i.BuildId == "b21").Text.Should()
+            .Be("Test project Asset.IntegrationTests has been running for 1 h 7 min (ab1: tests of octo-asset-repo-services); it usually takes 10 min - it may hang.");
+    }
+
     private static BuildStatus Build(string id, string kind, string target, string state, string summary) =>
         new(id, "a", state, state == "succeeded", kind, target, "DebugL", null, null, new BuildTimes(DateTimeOffset.Now, null, null, null, null), null,
             new BuildOutcome(null, null, summary, null), null, [], [], new BuildLogs("/log", null));

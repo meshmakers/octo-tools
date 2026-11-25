@@ -7,7 +7,8 @@
 //                      stack's services that run its build (UC-A) and its jobs with their evidence
 //   #/builds[/<id>]    the jobs: refusals, running builds and test runs with progress, history (also of earlier daemon runs) with
 //                      outcome and evidence (what the job ran on), for a test run its tests (failed ones first, per project),
-//                      errors, time per repo and phase, and the output per repo (GET /api/builds/<id>/output)
+//                      errors, time per repo and phase, and the output per repo (GET /api/builds/<id>/output); what repos
+//                      and test projects usually take (GET /api/tools/job_stats) and which running one is overdue
 //   #/profiles         saved stack starts and which one runs
 //   #/config[/<tab>]   configuration inspector (GET /api/config, loaded on demand); its Daemon tab also shows the running
 //                      binaries, whether a restart is safe, the Docker VM size and the last starts and stops (GET /api/daemon)
@@ -38,7 +39,8 @@ const ui = {
     openFolds: new Set(),       // disclosure keys the reader opened (kept across renders)
     envFilter: "",
     onlyDifferences: false,
-    showGone: false             // builds view: also list finished runs whose lane or folder no longer exists
+    showGone: false,            // builds view: also list finished runs whose lane or folder no longer exists
+    durations: null             // builds view: GET /api/tools/job_stats { rows | error, loadedAt, loading }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -957,6 +959,7 @@ function repoTable(p) {
         const current = !!now;
         const ended = x.state === "done" || x.state === "failed";
         const total = current ? seconds(now.seconds) : (ended ? phaseSeconds(x.seconds ?? ((x.buildSeconds || 0) + (x.testSeconds || 0) + (x.packageSeconds || 0))) : "");
+        const usual = current ? usualText(now) : null;
         return el("tr", { class: `repo ${x.state}` },
             el("td", { class: "mono", text: x.repo }),
             el("td", {}, el("span", { class: `repo-state ${x.state}`, title: x.reason ? `Reason: ${x.reason}` : null,
@@ -965,7 +968,7 @@ function repoTable(p) {
             el("td", { class: "num" }, ended ? phaseSeconds(x.buildSeconds) : "", ended ? parts([["catalogs", x.catalogSeconds], ["restore", x.restoreSeconds], ["compile", x.compileSeconds]]) : null),
             el("td", { class: "num" }, ended ? phaseSeconds(x.testSeconds) : "", ended ? parts([["restore", x.testRestoreSeconds]]) : null),
             el("td", { class: "num", text: ended ? phaseSeconds(x.packageSeconds) : "" }),
-            el("td", { class: "num", text: total }),
+            el("td", { class: `num${current && now.overdue ? " stop-text" : ""}` }, total, usual ? el("span", { class: "sub", text: usual }) : null),
             el("td", { class: "num", text: x.copied !== undefined && x.copied !== null ? String(x.copied) : "" }));
     });
     const t = p.totals;
@@ -982,17 +985,39 @@ function repoTable(p) {
 function progressIndex(p) { return p.repoIndex ?? p.projectIndex ?? 0; }
 function progressCount(p) { return p.repoCount ?? p.projectCount ?? 0; }
 
+// What a running repo or test project usually takes (job_stats): "usually 5m 10s", "usually 5m 10s, overdue after 14m".
+function usualText(now) {
+    if (!now || now.typicalSeconds === undefined || now.typicalSeconds === null) return null;
+    return `usually ${seconds(now.typicalSeconds)}${now.limitSeconds ? `, overdue after ${seconds(now.limitSeconds)}` : ""}`;
+}
+
+// The running repos or test projects that run far longer than usual - they probably hang.
+function overdueNote(b) {
+    const p = b.progress;
+    const late = (p.running || (p.current ? [p.current] : [])).filter((r) => r.overdue);
+    if (!late.length) return null;
+    const what = b.kind === "test" ? "test project" : "repository";
+    return note(late.map((r) => `The ${what} ${r.project ?? r.repo} has run for ${seconds(r.seconds)}; it usually takes ${seconds(r.typicalSeconds)}. It may hang: ` +
+        `job_output(id="${b.id}", repo="${r.project ?? r.repo}") shows its log, job_cancel stops the job.`).join(" "), "stop");
+}
+
 function runningBuild(o, b) {
     const p = b.progress;
     const elapsed = b.times.elapsedSeconds || 0;
     const eta = b.times.etaSeconds;
     const known = eta !== null && eta !== undefined;
+    const overdue = (p.running || (p.current ? [p.current] : [])).some((r) => r.overdue);
+    // A test run has no ETA; what its current project usually takes stands in its place.
+    const usual = b.kind === "test" && !p.running ? usualText(p.current) : null;
     return el("div", { class: "plate running-build" },
         el("div", { class: "running-head" },
             el("a", { class: "build-target", href: `#/builds/${encodeURIComponent(b.id)}`, text: place(b.target, o) }),
             el("span", {}, jobKind(b).slice(0, 3)), tag(phaseText(b, p.phase), p.phase === "lock" ? "caution" : "work"),
             p.running ? tag(`${p.running.length} repos at once`, "work") : null,
-            el("span", { class: "muted", text: `${b.kind === "test" ? "project" : "repo"} ${progressIndex(p)} of ${progressCount(p)}${p.running ? ` (${p.running.map((r) => r.repo ?? r.project).join(", ")})` : ""}, ${seconds(elapsed)}${known ? `, about ${seconds(eta)} left` : (b.kind === "test" ? "" : ", no estimate yet")}` })),
+            overdue ? tag("overdue", "stop") : null,
+            el("span", { class: "muted", text: `${b.kind === "test" ? "project" : "repo"} ${progressIndex(p)} of ${progressCount(p)}${p.running ? ` (${p.running.map((r) => r.repo ?? r.project).join(", ")})` : ""}, ${seconds(elapsed)}${known ? `, about ${seconds(eta)} left` : (b.kind === "test" ? "" : ", no estimate yet")}` +
+                (usual ? `; ${p.current.project}: ${seconds(p.current.seconds)}, ${usual}` : "") })),
+        overdueNote(b),
         known
             ? el("progress", { max: "100", value: String(Math.min(99, Math.round(100 * elapsed / Math.max(1, elapsed + eta)))), "aria-label": "Build progress" })
             : el("progress", { max: String(Math.max(1, progressCount(p))), value: String(Math.max(0, progressIndex(p) - 1)), "aria-label": "Build progress by repository" }),
@@ -1140,8 +1165,50 @@ function renderBuilds(o, arg) {
             gone.length ? goneToggle(gone.length) : null,
             shown.length
                 ? el("div", { class: "plate" }, table([{ text: "Target" }, { text: "Kind" }, { text: "State" }, { text: "Owner" }, { text: "Ran on" }, { text: "Started", cls: "num" }, { text: "Took", cls: "num" }], rows, "builds"))
-                : empty(o.builds.length ? "Only runs of removed lanes or folders; show them above." : "No builds or test runs yet. Start one with lane_build / base_build (check build_plan first), lane_test or base_test."))
+                : empty(o.builds.length ? "Only runs of removed lanes or folders; show them above." : "No builds or test runs yet. Start one with lane_build / base_build (check build_plan first), lane_test or base_test.")),
+        durationsSection()
     ];
+}
+
+// What repository builds and test projects usually take (GET /api/tools/job_stats), read at most once a minute while the
+// jobs view is open.
+async function loadDurations() {
+    ui.durations = { ...(ui.durations || {}), loading: true };
+    try {
+        const res = await fetch("/api/tools/job_stats", { cache: "no-store" });
+        ui.durations = res.ok ? { rows: await res.json(), loadedAt: Date.now() } : { error: `HTTP ${res.status}`, loadedAt: Date.now() };
+    } catch {
+        ui.durations = { error: "the daemon did not answer", loadedAt: Date.now() };
+    }
+    if (route().view === "builds") render();
+}
+
+function durationsSection() {
+    const d = ui.durations;
+    if (!d || (!d.loading && Date.now() - (d.loadedAt || 0) > 60000)) loadDurations();
+    if (!d || (!d.rows && !d.error)) return section("Usual durations", empty("Reading the durations…"));
+    if (d.error) return section("Usual durations", note(`Could not read the durations: ${d.error}.`, "caution"));
+    const rows = d.rows;
+    const builds = rows.filter((r) => r.kind === "build").length;
+    const head = [{ text: "Repository" }, { text: "Test project" }, { text: "Configuration" }, { text: "Samples", cls: "num" }, { text: "Median", cls: "num" },
+        { text: "p90", cls: "num" }, { text: "Max", cls: "num" }, { text: "Last", cls: "num" }, { text: "Overdue after", cls: "num" }];
+    const body = rows.map((r) => el("tr", {},
+        el("td", { class: "mono" }, r.repo, el("span", { class: "sub", text: r.kind === "test" ? "test run" : "build" })),
+        el("td", { class: "mono" }, r.project || "",
+            r.compilesFirst === true || r.compilesFirst === false ? el("span", { class: "sub", text: r.compilesFirst ? "compiles first" : "on its last build" }) : null),
+        el("td", { text: r.configuration }),
+        el("td", { class: "num", text: String(r.samples) }),
+        el("td", { class: "num", text: seconds(r.medianSeconds) }),
+        el("td", { class: "num", text: seconds(r.p90Seconds) }),
+        el("td", { class: "num", text: seconds(r.maxSeconds) }),
+        el("td", { class: `num${r.lastSeconds > r.p90Seconds ? " caution-text" : ""}` }, seconds(r.lastSeconds), r.lastAt ? el("span", { class: "sub", text: dateTime(r.lastAt) }) : null),
+        el("td", { class: "num", text: r.limitSeconds ? seconds(r.limitSeconds) : "" })));
+    return section("Usual durations",
+        rows.length
+            ? fold("durations", `${count(builds, "repository build")}, ${count(rows.length - builds, "test project")}, slowest first`,
+                [note("From the last 30 successful builds per repository (every lane) and the test projects of unfiltered test runs; a test project's runs that compile it first and those on its last build are kept apart. A running repository or test project beyond \"overdue after\" (twice p90, at least median + 2 minutes; from three samples on) is marked overdue: it probably hangs."),
+                    table(head, body, "compact")])
+            : empty("No durations yet: they are recorded when a build or an unfiltered test run ends."));
 }
 
 // The switch that shows the runs whose lane or folder no longer exists (hidden by default).

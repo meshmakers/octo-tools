@@ -47,6 +47,9 @@ internal sealed class RepoRun
     public string? BuildReason { get; set; }
     public bool? Docker { get; set; }
 
+    /// <summary>A test project that runs without compiling first (testProjectStart noBuild); false when it compiles first, null when the event does not say.</summary>
+    public bool? NoBuild { get; set; }
+
     /// <summary>vstest | mtp | ng, when the plan or testProjectStart event says it.</summary>
     public string? Runner { get; set; }
 
@@ -173,6 +176,7 @@ internal static class BuildEventReader
                     run.StartedAt = ts;
                     run.Phase = "tests";
                     run.Docker = Bool(e["docker"]) ?? run.Docker;
+                    run.NoBuild = Bool(e["noBuild"]) ?? run.NoBuild;
                     run.Runner = Str(e["runner"]) ?? run.Runner;
                     run.BuildReason = Str(e["buildReason"]) ?? run.BuildReason;
                     break;

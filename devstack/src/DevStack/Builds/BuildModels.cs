@@ -302,6 +302,18 @@ public sealed record BuildCurrentRepo(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [JsonPropertyOrder(-1)]
     public string? Project { get; init; }
+
+    /// <summary>What the repo's build (the test project) usually takes: the median of its last durations in every lane (job_stats).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? TypicalSeconds { get; init; }
+
+    /// <summary>Beyond this many seconds it is overdue (twice p90, at least median + 120 s; absent below three durations).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? LimitSeconds { get; init; }
+
+    /// <summary>true once seconds passed limitSeconds: it runs far longer than usual and probably hangs (absent otherwise).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Overdue { get; init; }
 }
 
 /// <summary>
