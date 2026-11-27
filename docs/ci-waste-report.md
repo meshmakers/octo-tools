@@ -55,7 +55,7 @@ JSON shape: `{ schemaVersion: 1, command: "Get-CiWasteReport", timestamp, data: 
   saving**.
 * **Chain**: the pipeline-resource-trigger tree from `azure-pipelines.yml` on `main` (mm-common, distributedEventHub,
   construction-kit-engine, sdk, ck-engine-mongodb, common-services and its nine children, bot-services,
-  communication-controller, ai-services, communication-sdk, mesh-adapter, frontend-libraries, refinery-studio). It is a
+  communication-controller, ai-services, communication-sdk, mesh-adapter, plug-dilos, frontend-libraries, refinery-studio). It is a
   constant in `modules/Get-CiWasteReport.psm1` (`$script:DefaultCiChainMap`); override with `-ChainMap` and update the
   constant when a trigger is added or removed.
 * The calculation is a pure function, `Measure-CiWaste`, which the Pester tests drive with recorded data.

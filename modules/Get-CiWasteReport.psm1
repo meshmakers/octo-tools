@@ -52,6 +52,7 @@ $script:DefaultCiChainMap = [ordered]@{
     'octo-communication-controller-services-CI' = 'octo-bot-services-CI'
     'octo-ai-services-CI'                       = 'octo-communication-controller-services-CI'
     'octo-mesh-adapter-CI'                      = 'octo-communication-sdk-CI'
+    'octo-plug-dilos-CI'                        = 'octo-mesh-adapter-CI'
     'octo-frontend-libraries-CI'                = $null
     'octo-frontend-refinery-studio-CI'          = 'octo-frontend-libraries-CI'
 }
