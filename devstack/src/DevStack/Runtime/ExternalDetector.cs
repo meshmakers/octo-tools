@@ -178,7 +178,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
 
     /// <summary>
     ///     Windows: a Toolhelp snapshot for pids, parents and creation times, the command lines of the processes the scan
-    ///     looks at, GetExtendedTcpTable for the listeners. A working directory and the stdout target are not readable there; the location of a process is taken
+    ///     looks at (NUL characters read as blanks, <see cref="NulsAsBlanks"/>), GetExtendedTcpTable for the listeners. A working directory and the stdout target are not readable there; the location of a process is taken
     ///     from its command line or its loaded modules instead (<see cref="LocationFromCommandLine"/>). A parent created after
     ///     its child is a reused pid: the child gets no parent (an orphan). A session's working directory stays unknown.
     /// </summary>
@@ -201,7 +201,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
             }
         }
 
-        var commandLines = wanted.ToDictionary(pid => pid, WindowsProcesses.CommandLine);
+        var commandLines = wanted.ToDictionary(pid => pid, pid => NulsAsBlanks(WindowsProcesses.CommandLine(pid)));
         var now = DateTimeOffset.Now;
         var processes = rows.Select(r => new PsRow(
             r.Pid,
@@ -247,6 +247,13 @@ public sealed partial class ExternalDetector(ConfigStore store)
         var program = args.FirstOrDefault();
         return program != null && Path.IsPathFullyQualified(program) ? Path.GetDirectoryName(program) : null;
     }
+
+    /// <summary>
+    ///     A Windows command line as the scan reads it (AB#9924): a program that splits its own command line in place leaves NUL
+    ///     characters where the blanks were, so they are read as blanks - the arguments are separate again for the secret masks
+    ///     and for <see cref="LocationFromCommandLine"/>.
+    /// </summary>
+    internal static string? NulsAsBlanks(string? commandLine) => commandLine?.Replace('\0', ' ');
 
     /// <summary>The path of a loaded module of a process (an IL assembly appears there when the loader mapped it), null if not readable.</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -385,7 +392,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
                 var nonDll = config.Services.Where(s => !dllServices.Any(d => d.Name == s.Key)).ToList();
                 var candidatesByPort = nonDll.Where(s => s.Value.Ports.Any(held.Contains)).Concat(nonDll).Distinct();
                 repoPath = dllService != null
-                    ? FindRepoFolder(cwd, config.Services[dllService].Repo, root)
+                    ? RepoFolderOrUnknown(cwd, config.Services[dllService].Repo, root)
                     : candidatesByPort
                         .Select(s => (s.Key, Repo: FindRepoFolder(cwd, s.Value.Repo, root)))
                         .Where(x => x.Repo != null)
@@ -428,9 +435,28 @@ public sealed partial class ExternalDetector(ConfigStore store)
     }
 
     /// <summary>
+    ///     The repository folder of a process that runs a service .dll, null when it cannot be determined (AB#9924): a failing
+    ///     lookup (a worktree's .git or HEAD file being rewritten, an unreadable folder) makes its location unknown, it never
+    ///     drops the service - it is reported without a repository path.
+    /// </summary>
+    private static string? RepoFolderOrUnknown(string cwd, string repo, string root)
+    {
+        try
+        {
+            return FindRepoFolder(cwd, repo, root);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     ///     Where the candidates and the sessions run (<see cref="Observation.Files"/>). When reading them all at once fails,
-    ///     each pid is read on its own (AB#9924): a candidate whose read fails is left out and named in
-    ///     <paramref name="skipped"/>; a session whose read fails keeps an unknown working directory.
+    ///     each pid is read on its own (AB#9924): a listener without a service .dll whose read fails is left out and named in
+    ///     <paramref name="skipped"/>; a service .dll whose read fails stays a candidate with an unknown location; a session
+    ///     whose read fails keeps an unknown working directory. When not one of the single reads succeeds, the batch read's
+    ///     exception is thrown again: the scan failed as a whole.
     /// </summary>
     private static Dictionary<int, (string? Cwd, string? Stdout)> ObserveFiles(Observation observation, Dictionary<int, string?> candidates,
         IReadOnlySet<int> sessionPids, IReadOnlyDictionary<int, PsRow> byPid, List<ExternalSkipped> skipped)
@@ -443,6 +469,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
         catch (Exception e) when (e is not OperationCanceledException)
         {
             var files = new Dictionary<int, (string? Cwd, string? Stdout)>();
+            var read = 0;
             foreach (var pid in pids)
             {
                 try
@@ -451,14 +478,22 @@ public sealed partial class ExternalDetector(ConfigStore store)
                     {
                         files[key] = value;
                     }
+
+                    read++;
                 }
                 catch (Exception one) when (one is not OperationCanceledException)
                 {
-                    if (candidates.Remove(pid))
+                    if (candidates.TryGetValue(pid, out var dllService) && dllService == null)
                     {
+                        candidates.Remove(pid);
                         skipped.Add(Skip(byPid[pid], one));
                     }
                 }
+            }
+
+            if (read == 0)
+            {
+                throw; // not one location was readable: a broken reader, not one process the scan cannot analyse
             }
 
             return files;
@@ -473,16 +508,20 @@ public sealed partial class ExternalDetector(ConfigStore store)
         new(row.Pid, row.Image is { Length: > 0 } image ? FileNameOf(image) : ExecutableOf(row.Command), e.GetType().Name);
 
     /// <summary>
-    ///     The program of a command line without the OS's image name: one leading quote off, up to the first whitespace or quote,
-    ///     its file name. Never a part of an argument, also for an unclosed quote or a quote closed without a blank; a program
-    ///     path with a blank gives its first word.
+    ///     The program of a command line without the OS's image name: one leading quote off, up to the first whitespace, quote
+    ///     or control character (a NUL can join the program and an argument), its file name. Never a part of an argument, also
+    ///     for an unclosed quote or a quote closed without a blank; a program path with a blank gives its first word.
     /// </summary>
     internal static string ExecutableOf(string command)
     {
         var rest = command.StartsWith('"') ? command[1..] : command;
-        var end = rest.AsSpan().IndexOfAny(" \t\r\n\"");
+        var end = rest.AsSpan().IndexOfAny(ProgramEnd);
         return FileNameOf(end < 0 ? rest : rest[..end]);
     }
+
+    /// <summary>Where the program of a command line ends: a blank, a quote or any control character (tab, CR, LF and NUL among them).</summary>
+    private static readonly System.Buffers.SearchValues<char> ProgramEnd =
+        System.Buffers.SearchValues.Create(" \"" + new string(Enumerable.Range(0, 0x20).Select(c => (char)c).ToArray()));
 
     /// <summary>The part after the last / or \, cut at the first control character (a NUL can join a program and an argument).</summary>
     private static string FileNameOf(string path)
