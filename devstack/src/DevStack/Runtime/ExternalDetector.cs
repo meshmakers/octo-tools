@@ -462,8 +462,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
     ///     Where the candidates and the sessions run (<see cref="Observation.Files"/>). When reading them all at once fails,
     ///     each pid is read on its own (AB#9924): a listener without a service .dll whose read fails is left out and named in
     ///     <paramref name="skipped"/>; a service .dll whose read fails stays a candidate with an unknown location; a session
-    ///     whose read fails keeps an unknown working directory. When the single read of not one candidate succeeds (the
-    ///     sessions do not count), the batch read's exception is thrown again: the scan failed as a whole.
+    ///     whose read fails keeps an unknown working directory. A failing read never fails the scan.
     /// </summary>
     private static Dictionary<int, (string? Cwd, string? Stdout)> ObserveFiles(Observation observation, Dictionary<int, string?> candidates,
         IReadOnlySet<int> sessionPids, IReadOnlyDictionary<int, PsRow> byPid, List<ExternalSkipped> skipped)
@@ -476,7 +475,6 @@ public sealed partial class ExternalDetector(ConfigStore store)
         catch (Exception e) when (e is not OperationCanceledException)
         {
             var files = new Dictionary<int, (string? Cwd, string? Stdout)>();
-            var read = 0;
             foreach (var pid in pids)
             {
                 try
@@ -484,11 +482,6 @@ public sealed partial class ExternalDetector(ConfigStore store)
                     foreach (var (key, value) in observation.Files([pid]))
                     {
                         files[key] = value;
-                    }
-
-                    if (candidates.ContainsKey(pid))
-                    {
-                        read++; // a session's read tells nothing about the candidates
                     }
                 }
                 catch (Exception one) when (one is not OperationCanceledException)
@@ -499,11 +492,6 @@ public sealed partial class ExternalDetector(ConfigStore store)
                         skipped.Add(Skip(byPid[pid], one));
                     }
                 }
-            }
-
-            if (read == 0)
-            {
-                throw; // not one candidate's location was readable: a broken reader, not one process the scan cannot analyse
             }
 
             return files;

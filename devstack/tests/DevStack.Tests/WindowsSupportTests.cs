@@ -369,7 +369,7 @@ public class WindowsSupportTests
         var zenon = new ExternalDetector.PsRow(900, 0, TimeSpan.FromMinutes(9),
             WindowsCommandLine.Join(Path.Combine(checkout.Root, "zen\0on", "zenDBSrv.exe"), ["-service"]) + "\0");
         var commands = new Dictionary<int, string> { [500] = identity.Command, [900] = zenon.Command };
-        Visible(ExternalDetector.LocationFromCommandLine(zenon.Command, _ => null)).Should().Contain("\\0", "the location keeps the NUL");
+        Visible(ExternalDetector.LocationFromCommandLine(zenon.Command, _ => null)).Should().EndWith("\\zen\\0on", "the location keeps the NUL");
         var observation = new ExternalDetector.Observation([identity, zenon], new Dictionary<int, List<int>> { [500] = [5003], [900] = [1103] },
             pids => pids.ToDictionary(p => p, p => (ExternalDetector.LocationFromCommandLine(commands[p], _ => null), (string?)null)));
 
@@ -519,12 +519,12 @@ public class WindowsSupportTests
     }
 
     [Fact]
-    public async Task A_location_reader_that_always_throws_fails_the_scan_with_its_warning()
+    public async Task With_a_location_reader_that_throws_for_every_pid_each_listener_is_left_out_and_a_service_dll_is_reported_without_a_location()
     {
         using var checkout = new TestCheckout();
         var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
         var listener = new ExternalDetector.PsRow(905, 0, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []));
-        // AB#9924: neither the batch read nor one single read succeeds - every process is unknown, not left out.
+        // AB#9924: neither the batch read nor one single read succeeds; each process is handled on its own, the scan does not fail.
         var observation = new ExternalDetector.Observation([identity, listener], new Dictionary<int, List<int>> { [905] = [6400] },
             _ => throw new InvalidOperationException("broken reader"));
         var detector = new ExternalDetector(checkout.WriteConfig("""
@@ -538,39 +538,31 @@ public class WindowsSupportTests
 
         var snapshot = await detector.ScanAsync(new HashSet<int>());
 
-        snapshot.Warning.Should().Be("Processes outside octo-devstack are unknown: the scan failed (InvalidOperationException: broken reader).");
-        snapshot.Services.Should().BeEmpty();
-        snapshot.Skipped.Should().BeNull();
+        Visible(snapshot.Warning).Should().BeNull("one process whose location cannot be read never fails the scan");
+        snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
+        Visible(snapshot.Services[0].WorkingDirectory).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(905, "probe.exe", "InvalidOperationException") }));
     }
 
     [Fact]
-    public async Task A_location_reader_that_reads_only_the_session_fails_the_scan_with_its_warning()
+    public void A_service_dll_under_a_session_whose_own_location_read_throws_is_reported_without_a_location()
     {
         using var checkout = new TestCheckout();
         var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
-        // AB#9924: the candidates run under a Claude Code session; the session's read succeeds, every candidate's read throws.
+        // AB#9924: the service runs under a Claude Code session; the batch read and its own read fail, the session's read succeeds.
         var session = new ExternalDetector.PsRow(800, 0, TimeSpan.FromMinutes(30), "claude", "claude.exe");
-        var listener = new ExternalDetector.PsRow(906, 800, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []));
-        var observation = new ExternalDetector.Observation([session, identity with { Ppid = 800 }, listener],
-            new Dictionary<int, List<int>> { [906] = [6400] },
+        var observation = new ExternalDetector.Observation([session, identity with { Ppid = 800 }], new Dictionary<int, List<int>>(),
             pids => pids.Any(p => p != 800)
                 ? throw new InvalidOperationException("unreadable")
                 : pids.ToDictionary(p => p, _ => ((string?)null, (string?)null)));
-        var detector = new ExternalDetector(checkout.WriteConfig("""
-                                                                   web:
-                                                                     repo: tools
-                                                                     command: node
-                                                                 """))
-        {
-            ScanOverride = (_, own, slots) => ExternalDetector.Analyse(config, observation, own, slots)
-        };
 
-        var snapshot = await detector.ScanAsync(new HashSet<int>());
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
 
-        snapshot.Warning.Should().Be("Processes outside octo-devstack are unknown: the scan failed (InvalidOperationException: unreadable).",
-            "a session's location says nothing about the candidates: not one of them was readable");
-        snapshot.Services.Should().BeEmpty();
-        snapshot.Skipped.Should().BeNull();
+        snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
+        Visible(snapshot.Services[0].WorkingDirectory).Should().BeNull();
+        Visible(snapshot.Services[0].RepoPath).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be("null");
+        Visible(snapshot.Warning).Should().BeNull();
     }
 
     /// <summary>
