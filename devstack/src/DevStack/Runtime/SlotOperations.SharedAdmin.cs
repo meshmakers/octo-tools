@@ -27,8 +27,14 @@ public sealed partial class SlotOperations
     /// <summary>A shared credentials file larger than this is not read (a lane file has a few hundred bytes).</summary>
     internal const int SharedAdminFileMaxBytes = 64 * 1024;
 
-    /// <summary>The identity's minimum password length (ASP.NET Identity's default; octo-identity-services sets no other).</summary>
-    internal const int IdentityPasswordMinimumLength = 6;
+    /// <summary>
+    ///     The identity's minimum password length: create-admin checks the password with octo-common-services'
+    ///     CredentialGenerator.CheckPassword (MinLength 8) before ASP.NET Identity's own rules (default 6).
+    /// </summary>
+    internal const int IdentityPasswordMinimumLength = 8;
+
+    /// <summary>The symbols CredentialGenerator.CheckPassword accepts (its SpecialCharsUser); any other character is no symbol.</summary>
+    internal const string IdentityPasswordSymbols = "!@$?_-#%&'()*+,./:;<=>[]^`{|}~";
 
     /// <summary>
     ///     The shared admin credentials file of the lane stacks: <c>&lt;base lane&gt;/.octo/admin-credentials.json</c> (the base
@@ -55,13 +61,12 @@ public sealed partial class SlotOperations
 
     /// <summary>
     ///     The shared admin for the admin step of <paramref name="target"/>, or null (with a warning when the file is there
-    ///     but not usable). Only a lane stack reads it; a target whose own files folder is the shared file's folder (the shared
-    ///     stack) never does. A password that breaks the identity rules throws: the step fails, there is no fallback.
+    ///     but not usable). Only a lane stack reads it (the shared stack and a named slot have no lane). A password that breaks
+    ///     the identity rules throws: the step fails, there is no fallback.
     /// </summary>
     private SharedAdminCredentials? SharedAdminFor(SlotTarget target, DevStackConfig config, List<string> warnings)
     {
-        if (target.Environment == null || SharedAdminFile(config) is not { } file ||
-            Common.PathScope.SamePath(Path.GetDirectoryName(file)!, target.FilesFolder))
+        if (target.Environment == null || SharedAdminFile(config) is not { } file)
         {
             return null;
         }
@@ -125,7 +130,7 @@ public sealed partial class SlotOperations
         JsonNode? root;
         try
         {
-            root = JsonNode.Parse(System.IO.File.ReadAllText(file));
+            root = JsonNode.Parse(System.IO.File.ReadAllText(file), documentOptions: new JsonDocumentOptions { AllowDuplicateProperties = false });
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -140,6 +145,16 @@ public sealed partial class SlotOperations
         if (root is not JsonObject json)
         {
             return Warn("is not a JSON object");
+        }
+
+        try
+        {
+            // A key given twice: JsonObject throws on first access (ArgumentException naming the key only).
+            _ = json.Count;
+        }
+        catch (ArgumentException)
+        {
+            return Warn("is not valid JSON (a key appears twice)");
         }
 
         if (json["password"] is not JsonValue passwordValue || !passwordValue.TryGetValue<string>(out var password) || string.IsNullOrWhiteSpace(password))
@@ -189,9 +204,11 @@ public sealed partial class SlotOperations
     }
 
     /// <summary>
-    ///     The first identity password rule <paramref name="password"/> breaks, or null: the rules <see cref="GeneratePassword"/>
-    ///     encodes (upper, lower, digit, symbol) and the identity's minimum length, checked as ASP.NET Identity checks them.
-    ///     The answer names the rule only, never the password.
+    ///     The first identity password rule <paramref name="password"/> breaks, or null. create-admin checks two sets of rules
+    ///     and both must hold: CredentialGenerator.CheckPassword of octo-common-services (at least 8 characters, an upper, a
+    ///     lower letter and a digit by char.IsUpper/IsLower/IsDigit, a symbol from <see cref="IdentityPasswordSymbols"/>) and
+    ///     then ASP.NET Identity's defaults (upper A-Z, lower a-z, digit 0-9: ASCII only). So letters and digits count only
+    ///     when they are ASCII, and only the symbols of that set count. The answer names the rule only, never the password.
     /// </summary>
     internal static string? PasswordRuleBroken(string password)
     {
@@ -219,6 +236,8 @@ public sealed partial class SlotOperations
             return "at least one digit (0-9)";
         }
 
-        return password.Any(c => !Upper(c) && !Lower(c) && !Digit(c)) ? null : "at least one symbol (a character that is not a letter or digit)";
+        return password.IndexOfAny(IdentityPasswordSymbols.ToCharArray()) >= 0
+            ? null
+            : $"at least one symbol of {IdentityPasswordSymbols} (a space, \", \\ or a non-ASCII character is no symbol)";
     }
 }

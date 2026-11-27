@@ -934,8 +934,9 @@ reports every step's outcome in the start result (`setup`, a one-line note, a wa
     file's owner is the current user. A file that is not owner-only, a symbolic link, unreadable, larger than 64 KB, not
     a JSON object or without a non-empty string `password` is not used: the setup warns (the warning names the file and
     the problem, never a value from it) and the admin gets a generated password, as without the file.
-  - A password that breaks an identity password rule - at least 6 characters, an uppercase and a lowercase letter
-    (A-Z, a-z), a digit and a symbol (24 characters are not needed) - **fails** the `admin` step with the rule named;
+  - A password that breaks an identity password rule - at least 8 characters, an uppercase and a lowercase letter
+    (A-Z, a-z), a digit (0-9) and a symbol of ``!@$?_-#%&'()*+,./:;<=>[]^`{|}~`` (a space, `"`, `\` or a non-ASCII
+    character is no symbol; 24 characters are not needed) - **fails** the `admin` step with the rule named;
     there is no fallback. Correct the file (or remove it) and repeat the step:
     `stack_setup(owner, lane="<lane>", steps=["admin"])`. An error of the identity's create-admin call is passed on with
     the password cut out.

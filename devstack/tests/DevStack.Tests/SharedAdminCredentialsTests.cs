@@ -220,6 +220,7 @@ public sealed class SharedAdminCredentialsTests : IDisposable
     [InlineData("""{"email":"dev@example.test","password":null}""")]
     [InlineData("""["Dummy-Pass-1x"]""")]
     [InlineData("""{"email":42,"password":"Dummy-Pass-1x"}""")]
+    [InlineData("""{"password":"Dummy-Pass-1x","password":"Other-Pass-2y"}""")]
     public async Task Abuse_a_missing_empty_or_malformed_password_is_a_warning_and_falls_back(string content)
     {
         var setup = Create();
@@ -229,16 +230,18 @@ public sealed class SharedAdminCredentialsTests : IDisposable
 
         result.Steps.Single().Status.Should().Be("done");
         result.Warnings.Should().ContainSingle().Which.Should().Contain(setup.SharedFile).And.Contain("generated password");
-        Everything(setup, result).Should().NotContain(DummyPassword).And.NotContain("12345678");
+        Everything(setup, result).Should().NotContain(DummyPassword).And.NotContain("12345678").And.NotContain("Other-Pass-2y");
         StoredPassword(setup).Should().HaveLength(24);
     }
 
     [Theory]
-    [InlineData("Ab1!x", "at least 6 characters")]
+    [InlineData("Ab1!xy", "at least 8 characters")]
     [InlineData("dummy-pass-1x", "uppercase")]
     [InlineData("DUMMY-PASS-1X", "lowercase")]
     [InlineData("Dummy-Pass-xx", "digit")]
     [InlineData("DummyPass1xyz", "symbol")]
+    [InlineData("Dummy Pass 1x", "symbol")]
+    [InlineData("Dummy\u00c4Pass1x", "symbol")]
     public async Task Abuse_a_password_that_breaks_a_rule_fails_the_step_naming_the_rule_without_fallback(string password, string rule)
     {
         var setup = Create();
@@ -320,10 +323,15 @@ public sealed class SharedAdminCredentialsTests : IDisposable
     [Fact]
     public async Task Abuse_the_shared_stack_never_reads_the_shared_file_its_own_file_there_means_nothing_is_sent()
     {
-        var setup = Create();
+        var checks = 0;
+        var setup = Create(protection: _ =>
+        {
+            checks++;
+            return null;
+        });
         File.WriteAllText(setup.SharedFile, LaneFileCopy());
         var lane = setup.Ops.Resolve(Lane, null);
-        // The shared stack's admin lives in the same file: a target whose files folder is the base lane's .octo.
+        // The shared stack's admin lives in the same file: a target without a lane whose files folder is the base lane's .octo.
         var sharedStack = lane with { Environment = null, FilesFolder = Path.GetDirectoryName(setup.SharedFile)! };
 
         var result = await setup.Ops.BootstrapAdminCoreAsync(sharedStack, null, Ct);
@@ -332,24 +340,19 @@ public sealed class SharedAdminCredentialsTests : IDisposable
         result.SharedCredentialsFile.Should().BeNull();
         setup.Http.Bodies.Should().BeEmpty("an existing file there means nothing is sent");
         File.ReadAllText(setup.SharedFile).Should().Be(LaneFileCopy(), "the file is never overwritten");
-
-        // Even named as a lane: a target whose own folder is the shared file's folder does not take the shared file.
-        File.Delete(setup.SharedFile);
-        var protectedChecks = 0;
-        var counting = new SlotOperations(_checkout.WriteConfig(IdentityService), setup.Supervisor, _fake, new FakeHttp(Created),
-            sharedFileProtection: _ =>
-            {
-                protectedChecks++;
-                return null;
-            });
-        (await counting.BootstrapAdminCoreAsync(lane with { FilesFolder = Path.GetDirectoryName(setup.SharedFile)! }, null, Ct)).SharedCredentialsFile.Should().BeNull();
-        protectedChecks.Should().Be(0, "the shared file is not consulted for its own folder");
+        checks.Should().Be(0, "the file is the shared stack's own, not read as a shared admin file");
     }
+
 
     [Fact]
     public async Task Abuse_a_named_slot_without_a_lane_does_not_take_the_shared_file()
     {
-        var setup = Create();
+        var checks = 0;
+        var setup = Create(protection: _ =>
+        {
+            checks++;
+            return null;
+        });
         File.WriteAllText(setup.SharedFile, LaneFileCopy());
         var slot = setup.Ops.Resolve(Lane, null) with { Environment = null };
 
@@ -358,6 +361,7 @@ public sealed class SharedAdminCredentialsTests : IDisposable
         result.Status.Should().Be("created");
         result.SharedCredentialsFile.Should().BeNull("lanes only");
         Sent(setup)["password"]!.GetValue<string>().Should().NotBe(DummyPassword).And.HaveLength(24);
+        checks.Should().Be(0, "the shared file is not even looked at");
     }
 
     // ---------- the owner-only check and the rules themselves ----------
@@ -401,15 +405,44 @@ public sealed class SharedAdminCredentialsTests : IDisposable
 
     [Theory]
     [InlineData("Dummy-Pass-1x", null)]
-    [InlineData("Ab1!xy", null)]
-    [InlineData("Ab1 xy", null)]
-    [InlineData("Ab1!x", "at least 6 characters")]
-    [InlineData("Abcdef1Ä", null)] // as ASP.NET Identity counts it: a non-ASCII letter is a symbol
+    [InlineData("Abcde1!x", null)] // 8 characters are enough, 24 are not needed
+    [InlineData("Ab1!xy", "at least 8 characters")]
+    [InlineData("Abcde1!", "at least 8 characters")]
+    [InlineData("abcde1!xy", "at least one uppercase letter (A-Z)")]
+    [InlineData("\u00c4bcde1!xy", "at least one uppercase letter (A-Z)")] // a non-ASCII upper letter does not count (ASP.NET Identity)
+    [InlineData("ABCDE1!XY", "at least one lowercase letter (a-z)")]
+    [InlineData("Abcdef!xy", "at least one digit (0-9)")]
+    [InlineData("Abcdef1xy", "at least one symbol")]
+    [InlineData("Abcdef1 xy", "at least one symbol")] // a space is no symbol of the identity's set
+    [InlineData("Abcdef1\"xy", "at least one symbol")]
+    [InlineData("Abcdef1\\xy", "at least one symbol")]
+    [InlineData("Abcdef1\u00c4x", "at least one symbol")] // a non-ASCII letter is no symbol of the set
+    [InlineData("Abcdef1~xy", null)]
     public void The_rules_are_the_identity_ones_and_need_no_24_characters(string password, string? broken)
     {
-        SlotOperations.PasswordRuleBroken(password).Should().Be(broken);
+        var rule = SlotOperations.PasswordRuleBroken(password);
+        if (broken == null)
+        {
+            rule.Should().BeNull();
+        }
+        else
+        {
+            rule.Should().StartWith(broken);
+        }
+
         // What the admin step generates always passes.
         SlotOperations.PasswordRuleBroken(SlotOperations.GeneratePassword()).Should().BeNull();
+    }
+
+    [Fact]
+    public void Every_symbol_the_admin_step_generates_is_one_the_identity_accepts()
+    {
+        const string generated = "!#%*+-=?@_"; // the symbols of SlotOperations.GeneratePassword
+        generated.ToCharArray().Should().OnlyContain(c => SlotOperations.IdentityPasswordSymbols.Contains(c));
+        for (var i = 0; i < 200; i++)
+        {
+            SlotOperations.GeneratePassword().Where(c => !char.IsAsciiLetterOrDigit(c)).Should().OnlyContain(c => generated.Contains(c));
+        }
     }
 
     private string WriteTemp(string content)

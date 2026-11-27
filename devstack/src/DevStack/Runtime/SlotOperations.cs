@@ -256,7 +256,7 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
     /// <summary>Cuts <paramref name="password"/> out of text that goes into an answer or an error (belt and braces: nothing should echo it).</summary>
     internal static string Hide(string text, string password) => password.Length == 0 ? text : text.Replace(password, "***", StringComparison.Ordinal);
 
-    /// <summary>24 characters from a CSPRNG with upper, lower, digit and symbol (the identity password rules).</summary>
+    /// <summary>24 characters from a CSPRNG with upper, lower, digit and symbol (the identity password rules; every symbol is in <see cref="IdentityPasswordSymbols"/>).</summary>
     internal static string GeneratePassword()
     {
         const string upper = "ABCDEFGHJKLMNPQRSTUVWXYZ", lower = "abcdefghijkmnopqrstuvwxyz", digits = "23456789", symbols = "!#%*+-=?@_";
