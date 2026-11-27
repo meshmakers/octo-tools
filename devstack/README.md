@@ -531,8 +531,9 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   cannot be determined: it is reported without a repository path, and a job whose plan holds that service's repository
   counts it as a conflict ("could not determine where pid ... runs from"). When the locations cannot be read all at
   once, each process is read on its own: a listener without a service .dll whose location cannot be read is left out
-  (`external.skipped`), a service .dll stays reported without a location, a Claude Code session keeps an unknown
-  working directory; a failing read never fails the scan. On Windows a NUL character in a command line is read as a blank (a program that splits its own
+  (`external.skipped`), a service .dll stays reported without a location, a Claude Code session that is no listener
+  itself keeps an unknown working directory (one that listens is a listener like any other); a failing read never fails
+  the scan. On Windows a NUL character in a command line is read as a blank (a program that splits its own
   command line in place leaves NULs where the blanks were; zenon's `zenDBSrv.exe` carries such NULs), so its arguments
   stay separate for the secret masks and for its location. A location that is still no valid path lies in no repository: a listener
   without a service .dll is then no stack service and is not reported at all; a process running a configured service

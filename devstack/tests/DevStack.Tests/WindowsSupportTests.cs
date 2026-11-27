@@ -369,7 +369,7 @@ public class WindowsSupportTests
         var zenon = new ExternalDetector.PsRow(900, 0, TimeSpan.FromMinutes(9),
             WindowsCommandLine.Join(Path.Combine(checkout.Root, "zen\0on", "zenDBSrv.exe"), ["-service"]) + "\0");
         var commands = new Dictionary<int, string> { [500] = identity.Command, [900] = zenon.Command };
-        Visible(ExternalDetector.LocationFromCommandLine(zenon.Command, _ => null)).Should().EndWith("\\zen\\0on", "the location keeps the NUL");
+        Visible(ExternalDetector.LocationFromCommandLine(zenon.Command, _ => null)).Should().Be(Visible(Path.Combine(checkout.Root, "zen\0on")), "the location keeps the NUL");
         var observation = new ExternalDetector.Observation([identity, zenon], new Dictionary<int, List<int>> { [500] = [5003], [900] = [1103] },
             pids => pids.ToDictionary(p => p, p => (ExternalDetector.LocationFromCommandLine(commands[p], _ => null), (string?)null)));
 
@@ -391,7 +391,7 @@ public class WindowsSupportTests
         File.WriteAllText(Path.Combine(odd, ".git"), "gitdir: wt\0x\n");
         const string marker = "marker-ab9924";
         var probe = new ExternalDetector.PsRow(901, 0, TimeSpan.FromMinutes(2),
-            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker, "--token=" + marker]));
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker, "--token=" + marker]), "probe.exe");
         var observation = new ExternalDetector.Observation([identity, probe], new Dictionary<int, List<int>> { [500] = [5003], [901] = [6400] },
             pids => pids.ToDictionary(p => p, p => ((string?)(p == 500 ? bin : odd), (string?)null)));
 
@@ -462,7 +462,7 @@ public class WindowsSupportTests
         var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
         const string marker = "marker-ab9924";
         var probe = new ExternalDetector.PsRow(902, 0, TimeSpan.FromMinutes(2),
-            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker]));
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker]), "probe.exe");
         var observation = new ExternalDetector.Observation([identity, probe], new Dictionary<int, List<int>> { [500] = [5003], [902] = [6400] },
             pids => pids.Contains(902)
                 ? throw new InvalidOperationException($"no location for --{marker}")
@@ -519,26 +519,19 @@ public class WindowsSupportTests
     }
 
     [Fact]
-    public async Task With_a_location_reader_that_throws_for_every_pid_each_listener_is_left_out_and_a_service_dll_is_reported_without_a_location()
+    public void With_a_location_reader_that_throws_for_every_pid_each_listener_is_left_out_and_a_service_dll_is_reported_without_a_location()
     {
         using var checkout = new TestCheckout();
         var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
-        var listener = new ExternalDetector.PsRow(905, 0, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []));
+        var listener = new ExternalDetector.PsRow(905, 0, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []),
+            "probe.exe");
         // AB#9924: neither the batch read nor one single read succeeds; each process is handled on its own, the scan does not fail.
         var observation = new ExternalDetector.Observation([identity, listener], new Dictionary<int, List<int>> { [905] = [6400] },
             _ => throw new InvalidOperationException("broken reader"));
-        var detector = new ExternalDetector(checkout.WriteConfig("""
-                                                                   web:
-                                                                     repo: tools
-                                                                     command: node
-                                                                 """))
-        {
-            ScanOverride = (_, own, slots) => ExternalDetector.Analyse(config, observation, own, slots)
-        };
+        // ScanAsync turns only an exception of Analyse into the scan-level warning: Analyse must not throw.
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
 
-        var snapshot = await detector.ScanAsync(new HashSet<int>());
-
-        Visible(snapshot.Warning).Should().BeNull("one process whose location cannot be read never fails the scan");
+        Visible(snapshot.Warning).Should().BeNull("a failing location read never fails the scan, also when every read fails");
         snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
         Visible(snapshot.Services[0].WorkingDirectory).Should().BeNull();
         Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(905, "probe.exe", "InvalidOperationException") }));
@@ -549,9 +542,13 @@ public class WindowsSupportTests
     {
         using var checkout = new TestCheckout();
         var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
-        // AB#9924: the service runs under a Claude Code session; the batch read and its own read fail, the session's read succeeds.
+        // AB#9924: the service and a listener run under a Claude Code session; the batch read and their own reads fail, the
+        // session's read succeeds.
         var session = new ExternalDetector.PsRow(800, 0, TimeSpan.FromMinutes(30), "claude", "claude.exe");
-        var observation = new ExternalDetector.Observation([session, identity with { Ppid = 800 }], new Dictionary<int, List<int>>(),
+        var listener = new ExternalDetector.PsRow(906, 800, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []),
+            "probe.exe");
+        var observation = new ExternalDetector.Observation([session, identity with { Ppid = 800 }, listener],
+            new Dictionary<int, List<int>> { [906] = [6400] },
             pids => pids.Any(p => p != 800)
                 ? throw new InvalidOperationException("unreadable")
                 : pids.ToDictionary(p => p, _ => ((string?)null, (string?)null)));
@@ -559,9 +556,10 @@ public class WindowsSupportTests
         var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
 
         snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
+        snapshot.Services[0].Group.Should().Be("session:800", "the session that started it is still found");
         Visible(snapshot.Services[0].WorkingDirectory).Should().BeNull();
         Visible(snapshot.Services[0].RepoPath).Should().BeNull();
-        Shown(snapshot.Skipped).Should().Be("null");
+        Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(906, "probe.exe", "InvalidOperationException") }));
         Visible(snapshot.Warning).Should().BeNull();
     }
 
