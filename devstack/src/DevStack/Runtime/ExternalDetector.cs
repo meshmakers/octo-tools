@@ -71,7 +71,8 @@ public sealed record ExternalSnapshot(IReadOnlyList<ExternalService> Services, I
 }
 
 /// <summary>
-///     A process the scan left out: its pid, the file name of its program and the type of the exception. Never its command
+///     A process the scan left out: its pid, the file name of its program (the image name the OS reports, else the first word
+///     of its command line) and the type of the exception. Never its command
 ///     line, an argument, its location or the exception message (a message can quote its input).
 /// </summary>
 public sealed record ExternalSkipped(int Pid, string Executable, string ExceptionType);
@@ -87,7 +88,8 @@ public sealed partial class ExternalDetector(ConfigStore store)
     private readonly Lock _lock = new();
     private (DateTime At, ExternalSnapshot Snapshot)? _cache;
 
-    public sealed record PsRow(int Pid, int Ppid, TimeSpan Elapsed, string Command);
+    /// <param name="Image">The image (program file) name the OS reports with the process (Windows); null where unknown.</param>
+    public sealed record PsRow(int Pid, int Ppid, TimeSpan Elapsed, string Command, string? Image = null);
 
     /// <summary>The known stack slots, to name the slot of an external process by its port offset (set by the supervisor).</summary>
     public Func<IReadOnlyList<SlotInfo>>? KnownSlots { get; set; }
@@ -205,7 +207,8 @@ public sealed partial class ExternalDetector(ConfigStore store)
             r.Pid,
             ParentOf(r),
             r.CreatedAt is { } created && created <= now ? now - created : TimeSpan.Zero,
-            commandLines.GetValueOrDefault(r.Pid) ?? r.Name)).ToList();
+            commandLines.GetValueOrDefault(r.Pid) ?? r.Name,
+            r.Name)).ToList(); // AB#9924: the image name names a process the scan leaves out, never parsed from its command line
         // Distinct: a pid asked for twice (a candidate that is also a session's ancestor, AB#9556) is observed once.
         return new Observation(processes, listening, pids => pids.Distinct()
             .Select(pid => (Pid: pid, Location: commandLines.GetValueOrDefault(pid) is { } commandLine && !IsClaude(commandLine)
@@ -462,17 +465,29 @@ public sealed partial class ExternalDetector(ConfigStore store)
         }
     }
 
-    /// <summary>The note for a process left out: pid, the file name of its program and the exception type - nothing of its arguments.</summary>
-    private static ExternalSkipped Skip(PsRow row, Exception e) => new(row.Pid, ExecutableOf(row.Command), e.GetType().Name);
+    /// <summary>
+    ///     The note for a process left out: pid, the file name of its program and the exception type - nothing of its arguments.
+    ///     The program is the image name the OS reported (Windows), else read from the command line (<see cref="ExecutableOf"/>).
+    /// </summary>
+    internal static ExternalSkipped Skip(PsRow row, Exception e) =>
+        new(row.Pid, row.Image is { Length: > 0 } image ? FileNameOf(image) : ExecutableOf(row.Command), e.GetType().Name);
 
     /// <summary>
-    ///     The file name of the program of a command line (the first token, after its last / or \), cut at the first control
-    ///     character: a NUL can join the program and its arguments into one token.
+    ///     The program of a command line without the OS's image name: one leading quote off, up to the first whitespace or quote,
+    ///     its file name. Never a part of an argument, also for an unclosed quote or a quote closed without a blank; a program
+    ///     path with a blank gives its first word.
     /// </summary>
     internal static string ExecutableOf(string command)
     {
-        var first = WindowsCommandLine.Split(command).FirstOrDefault() ?? "";
-        var name = first[(first.LastIndexOfAny(['\\', '/']) + 1)..];
+        var rest = command.StartsWith('"') ? command[1..] : command;
+        var end = rest.AsSpan().IndexOfAny(" \t\r\n\"");
+        return FileNameOf(end < 0 ? rest : rest[..end]);
+    }
+
+    /// <summary>The part after the last / or \, cut at the first control character (a NUL can join a program and an argument).</summary>
+    private static string FileNameOf(string path)
+    {
+        var name = path[(path.LastIndexOfAny(['\\', '/']) + 1)..];
         var control = name.AsSpan().IndexOfAnyInRange('\0', '\u001f');
         return control < 0 ? name : name[..control];
     }

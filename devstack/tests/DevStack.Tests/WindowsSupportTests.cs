@@ -408,10 +408,50 @@ public class WindowsSupportTests
     [Fact]
     public void The_executable_of_a_skipped_process_is_its_program_file_name_without_arguments()
     {
-        ExternalDetector.ExecutableOf("\"C:\\Program Files\\zen\0on\\zenDBSrv.exe\" -service\0").Should().Be("zenDBSrv.exe");
+        ExternalDetector.ExecutableOf("\"C:\\zen\0on\\zenDBSrv.exe\" -service\0").Should().Be("zenDBSrv.exe");
         ExternalDetector.ExecutableOf("C:\\tools\\probe.exe\0--secret").Should().Be("probe.exe", "a NUL joins the program and an argument into one token");
         ExternalDetector.ExecutableOf("/usr/bin/node /x/server.js --token=abc").Should().Be("node");
         ExternalDetector.ExecutableOf("").Should().BeEmpty();
+    }
+
+    /// <summary>Command lines whose program, read as one token, would carry a part of an argument (AB#9924).</summary>
+    internal static readonly string[] MarkerCommandLines =
+    [
+        "\"C:\\x\\prog.exe --token=MARKER-AB9924", // unclosed quote
+        "\"C:\\x\\prog.exe\"--token=MARKER-AB9924", // closing quote without a blank
+        "\"C:\\x\\prog.exe --url=https://host/MARKER-AB9924", // unclosed quote, a separator inside the argument
+        "\"C:\\x\\prog.exe --path=C:\\s\\MARKER-AB9924"
+    ];
+
+    public static TheoryData<string> CommandLinesWithAMarkerArgument => new(MarkerCommandLines);
+
+    [Theory]
+    [MemberData(nameof(CommandLinesWithAMarkerArgument))]
+    public void A_process_left_out_is_named_without_any_part_of_its_arguments(string command)
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
+        var observation = new ExternalDetector.Observation([identity, new ExternalDetector.PsRow(903, 0, TimeSpan.FromMinutes(2), command)],
+            new Dictionary<int, List<int>> { [500] = [5003], [903] = [6400] },
+            pids => pids.Contains(903) ? throw new InvalidOperationException("unreadable") : pids.ToDictionary(p => p, _ => ((string?)bin, (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Skipped.Should().ContainSingle().Which.Executable.Should().Be("prog.exe");
+        System.Text.Json.JsonSerializer.Serialize(snapshot.Skipped).Should().NotContain("MARKER");
+    }
+
+    [Fact]
+    public void A_process_left_out_is_named_by_the_image_name_the_OS_reports_and_else_by_its_program_without_arguments()
+    {
+        // Windows reports the image name with the process snapshot; a program path with a blank is read from the command
+        // line only up to the blank.
+        const string command = "\"C:\\Program Files\\COPA-DATA\\zenDBSrv.exe\" -service MARKER-AB9924";
+
+        ExternalDetector.Skip(new ExternalDetector.PsRow(1103, 0, TimeSpan.Zero, command, "zenDBSrv.exe"), new ArgumentException("x"))
+            .Should().Be(new ExternalSkipped(1103, "zenDBSrv.exe", "ArgumentException"));
+        ExternalDetector.Skip(new ExternalDetector.PsRow(1103, 0, TimeSpan.Zero, command), new ArgumentException("x")).Executable
+            .Should().Be("Program", "without an image name the first word stands for the program, never an argument");
     }
 
     [Fact]
