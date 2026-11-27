@@ -189,6 +189,21 @@ Describe 'Measure-CiWaste rules' {
         $down.redundantMinutes | Should -Be 10
     }
 
+    It 'lists octo-plug-dilos-CI behind octo-mesh-adapter-CI in the default chain map' {
+        $r = Measure-CiWaste -AsOf $script:SmallAsOf -Hours 24 -Builds @(
+            (New-FakeBuild 1 'octo-mesh-adapter-CI' 'a1' '2026-10-10T08:00:00Z' '2026-10-10T08:00:00Z' '2026-10-10T08:05:00Z'),
+            (New-FakeBuild 2 'octo-plug-dilos-CI' 'p1' '2026-10-10T08:10:00Z' '2026-10-10T08:10:00Z' '2026-10-10T08:20:00Z' 'succeeded' 'resourceTrigger'),
+            (New-FakeBuild 3 'octo-mesh-adapter-CI' 'a2' '2026-10-10T08:30:00Z' '2026-10-10T08:30:00Z' '2026-10-10T08:35:00Z'),
+            (New-FakeBuild 4 'octo-plug-dilos-CI' 'p1' '2026-10-10T08:40:00Z' '2026-10-10T08:40:00Z' '2026-10-10T08:50:00Z' 'succeeded' 'resourceTrigger'),   # adapter moved: legitimate
+            (New-FakeBuild 5 'octo-plug-dilos-CI' 'p1' '2026-10-10T09:00:00Z' '2026-10-10T09:00:00Z' '2026-10-10T09:10:00Z' 'succeeded' 'resourceTrigger'))  # same inputs: redundant
+        $plug = $r.definitions | Where-Object definition -eq 'octo-plug-dilos-CI'
+        $plug.inChain | Should -BeTrue
+        $plug.upstream | Should -Be 'octo-mesh-adapter-CI'
+        $plug.mainRuns | Should -Be 3
+        $plug.redundantRuns | Should -Be 1
+        $plug.redundantMinutes | Should -Be 10
+    }
+
     It 'does not call a canceled run a prior build of the same inputs' {
         $r = Measure-Small @(
             (New-FakeBuild 1 'down-CI' 'd1' '2026-10-10T08:00:00Z' '2026-10-10T08:00:00Z' '2026-10-10T08:02:00Z' 'canceled'),
