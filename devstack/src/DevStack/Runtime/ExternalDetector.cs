@@ -61,7 +61,20 @@ public sealed record ExternalSnapshot(IReadOnlyList<ExternalService> Services, I
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Warning { get; init; }
+
+    /// <summary>
+    ///     The processes the scan left out because their analysis failed (AB#9924); every other process is reported as usual,
+    ///     so this is no <see cref="Warning"/>. Null when none was left out.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ExternalSkipped>? Skipped { get; init; }
 }
+
+/// <summary>
+///     A process the scan left out: its pid, the file name of its program and the type of the exception. Never its command
+///     line, an argument, its location or the exception message (a message can quote its input).
+/// </summary>
+public sealed record ExternalSkipped(int Pid, string Executable, string ExceptionType);
 
 /// <summary>
 ///     Finds the stack processes octo-devstack did not start and works out where they run from and who started them:
@@ -306,13 +319,56 @@ public sealed partial class ExternalDetector(ConfigStore store)
             }
         }
 
+        var skipped = new List<ExternalSkipped>();
         var files = candidates.Count == 0
             ? new Dictionary<int, (string? Cwd, string? Stdout)>()
-            : observation.Files(candidates.Keys.Concat(sessionPids).Distinct().ToList()); // a candidate may be a session's ancestor too (AB#9556)
+            : ObserveFiles(observation, candidates, sessionPids, byPid, skipped);
 
         var services = new List<ExternalService>();
         var groups = new Dictionary<string, (ExternalOrigin Origin, List<ExternalService> Members)>();
         foreach (var (pid, dllService) in candidates)
+        {
+            (ExternalService Service, ExternalOrigin Origin)? found;
+            try
+            {
+                found = AnalyseCandidate(pid, dllService);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // AB#9924: one process that cannot be analysed is left out; the others are reported.
+                skipped.Add(Skip(byPid[pid], e));
+                continue;
+            }
+
+            if (found is not { } result)
+            {
+                continue; // a listening process that is no stack service (IDE, other tools)
+            }
+
+            var (service, origin) = result;
+            services.Add(service);
+            if (!groups.TryGetValue(service.Group, out var group))
+            {
+                groups[service.Group] = group = (origin, []);
+            }
+
+            group.Members.Add(service);
+        }
+
+        var groupList = groups.Select(g => new ExternalGroup(
+            g.Key,
+            g.Value.Origin,
+            g.Value.Members.Select(s => s.Checkout).FirstOrDefault(c => c != null),
+            g.Value.Members.Select(s => s.Configuration).FirstOrDefault(c => c != null),
+            g.Value.Members.Select(s => s.Service).Distinct().ToList(),
+            g.Value.Members.Min(s => s.StartedAt))).OrderByDescending(g => g.Services.Count).ToList();
+
+        return new ExternalSnapshot(services.OrderBy(s => s.Service).ToList(), groupList)
+        {
+            Skipped = skipped.Count == 0 ? null : skipped.OrderBy(s => s.Pid).ToList()
+        };
+
+        (ExternalService Service, ExternalOrigin Origin)? AnalyseCandidate(int pid, string? dllService)
         {
             var row = byPid[pid];
             var cwd = files.GetValueOrDefault(pid).Cwd;
@@ -340,7 +396,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
 
             if (name == null || (dllService == null && repoPath == null))
             {
-                continue; // a listening process that is no stack service (IDE, other tools)
+                return null;
             }
 
             var origin = DescribeOrigin(pid, byPid, files);
@@ -364,24 +420,61 @@ public sealed partial class ExternalDetector(ConfigStore store)
             {
                 SlotHint = SlotHint(serviceConfig, ports, slots)
             };
-            services.Add(service);
-            if (!groups.TryGetValue(key, out var group))
+            return (service, origin);
+        }
+    }
+
+    /// <summary>
+    ///     Where the candidates and the sessions run (<see cref="Observation.Files"/>). When reading them all at once fails,
+    ///     each pid is read on its own (AB#9924): a candidate whose read fails is left out and named in
+    ///     <paramref name="skipped"/>; a session whose read fails keeps an unknown working directory.
+    /// </summary>
+    private static Dictionary<int, (string? Cwd, string? Stdout)> ObserveFiles(Observation observation, Dictionary<int, string?> candidates,
+        IReadOnlySet<int> sessionPids, IReadOnlyDictionary<int, PsRow> byPid, List<ExternalSkipped> skipped)
+    {
+        var pids = candidates.Keys.Concat(sessionPids).Distinct().ToList(); // a candidate may be a session's ancestor too (AB#9556)
+        try
+        {
+            return observation.Files(pids);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            var files = new Dictionary<int, (string? Cwd, string? Stdout)>();
+            foreach (var pid in pids)
             {
-                groups[key] = group = (origin, []);
+                try
+                {
+                    foreach (var (key, value) in observation.Files([pid]))
+                    {
+                        files[key] = value;
+                    }
+                }
+                catch (Exception one) when (one is not OperationCanceledException)
+                {
+                    if (candidates.Remove(pid))
+                    {
+                        skipped.Add(Skip(byPid[pid], one));
+                    }
+                }
             }
 
-            group.Members.Add(service);
+            return files;
         }
+    }
 
-        var groupList = groups.Select(g => new ExternalGroup(
-            g.Key,
-            g.Value.Origin,
-            g.Value.Members.Select(s => s.Checkout).FirstOrDefault(c => c != null),
-            g.Value.Members.Select(s => s.Configuration).FirstOrDefault(c => c != null),
-            g.Value.Members.Select(s => s.Service).Distinct().ToList(),
-            g.Value.Members.Min(s => s.StartedAt))).OrderByDescending(g => g.Services.Count).ToList();
+    /// <summary>The note for a process left out: pid, the file name of its program and the exception type - nothing of its arguments.</summary>
+    private static ExternalSkipped Skip(PsRow row, Exception e) => new(row.Pid, ExecutableOf(row.Command), e.GetType().Name);
 
-        return new ExternalSnapshot(services.OrderBy(s => s.Service).ToList(), groupList);
+    /// <summary>
+    ///     The file name of the program of a command line (the first token, after its last / or \), cut at the first control
+    ///     character: a NUL can join the program and its arguments into one token.
+    /// </summary>
+    internal static string ExecutableOf(string command)
+    {
+        var first = WindowsCommandLine.Split(command).FirstOrDefault() ?? "";
+        var name = first[(first.LastIndexOfAny(['\\', '/']) + 1)..];
+        var control = name.AsSpan().IndexOfAnyInRange('\0', '\u001f');
+        return control < 0 ? name : name[..control];
     }
 
     private static async Task<IReadOnlyList<ExternalService>> ProbeAsync(IReadOnlyList<ExternalService> services) =>
@@ -485,7 +578,17 @@ public sealed partial class ExternalDetector(ConfigStore store)
     /// <summary>The folder of <paramref name="repo"/> that contains <paramref name="cwd"/>: the repo itself or a worktree of it.</summary>
     internal static string? FindRepoFolder(string cwd, string repo, string root)
     {
-        var dir = new DirectoryInfo(cwd);
+        DirectoryInfo? dir;
+        try
+        {
+            dir = new DirectoryInfo(cwd);
+        }
+        catch (ArgumentException)
+        {
+            // AB#9924: no valid path (a NUL character from a command line, an empty string) lies in no repository.
+            return null;
+        }
+
         while (dir != null && dir.FullName.Length >= root.Length)
         {
             if (dir.Name == repo && Directory.Exists(Path.Combine(dir.FullName, ".git")))

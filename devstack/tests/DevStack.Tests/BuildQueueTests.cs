@@ -153,6 +153,24 @@ public sealed class BuildQueueTests : IDisposable
     }
 
     [Fact]
+    public async Task Job_status_names_the_processes_the_external_scan_left_out_and_the_job_ran_without_checking_them()
+    {
+        // AB#9924: the scan left out processes it could not analyse; the others are known, so there is no scan warning.
+        var (queue, _, _, _) = Create();
+        _external = ExternalSnapshot.Empty with { Skipped = [new ExternalSkipped(22832, "zenDBSrv.exe", "ArgumentException"), new ExternalSkipped(901, "probe.exe", "IOException")] };
+        _fake.Build = (_, _, _) => Task.FromResult(FakePwsh.Ok("Invoke-Build", """{"success":true,"exitCode":0,"logFile":"/x"}"""));
+        var tools = new Tools.BuildTools(queue);
+
+        var job = await queue.Enqueue(new BuildRequest { Owner = "s1", Kind = BuildKind.Repo, Path = "octo-a" });
+        var done = await tools.Status(job.Id, waitSeconds: 30, cancellationToken: TestContext.Current.CancellationToken);
+
+        done.State.Should().Be("succeeded");
+        done.Notes.Should().ContainSingle(n => n.Contains("pid 22832 (zenDBSrv.exe, ArgumentException)") && n.Contains("pid 901 (probe.exe, IOException)") &&
+                                               n.EndsWith("The job runs without checking them.", StringComparison.Ordinal),
+            "the plan names each process left out once, though the conflicts are checked again right before the job runs");
+    }
+
+    [Fact]
     public async Task Job_status_waits_until_the_job_ends_or_the_time_is_up()
     {
         var (queue, _, _, _) = Create();

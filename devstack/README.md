@@ -520,7 +520,12 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   (`Stop-Octo -branch`, then waits until their processes are gone). When the scan of those processes fails (an error
   while reading the OS, e.g. a pid seen twice), no call fails because of it: the processes outside the daemon are
   unknown then, `stack_status` says so in `external.warning` and a job's plan in a warning, and the job runs without that
-  check (AB#9556).
+  check (AB#9556). One process the scan cannot analyse does not hide the others (AB#9924): it is left out, every other
+  process is reported as usual, `external.warning` stays empty, and `external.skipped` names it by `pid`, `executable` (the
+  file name of its program) and `exceptionType` - never its command line, an argument, its location or the exception
+  message; a job's plan names the processes left out the same way in a warning, and the job runs without checking them. A
+  location that is no valid path (a command line with a NUL character, e.g. zenon's `zenDBSrv.exe`) lies in no
+  repository: such a process is no stack service and is not reported at all.
 - While a build runs, no service starts from its repos (for range and all: from its lane); `stack_start` and
   `service_start` name the build and its owner. Jobs run strictly first in, first out. A job that needs the lease
   checks right before it runs that its owner still holds it (otherwise it fails with `failedStep: "preflight"`) and pins

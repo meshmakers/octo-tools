@@ -1529,6 +1529,18 @@ internal sealed class BuildPlanner(
 
     // ---------- conflicts and gates ----------
 
+    /// <summary>A plan warning, once: the conflicts are checked again right before the job runs.</summary>
+    private static void AddWarningOnce(PlannedBuild planned, string warning)
+    {
+        lock (planned.Warnings)
+        {
+            if (!planned.Warnings.Contains(warning))
+            {
+                planned.Warnings.Add(warning);
+            }
+        }
+    }
+
     public async Task<List<BuildConflict>> ConflictsAsync(PlannedBuild planned)
     {
         if (planned.Request.Kind == BuildKind.Test)
@@ -1553,14 +1565,15 @@ internal sealed class BuildPlanner(
         var snapshot = await external();
         if (snapshot.Warning is { } unknown)
         {
-            var warning = unknown + " The job runs without that check.";
-            lock (planned.Warnings)
-            {
-                if (!planned.Warnings.Contains(warning))
-                {
-                    planned.Warnings.Add(warning);
-                }
-            }
+            AddWarningOnce(planned, unknown + " The job runs without that check.");
+        }
+
+        if (snapshot.Skipped is { Count: > 0 } skipped)
+        {
+            // AB#9924: the scan left these out (their analysis failed); name them by pid, executable and exception type only.
+            AddWarningOnce(planned,
+                $"The scan of processes outside octo-devstack left out {string.Join(", ", skipped.Select(s => $"pid {s.Pid} ({s.Executable}, {s.ExceptionType})"))}. " +
+                "The job runs without checking them.");
         }
 
         var config = store.Load();

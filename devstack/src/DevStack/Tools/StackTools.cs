@@ -180,7 +180,9 @@ public sealed class StackTools(StackSupervisor supervisor, ConfigStore store, IL
                  "last setup; baseLane (the base lane it runs from) and lane (a lane stack's lane). 'external' lists the stack processes the daemon did NOT " +
                  "start - a Start-Octo (with its -branch/-configuration), an npm run start, a leftover process - with service, pid, ports, " +
                  "health, lane/worktree, configuration, log file, and per group who started it (terminal or Claude Code session with agent and " +
-                 "session id) and how to stop it. stack_start fails while they hold service ports. 'profile' says which profile the stack runs " +
+                 "session id) and how to stop it; external.warning when the scan failed (the processes outside the daemon are unknown), " +
+                 "external.skipped the processes left out because their analysis failed (pid, executable, exceptionType - the others " +
+                 "are reported). stack_start fails while they hold service ports. 'profile' says which profile the stack runs " +
                  "(exact, or the differences: drift, and edited when the profile changed since the start); every external group carries the " +
                  "profile it looks like. Without lane: the shared stack, and 'slots' lists every lane stack in one line (ports offset, prefix, " +
                  "owner, profile, n/m healthy). Read-only; no lease needed.")]

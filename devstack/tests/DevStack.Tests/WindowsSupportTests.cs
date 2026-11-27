@@ -346,6 +346,95 @@ public class WindowsSupportTests
         (await supervisor.StatusAsync()).Masked().External.Warning.Should().StartWith("Processes outside octo-devstack are unknown");
     }
 
+    /// <summary>A lane with the identity service running from its bin folder outside the daemon (pid 500, port 5003).</summary>
+    private static (DevStackConfig Config, string Repo, string Bin, ExternalDetector.PsRow Row) IdentityOutsideTheDaemon(TestCheckout checkout)
+    {
+        var repo = checkout.Repo("octo-identity-services");
+        Directory.CreateDirectory(Path.Combine(repo, ".git"));
+        var bin = Path.Combine(repo, "bin", "DebugL", "net10.0");
+        Directory.CreateDirectory(bin);
+        var config = ConfigStore.Parse(ConfigStore.ReadDefaultYaml());
+        config.RootPath = checkout.Root;
+        var dll = config.Services["identityServices"].Args.First(a => a.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
+        return (config, repo, bin,
+            new ExternalDetector.PsRow(500, 0, TimeSpan.FromMinutes(3), WindowsCommandLine.Join("dotnet", [Path.Combine(bin, dll), "--urls=https://0.0.0.0:5003"])));
+    }
+
+    [Fact]
+    public void A_listener_whose_location_carries_a_NUL_is_no_stack_service_and_the_others_are_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, repo, _, identity) = IdentityOutsideTheDaemon(checkout);
+        // AB#9924: zenon's zenDBSrv.exe listens on a port and its command line carries NUL characters (Windows counts them in its length).
+        var zenon = new ExternalDetector.PsRow(900, 0, TimeSpan.FromMinutes(9),
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "zen\0on", "zenDBSrv.exe"), ["-service"]) + "\0");
+        var commands = new Dictionary<int, string> { [500] = identity.Command, [900] = zenon.Command };
+        ExternalDetector.LocationFromCommandLine(zenon.Command, _ => null).Should().Contain("\0", "the location keeps the NUL");
+        var observation = new ExternalDetector.Observation([identity, zenon], new Dictionary<int, List<int>> { [500] = [5003], [900] = [1103] },
+            pids => pids.ToDictionary(p => p, p => (ExternalDetector.LocationFromCommandLine(commands[p], _ => null), (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        var service = snapshot.Services.Should().ContainSingle("a location that is no valid path lies in no repository").Subject;
+        service.Service.Should().Be("identityServices");
+        service.RepoPath.Should().Be(repo);
+        snapshot.Warning.Should().BeNull();
+        snapshot.Skipped.Should().BeNull("nothing failed");
+    }
+
+    [Fact]
+    public void A_candidate_whose_analysis_throws_is_left_out_with_pid_executable_and_exception_type_and_the_others_are_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
+        // A folder whose .git file names a gitdir the path API rejects: reading it throws while the listener's repo is searched.
+        var odd = checkout.Repo("odd");
+        File.WriteAllText(Path.Combine(odd, ".git"), "gitdir: wt\0x\n");
+        const string marker = "marker-ab9924";
+        var probe = new ExternalDetector.PsRow(901, 0, TimeSpan.FromMinutes(2),
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker, "--token=" + marker]));
+        var observation = new ExternalDetector.Observation([identity, probe], new Dictionary<int, List<int>> { [500] = [5003], [901] = [6400] },
+            pids => pids.ToDictionary(p => p, p => ((string?)(p == 500 ? bin : odd), (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Should().ContainSingle().Which.Service.Should().Be("identityServices");
+        snapshot.Warning.Should().BeNull("the other processes are known");
+        snapshot.Skipped.Should().ContainSingle().Which.Should().Be(new ExternalSkipped(901, "probe.exe", "ArgumentException"));
+        var json = System.Text.Json.JsonSerializer.Serialize(snapshot, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        json.Should().NotContain(marker, "the note carries no argument of the command line").And.NotContain("gitdir").And.NotContain("Null character");
+    }
+
+    [Fact]
+    public void The_executable_of_a_skipped_process_is_its_program_file_name_without_arguments()
+    {
+        ExternalDetector.ExecutableOf("\"C:\\Program Files\\zen\0on\\zenDBSrv.exe\" -service\0").Should().Be("zenDBSrv.exe");
+        ExternalDetector.ExecutableOf("C:\\tools\\probe.exe\0--secret").Should().Be("probe.exe", "a NUL joins the program and an argument into one token");
+        ExternalDetector.ExecutableOf("/usr/bin/node /x/server.js --token=abc").Should().Be("node");
+        ExternalDetector.ExecutableOf("").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_candidate_whose_location_cannot_be_read_is_left_out_and_the_others_are_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
+        const string marker = "marker-ab9924";
+        var probe = new ExternalDetector.PsRow(902, 0, TimeSpan.FromMinutes(2),
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker]));
+        var observation = new ExternalDetector.Observation([identity, probe], new Dictionary<int, List<int>> { [500] = [5003], [902] = [6400] },
+            pids => pids.Contains(902)
+                ? throw new InvalidOperationException($"no location for --{marker}")
+                : pids.ToDictionary(p => p, _ => ((string?)bin, (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Should().ContainSingle().Which.Service.Should().Be("identityServices");
+        snapshot.Warning.Should().BeNull();
+        snapshot.Skipped.Should().ContainSingle().Which.Should().Be(new ExternalSkipped(902, "probe.exe", "InvalidOperationException"));
+        System.Text.Json.JsonSerializer.Serialize(snapshot).Should().NotContain(marker);
+    }
+
     // ---------- MCP argument errors ----------
 
     [Fact]
