@@ -216,6 +216,8 @@ public sealed partial class SlotOperations : ISlotSetup
             await Step(SlotSetupSteps.Admin, async () =>
             {
                 var admin = await BootstrapAdminCoreAsync(target, null, cancellationToken);
+                // AB#9865: a shared admin file that is there but not usable is a warning (it names the file, never its content).
+                warnings.AddRange(admin.Warnings ?? []);
                 return new SlotSetupStep(SlotSetupSteps.Admin, admin.Status == "created" ? "done" : "unchanged", admin.Note);
             });
         }

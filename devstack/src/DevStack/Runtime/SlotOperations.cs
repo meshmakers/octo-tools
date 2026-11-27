@@ -31,7 +31,11 @@ public sealed record BootstrapResult(
     string? Email,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? CredentialsFile,
-    string Note);
+    string Note,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? SharedCredentialsFile = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? Warnings = null);
 
 /// <summary>The octoCli step of stack_setup: the merged installation entry and the contexts registered.</summary>
 public sealed record OctoCliRegistration(
@@ -55,7 +59,7 @@ public sealed record ServiceEnvResult(string Service, string Slot, int Pid, stri
 /// </summary>
 public sealed partial class SlotOperations(ConfigStore store, StackSupervisor supervisor, IPwshRunner pwsh, HttpMessageHandler? http = null,
     string? octoToolsConfigFile = null, PreStartChecks? checks = null, Func<DevStackConfig, ISlotInventory>? inventory = null,
-    Func<IEnumerable<(int Pid, int ParentPid)>>? processLinks = null)
+    Func<IEnumerable<(int Pid, int ParentPid)>>? processLinks = null, Func<string, string?>? sharedFileProtection = null)
 {
     /// <summary>
     ///     stack_verify: the slot's derived data names against MongoDB (system database, tenant registry, ownership markers,
@@ -178,8 +182,10 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
 
     /// <summary>
     ///     Creates the first admin of the slot's (empty) system database through the identity setup API
-    ///     (POST /&lt;systemTenant&gt;/api/setup/create-admin). The generated password goes into an owner-only (600) file and is
-    ///     never part of the result; an existing credentials file is never overwritten.
+    ///     (POST /&lt;systemTenant&gt;/api/setup/create-admin). The password goes into an owner-only (600) file and is never
+    ///     part of the result, a warning or an error; an existing credentials file is never overwritten. A lane stack takes
+    ///     email and password from the shared admin file when it is there and usable (AB#9865, <see cref="SharedAdminFor"/>),
+    ///     else the password is generated.
     /// </summary>
     internal async Task<BootstrapResult> BootstrapAdminAsync(string owner, string? lane, string? slot, string? email, CancellationToken cancellationToken)
     {
@@ -188,13 +194,12 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
         return await BootstrapAdminCoreAsync(target, email, cancellationToken);
     }
 
-    private async Task<BootstrapResult> BootstrapAdminCoreAsync(SlotTarget target, string? email, CancellationToken cancellationToken)
+    internal async Task<BootstrapResult> BootstrapAdminCoreAsync(SlotTarget target, string? email, CancellationToken cancellationToken)
     {
         var config = store.Load();
         var port = SlotDeriver.Port(target.Shifted, "identityServices", "https");
         var tenant = SystemTenant(config);
         var url = $"https://localhost:{port}/{tenant}/api/setup/create-admin";
-        email ??= $"admin@{target.Slot.Name}.local";
         var file = Path.Combine(target.FilesFolder, CredentialsFileName);
         if (File.Exists(file))
         {
@@ -202,7 +207,10 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
                 "A credentials file exists already; nothing was sent. Delete it only if that admin is gone (a fresh system database).");
         }
 
-        var password = GeneratePassword();
+        var warnings = new List<string>();
+        var shared = SharedAdminFor(target, config, warnings);
+        email ??= shared?.Email ?? $"admin@{target.Slot.Name}.local";
+        var password = shared?.Password ?? GeneratePassword();
         Directory.CreateDirectory(target.FilesFolder);
         WriteOwnerOnly(file, JsonSerializer.Serialize(new { email, password, tenant, url, slot = target.Slot.Name, createdAt = DateTimeOffset.Now },
             new JsonSerializerOptions { WriteIndented = true }));
@@ -214,7 +222,8 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
         {
             File.Delete(file);
-            throw new InvalidOperationException($"The identity service of slot '{target.Slot.Name}' does not answer on {url} ({e.Message}); start it first.");
+            throw new InvalidOperationException(
+                $"The identity service of slot '{target.Slot.Name}' does not answer on {url} ({Hide(e.Message, password)}); start it first.");
         }
 
         using (response)
@@ -223,7 +232,7 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
             {
                 File.Delete(file);
                 return new BootstrapResult(target.Slot.Name, "alreadySetUp", url, null, null,
-                    "The system database has users already (the setup API answers 404 then); nothing was changed.");
+                    "The system database has users already (the setup API answers 404 then); nothing was changed.", null, Warned(warnings));
             }
 
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -231,15 +240,23 @@ public sealed partial class SlotOperations(ConfigStore store, StackSupervisor su
             if (!ok)
             {
                 File.Delete(file);
-                throw new InvalidOperationException($"create-admin failed ({(int)response.StatusCode}): {Truncate(body, 300)}");
+                // The identity's own message names the broken password rule; the password is cut out before anything is passed on.
+                throw new InvalidOperationException($"create-admin failed ({(int)response.StatusCode}): {Truncate(Hide(body, password), 300)}" +
+                                                    (shared != null ? $" (password from the shared admin credentials file {shared.File})" : ""));
             }
         }
 
         return new BootstrapResult(target.Slot.Name, "created", url, email, file,
-            $"Admin {email} created in the system tenant '{tenant}' of slot '{target.Slot.Name}'; the password is in {file} (owner-only).");
+            $"Admin {email} created in the system tenant '{tenant}' of slot '{target.Slot.Name}'; the password is in {file} (owner-only)" +
+            (shared != null ? $", taken from the shared admin credentials file {shared.File}." : "."), shared?.File, Warned(warnings));
     }
 
-    /// <summary>24 characters from a CSPRNG with upper, lower, digit and symbol (the identity password rules).</summary>
+    private static IReadOnlyList<string>? Warned(List<string> warnings) => warnings.Count > 0 ? warnings : null;
+
+    /// <summary>Cuts <paramref name="password"/> out of text that goes into an answer or an error (belt and braces: nothing should echo it).</summary>
+    internal static string Hide(string text, string password) => password.Length == 0 ? text : text.Replace(password, "***", StringComparison.Ordinal);
+
+    /// <summary>24 characters from a CSPRNG with upper, lower, digit and symbol (the identity password rules; every symbol is in <see cref="IdentityPasswordSymbols"/>).</summary>
     internal static string GeneratePassword()
     {
         const string upper = "ABCDEFGHJKLMNPQRSTUVWXYZ", lower = "abcdefghijkmnopqrstuvwxyz", digits = "23456789", symbols = "!#%*+-=?@_";
