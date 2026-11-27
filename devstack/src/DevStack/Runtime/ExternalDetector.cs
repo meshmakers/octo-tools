@@ -178,7 +178,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
 
     /// <summary>
     ///     Windows: a Toolhelp snapshot for pids, parents and creation times, the command lines of the processes the scan
-    ///     looks at (NUL characters read as blanks, <see cref="NulsAsBlanks"/>), GetExtendedTcpTable for the listeners. A working directory and the stdout target are not readable there; the location of a process is taken
+    ///     looks at (NUL characters read as blanks, <see cref="CommandLines"/>), GetExtendedTcpTable for the listeners. A working directory and the stdout target are not readable there; the location of a process is taken
     ///     from its command line or its loaded modules instead (<see cref="LocationFromCommandLine"/>). A parent created after
     ///     its child is a reused pid: the child gets no parent (an orphan). A session's working directory stays unknown.
     /// </summary>
@@ -201,7 +201,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
             }
         }
 
-        var commandLines = wanted.ToDictionary(pid => pid, pid => NulsAsBlanks(WindowsProcesses.CommandLine(pid)));
+        var commandLines = CommandLines(wanted, WindowsProcesses.CommandLine);
         var now = DateTimeOffset.Now;
         var processes = rows.Select(r => new PsRow(
             r.Pid,
@@ -254,6 +254,13 @@ public sealed partial class ExternalDetector(ConfigStore store)
     ///     and for <see cref="LocationFromCommandLine"/>.
     /// </summary>
     internal static string? NulsAsBlanks(string? commandLine) => commandLine?.Replace('\0', ' ');
+
+    /// <summary>
+    ///     The command lines of <paramref name="pids"/> as the Windows scan reads them: through <paramref name="read"/>
+    ///     (<see cref="WindowsProcesses.CommandLine"/>), NUL characters as blanks (<see cref="NulsAsBlanks"/>); null where unreadable.
+    /// </summary>
+    internal static Dictionary<int, string?> CommandLines(IEnumerable<int> pids, Func<int, string?> read) =>
+        pids.ToDictionary(pid => pid, pid => NulsAsBlanks(read(pid)));
 
     /// <summary>The path of a loaded module of a process (an IL assembly appears there when the loader mapped it), null if not readable.</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -455,8 +462,8 @@ public sealed partial class ExternalDetector(ConfigStore store)
     ///     Where the candidates and the sessions run (<see cref="Observation.Files"/>). When reading them all at once fails,
     ///     each pid is read on its own (AB#9924): a listener without a service .dll whose read fails is left out and named in
     ///     <paramref name="skipped"/>; a service .dll whose read fails stays a candidate with an unknown location; a session
-    ///     whose read fails keeps an unknown working directory. When not one of the single reads succeeds, the batch read's
-    ///     exception is thrown again: the scan failed as a whole.
+    ///     whose read fails keeps an unknown working directory. When the single read of not one candidate succeeds (the
+    ///     sessions do not count), the batch read's exception is thrown again: the scan failed as a whole.
     /// </summary>
     private static Dictionary<int, (string? Cwd, string? Stdout)> ObserveFiles(Observation observation, Dictionary<int, string?> candidates,
         IReadOnlySet<int> sessionPids, IReadOnlyDictionary<int, PsRow> byPid, List<ExternalSkipped> skipped)
@@ -479,7 +486,10 @@ public sealed partial class ExternalDetector(ConfigStore store)
                         files[key] = value;
                     }
 
-                    read++;
+                    if (candidates.ContainsKey(pid))
+                    {
+                        read++; // a session's read tells nothing about the candidates
+                    }
                 }
                 catch (Exception one) when (one is not OperationCanceledException)
                 {
@@ -493,7 +503,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
 
             if (read == 0)
             {
-                throw; // not one location was readable: a broken reader, not one process the scan cannot analyse
+                throw; // not one candidate's location was readable: a broken reader, not one process the scan cannot analyse
             }
 
             return files;
@@ -506,6 +516,13 @@ public sealed partial class ExternalDetector(ConfigStore store)
     /// </summary>
     internal static ExternalSkipped Skip(PsRow row, Exception e) =>
         new(row.Pid, row.Image is { Length: > 0 } image ? FileNameOf(image) : ExecutableOf(row.Command), e.GetType().Name);
+
+    /// <summary>
+    ///     The sentence that names the processes a scan left out (a job plan's warning, a capture's note): pid, executable and
+    ///     exception type of each, nothing else of the process.
+    /// </summary>
+    internal static string LeftOut(IEnumerable<ExternalSkipped> skipped) =>
+        $"The scan of processes outside octo-devstack left out {string.Join(", ", skipped.Select(s => $"pid {s.Pid} ({s.Executable}, {s.ExceptionType})"))}.";
 
     /// <summary>
     ///     The program of a command line without the OS's image name: one leading quote off, up to the first whitespace, quote

@@ -186,7 +186,9 @@ public sealed class BuildQueueTests : IDisposable
         var job = await queue.Enqueue(new BuildRequest { Owner = "s1", Kind = BuildKind.Repo, Path = "octo-a" });
         var done = await tools.Status(job.Id, waitSeconds: 30, cancellationToken: TestContext.Current.CancellationToken);
 
-        var warning = done.Notes.Should().ContainSingle(n => n.StartsWith("The scan of processes outside octo-devstack left out", StringComparison.Ordinal)).Subject;
+        // NUL-safe form: a failure message holding a raw NUL would drop the test from the result instead of failing it.
+        var notes = done.Notes.Select(n => WindowsSupportTests.Visible(n)!).ToList();
+        var warning = notes.Should().ContainSingle(n => n.StartsWith("The scan of processes outside octo-devstack left out", StringComparison.Ordinal)).Subject;
         warning.Should().Contain("pid 910 (prog.exe, IOException)").And.Contain($"pid {909 + commands.Length} (prog.exe, IOException)").And.NotContain("MARKER");
     }
 

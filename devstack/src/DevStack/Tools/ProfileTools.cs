@@ -140,6 +140,11 @@ public sealed class ProfileTools(ConfigStore store, StackSupervisor supervisor, 
                     .Where(s => s.Group == group.Key)
                     .Select(s => new ProfileCapture.Process(s.Service, s.Source, ProfileMatcher.ArgsOf(s.Command), s.Ports)).ToList(), skipped);
                 notes.Add("The environment variables of processes outside the daemon are not readable; settings and envVars were not captured.");
+                if (status.External.Skipped is { Count: > 0 } leftOut)
+                {
+                    // AB#9924: a process the scan could not analyse is in no group, so the profile may lack the service it runs.
+                    notes.Add(ExternalDetector.LeftOut(leftOut) + " The profile may lack a service one of them runs.");
+                }
             }
 
             if (description != null)

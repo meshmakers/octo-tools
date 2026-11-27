@@ -1571,9 +1571,7 @@ internal sealed class BuildPlanner(
         if (snapshot.Skipped is { Count: > 0 } skipped)
         {
             // AB#9924: the scan left these out (their analysis failed); name them by pid, executable and exception type only.
-            AddWarningOnce(planned,
-                $"The scan of processes outside octo-devstack left out {string.Join(", ", skipped.Select(s => $"pid {s.Pid} ({s.Executable}, {s.ExceptionType})"))}. " +
-                "The job runs without checking them.");
+            AddWarningOnce(planned, ExternalDetector.LeftOut(skipped) + " The job runs without checking them.");
         }
 
         var config = store.Load();
