@@ -3,9 +3,10 @@
     Pester tests for Start-OctoDevStackDaemon / Stop-OctoDevStackDaemon.
 
     Nothing real is built, started or stopped: Invoke-Build, the lsof/ps/kill seams
-    (Get-OctoDevStackListeningPids, Get-OctoDevStackProcessCommandLine, Send-OctoDevStackSignal), Start-Process,
-    Stop-Process, the /health probe, the daemon's restart check (Get-OctoDevStackDaemonStatus, the seam around
-    GET /api/daemon - no test ever calls a daemon) and the detached launcher are mocked. The native tools are never mocked by
+    (Get-OctoDevStackListeningPids, Get-OctoDevStackProcessCommandLine, Send-OctoDevStackSignal), Stop-Process, the
+    /health probe, the daemon's restart check (Get-OctoDevStackDaemonStatus, the seam around GET /api/daemon - no test
+    ever calls a daemon) and the detached launchers (Start-OctoDevStackDetachedUnix, Start-OctoDevStackDetachedWindows;
+    the Windows one is tested in OctoDevStack.Windows.Tests.ps1) are mocked. The native tools are never mocked by
     name: Pester cannot mock a command that does not exist (lsof on Windows), and `kill` / `ps` are aliases of
     Stop-Process / Get-Process there. The checkout is a fake folder in TestDrive and the state folder is
     redirected there (OCTO_DEVSTACK_STATE).
@@ -116,7 +117,7 @@ Describe 'Start-OctoDevStackDaemon' {
         Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $false }
         Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $false }
         Mock -ModuleName OctoDevStack Start-Sleep { }
-        Mock -ModuleName OctoDevStack Start-Process { [pscustomobject]@{ Id = 4242 } }
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedWindows { 4242 }
         Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix { 4242 }
         Mock -ModuleName OctoDevStack Test-OctoDevStackProcessAlive { $true }
         Mock -ModuleName OctoDevStack Get-OctoDevStackListeningPids { }
@@ -345,12 +346,11 @@ Describe 'Start-OctoDevStackDaemon' {
         }
     }
 
-    It 'starts with Start-Process (hidden, redirected) on Windows and keeps the previous logs' {
+    It 'starts through Start-OctoDevStackDetachedWindows (hidden, redirected) on Windows and keeps the previous logs' {
         Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
         Mock -ModuleName OctoDevStack Get-NetTCPConnection { }
         $script:HealthCalls = 0
         Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:HealthCalls++; $script:HealthCalls -ge 2 }
-        # not $path: inside the filter it is Start-Process's -Path alias of -FilePath
         $checkout = New-FakeCheckout 'startwin' -Built
         New-Item -ItemType Directory -Force -Path $env:OCTO_DEVSTACK_STATE | Out-Null
         Set-Content -Path (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.log') -Value 'previous stdout'
@@ -360,13 +360,70 @@ Describe 'Start-OctoDevStackDaemon' {
 
         $json.data.success | Should -BeTrue
         $json.data.pid | Should -Be 4242
-        Should -Invoke -ModuleName OctoDevStack Start-Process -Times 1 -ParameterFilter {
-            $FilePath -eq 'dotnet' -and $ArgumentList[0] -eq ('"' + (Join-Path $checkout 'bin/Release/net10.0/octo-devstack.dll') + '"') -and
-            $ArgumentList[1] -eq '--url' -and $ArgumentList[2] -eq 'http://127.0.0.1:5090' -and
-            $WindowStyle -eq 'Hidden' -and $RedirectStandardOutput -like '*daemon.log' -and $RedirectStandardError -like '*daemon.err.log'
+        # The dll unquoted: the function quotes each argument itself.
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedWindows -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq 'dotnet' -and $ArgumentList.Count -eq 3 -and $ArgumentList[0] -eq (Join-Path $checkout 'bin/Release/net10.0/octo-devstack.dll') -and
+            $ArgumentList[1] -eq '--url' -and $ArgumentList[2] -eq 'http://127.0.0.1:5090' -and $WorkingDirectory -eq $checkout -and
+            $LogPath -eq (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.log') -and $ErrorLogPath -eq (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.err.log')
         }
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
         Get-Content (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.prev.log') | Should -Be 'previous stdout'
         Get-Content (Join-Path $env:OCTO_DEVSTACK_STATE 'daemon.err.prev.log') | Should -Be 'previous stderr'
+    }
+
+    It 'names the Windows error when the daemon cannot be started on Windows' {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
+        Mock -ModuleName OctoDevStack Get-NetTCPConnection { }
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedWindows { throw 'CreateProcessW failed for C:\x\dotnet.exe: Access is denied (Win32 error 5)' }
+        $checkout = New-FakeCheckout 'startwin-failed' -Built
+
+        $json = Start-OctoDevStackDaemon -Path $checkout -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+        $json.data.success | Should -BeFalse
+        $json.data.started | Should -BeFalse
+        # Once, and without the log: nothing ran that could have written it.
+        $json.data.error | Should -Be ('Could not start dotnet ' + (Join-Path $checkout 'bin/Release/net10.0/octo-devstack.dll') + ': CreateProcessW failed for C:\x\dotnet.exe: Access is denied (Win32 error 5)')
+        Should -Invoke -ModuleName OctoDevStack Test-OctoDevStackProcessAlive -Times 0 -Because 'nothing was started to wait for'
+    }
+
+    It 'keeps the logs of the last real run as the previous logs across a failed start on Windows' {
+        Mock -ModuleName OctoDevStack Test-OctoDevStackWindows { $true }
+        Mock -ModuleName OctoDevStack Get-NetTCPConnection { }
+        # Nothing answers until the second start has started: health is asked once by the failed start (is one running?)
+        # and twice by the second (is one running? is it up?).
+        $script:HealthCalls = 0
+        Mock -ModuleName OctoDevStack Test-OctoDevStackHealth { $script:HealthCalls++; $script:HealthCalls -ge 3 }
+        # As the real function: the first start creates (or empties) both logs, CreateProcessW fails, and it deletes the
+        # logs it created before it throws; a log that existed before would stay, emptied. The second start succeeds.
+        $script:StartCalls = 0
+        Mock -ModuleName OctoDevStack Start-OctoDevStackDetachedWindows {
+            $script:StartCalls++
+            if ($script:StartCalls -eq 1) {
+                $created = @($LogPath, $ErrorLogPath | Where-Object { -not (Test-Path -LiteralPath $_) })
+                foreach ($path in @($LogPath, $ErrorLogPath)) { Set-Content -LiteralPath $path -Value $null -NoNewline }
+                foreach ($path in $created) { Remove-Item -LiteralPath $path }
+                throw 'CreateProcessW failed for C:\x\dotnet.exe (working directory C:\x): Access is denied (Win32 error 5)'
+            }
+            4242
+        }
+        $checkout = New-FakeCheckout 'startwin-prevlogs' -Built
+        $state = $env:OCTO_DEVSTACK_STATE
+        New-Item -ItemType Directory -Force -Path $state | Out-Null
+        Set-Content -Path (Join-Path $state 'daemon.log') -Value 'stdout of the last real run'
+        Set-Content -Path (Join-Path $state 'daemon.err.log') -Value 'stderr of the last real run'
+
+        $failed = Start-OctoDevStackDaemon -Path $checkout -Json -ErrorAction SilentlyContinue | ConvertFrom-Json
+        # The failed start moved the last real run's logs to the previous logs and left no logs of its own behind.
+        Test-Path -LiteralPath (Join-Path $state 'daemon.log') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $state 'daemon.err.log') | Should -BeFalse
+        $started = Start-OctoDevStackDaemon -Path $checkout -Json | ConvertFrom-Json
+
+        $failed.data.success | Should -BeFalse
+        $started.data.success | Should -BeTrue
+        $started.data.started | Should -BeTrue
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedWindows -Times 2 -Exactly
+        Get-Content (Join-Path $state 'daemon.prev.log') | Should -Be 'stdout of the last real run'
+        Get-Content (Join-Path $state 'daemon.err.prev.log') | Should -Be 'stderr of the last real run'
     }
 
     It 'refuses -Foreground with -Json before building or starting anything' {
@@ -445,7 +502,7 @@ Describe 'Start-OctoDevStackDaemon' {
         $json.data.error | Should -BeLike 'Another octo-devstack holds the state folder*daemon.lock*Nothing was started or built*OCTO_DEVSTACK_STATE*'
         Should -Invoke -ModuleName OctoDevStack Invoke-Build -Times 0
         Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedUnix -Times 0
-        Should -Invoke -ModuleName OctoDevStack Start-Process -Times 0
+        Should -Invoke -ModuleName OctoDevStack Start-OctoDevStackDetachedWindows -Times 0
     }
 }
 

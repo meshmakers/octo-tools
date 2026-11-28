@@ -212,8 +212,236 @@ function Start-OctoDevStackDetachedUnix([string]$WorkingDirectory, [string]$LogP
     return [int]$text
 }
 
+$script:DetachedProcessSource = @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace OctoDevStackNative_SOURCEHASH
+{
+    // CreateProcessW with an explicit list of the handles the child inherits (AB#9922).
+    public static class DetachedProcess
+    {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+            public short wShowWindow, cbReserved2;
+            public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct STARTUPINFOEX
+        {
+            public STARTUPINFO StartupInfo;
+            public IntPtr lpAttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess, hThread;
+            public int dwProcessId, dwThreadId;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool CreateProcessW(string lpApplicationName, StringBuilder lpCommandLine, IntPtr lpProcessAttributes,
+            IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+            ref STARTUPINFOEX lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr attribute, IntPtr lpValue,
+            IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        private const uint CREATE_NEW_CONSOLE = 0x00000010;
+        private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+        private const int STARTF_USESHOWWINDOW = 0x00000001;
+        private const int STARTF_USESTDHANDLES = 0x00000100;
+        private const short SW_HIDE = 0;
+        private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x00020002;
+
+        private static Win32Exception Failure(string call, string subject)
+        {
+            int code = Marshal.GetLastWin32Error();
+            return new Win32Exception(code, call + " failed for " + subject + ": " + new Win32Exception(code).Message + " (Win32 error " + code + ")");
+        }
+
+        // Starts applicationPath with commandLine in a hidden console of its own (as Start-Process -WindowStyle Hidden
+        // with redirection: CREATE_NEW_CONSOLE, STARTF_USESHOWWINDOW, SW_HIDE), standard output and error into the two
+        // files, NUL as standard input. These three handles are the only ones the child inherits; they are closed here
+        // afterwards, also on failure. The logs are created or truncated when they are opened, as Start-Process did (in
+        // the daemon's start an existing log is only truncated when Save-OctoDevStackPreviousLog could not move it, which
+        // it warns about). When nothing was started, the logs this call created are deleted again (the next start would
+        // keep them as the previous logs); a log that existed before stays, but emptied, and a delete that fails is named
+        // in the error. Returns the process id.
+        public static int Start(string applicationPath, string commandLine, string workingDirectory, string outputPath, string errorPath)
+        {
+            SafeFileHandle input = null, output = null, error = null;
+            IntPtr attributes = IntPtr.Zero, handles = IntPtr.Zero;
+            bool attributesReady = false, outputCreated = false, errorCreated = false;
+            var process = new PROCESS_INFORMATION();
+            try
+            {
+                // Shared for reading and writing, as Start-Process opens its redirection files.
+                const FileShare share = FileShare.ReadWrite | FileShare.Inheritable;
+                outputCreated = !File.Exists(outputPath);
+                output = File.OpenHandle(outputPath, FileMode.Create, FileAccess.Write, share, FileOptions.WriteThrough);
+                errorCreated = !File.Exists(errorPath);
+                error = File.OpenHandle(errorPath, FileMode.Create, FileAccess.Write, share, FileOptions.WriteThrough);
+                input = File.OpenHandle(@"\\.\NUL", FileMode.Open, FileAccess.Read, share);
+
+                IntPtr size = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                attributes = Marshal.AllocHGlobal(size);
+                if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref size)) throw Failure("InitializeProcThreadAttributeList", applicationPath);
+                attributesReady = true;
+                handles = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(handles, 0, input.DangerousGetHandle());
+                Marshal.WriteIntPtr(handles, IntPtr.Size, output.DangerousGetHandle());
+                Marshal.WriteIntPtr(handles, IntPtr.Size * 2, error.DangerousGetHandle());
+                if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (IntPtr)(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero))
+                    throw Failure("UpdateProcThreadAttribute", applicationPath);
+
+                var startup = new STARTUPINFOEX();
+                startup.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+                startup.StartupInfo.wShowWindow = SW_HIDE;
+                startup.StartupInfo.hStdInput = input.DangerousGetHandle();
+                startup.StartupInfo.hStdOutput = output.DangerousGetHandle();
+                startup.StartupInfo.hStdError = error.DangerousGetHandle();
+                startup.lpAttributeList = attributes;
+
+                // bInheritHandles TRUE with the handle list: only the listed handles are inherited. lpEnvironment null:
+                // the child gets this process's environment.
+                if (!CreateProcessW(applicationPath, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true,
+                        CREATE_NEW_CONSOLE | EXTENDED_STARTUPINFO_PRESENT, IntPtr.Zero, workingDirectory, ref startup, out process))
+                    throw Failure("CreateProcessW", applicationPath + " (working directory " + workingDirectory + ")");
+                return process.dwProcessId;
+            }
+            catch (Exception failure)
+            {
+                // Nothing runs: close the handles, then delete the logs this call created.
+                if (output != null) output.Dispose();
+                if (error != null) error.Dispose();
+                string left = null;
+                if (outputCreated && output != null) left = Delete(outputPath, left);
+                if (errorCreated && error != null) left = Delete(errorPath, left);
+                if (left == null) throw;
+                throw new IOException(failure.Message + "; " + left, failure);
+            }
+            finally
+            {
+                if (process.hThread != IntPtr.Zero) CloseHandle(process.hThread);
+                if (process.hProcess != IntPtr.Zero) CloseHandle(process.hProcess);
+                if (attributesReady) DeleteProcThreadAttributeList(attributes);
+                if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
+                if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
+                if (input != null) input.Dispose();
+                if (output != null) output.Dispose();
+                if (error != null) error.Dispose();
+            }
+        }
+
+        private static string Delete(string path, string left)
+        {
+            try { File.Delete(path); return left; }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+            {
+                string clause = "an empty " + path + " may remain (" + e.Message + ")";
+                return left == null ? clause : left + "; " + clause;
+            }
+        }
+    }
+}
+'@
+
+function ConvertTo-OctoDevStackWindowsArgument([string]$Argument) {
+    # One argument as CommandLineToArgvW and the C runtime split it again: quoted when empty or with blanks or quotes,
+    # a quote escaped, backslashes doubled only before a quote and at the end of a quoted argument.
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') { return $Argument }
+    $builder = [System.Text.StringBuilder]::new('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq [char]92) { $backslashes++; continue }
+        $count = if ($character -eq [char]34) { 2 * $backslashes + 1 } else { $backslashes }
+        [void]$builder.Append([char]92, $count)
+        $backslashes = 0
+        [void]$builder.Append($character)
+    }
+    [void]$builder.Append([char]92, 2 * $backslashes).Append('"')
+    return $builder.ToString()
+}
+
+function Join-OctoDevStackCommandLine([string]$FilePath, [string[]]$ArgumentList) {
+    # The program in quotes (as Start-Process writes it), then each argument quoted on its own.
+    $parts = @('"' + $FilePath + '"')
+    if ($null -ne $ArgumentList) { $parts += @($ArgumentList | ForEach-Object { ConvertTo-OctoDevStackWindowsArgument $_ }) }
+    return $parts -join ' '
+}
+
+function Get-OctoDevStackNativeTypeName([string]$Source) {
+    # Add-Type keeps a compiled type for the life of the process: the namespace carries a hash of the source, so an
+    # Import-Module -Force after a change of the source compiles the new one instead of using the old type.
+    $bytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($Source))
+    $hash = ([System.Convert]::ToHexString($bytes)).Substring(0, 12).ToLowerInvariant()
+    return "OctoDevStackNative_$hash.DetachedProcess"
+}
+
+function Resolve-OctoDevStackFileSystemPath([string]$Path) {
+    # A relative path against the PowerShell location, as Start-Process resolved it (the native call would take the
+    # process folder). Outside the file system (Push-Location Env:) a relative path has no folder: refused.
+    $provider = $null
+    $drive = $null
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref]$provider, [ref]$drive)
+    if ($provider.Name -ne 'FileSystem') { throw "$Path is not a file system path (provider $($provider.Name)); give a full path or change to a folder first." }
+    return $resolved
+}
+
+function Start-OctoDevStackDetachedWindows([string]$WorkingDirectory, [string]$LogPath, [string]$ErrorLogPath, [string]$FilePath, [string[]]$ArgumentList) {
+    # Windows: starts the program (resolved from PATH like Start-Process does) in a hidden console of its own, standard
+    # output into LogPath, standard error into ErrorLogPath; returns the pid. Start-Process -Redirect* would create it
+    # with handle inheritance, passing every inheritable handle of this pwsh on - its standard handles and the handles
+    # it inherited from its own callers. When a caller pipes or captures the output, those are its pipe ends, and the
+    # daemon kept them open until it ended (AB#9922). CreateProcessW with a handle list passes on only the two log files
+    # and NUL as input. A failed start throws with the Windows error.
+    $program = (Get-Command -Name $FilePath -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $typeName = Get-OctoDevStackNativeTypeName -Source $script:DetachedProcessSource
+    $type = $typeName -as [type]
+    if (-not $type) {
+        $namespace = $typeName.Substring(0, $typeName.LastIndexOf('.'))
+        Add-Type -TypeDefinition ($script:DetachedProcessSource -replace 'OctoDevStackNative_SOURCEHASH', $namespace)
+        $type = $typeName -as [type]
+    }
+    $workingPath = Resolve-OctoDevStackFileSystemPath $WorkingDirectory
+    $outputPath = Resolve-OctoDevStackFileSystemPath $LogPath
+    $errorPath = Resolve-OctoDevStackFileSystemPath $ErrorLogPath
+    $commandLine = Join-OctoDevStackCommandLine -FilePath $program -ArgumentList $ArgumentList
+    try {
+        return $type::Start($program, $commandLine, $workingPath, $outputPath, $errorPath)
+    }
+    catch {
+        throw $(if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message })
+    }
+}
+
 function Save-OctoDevStackPreviousLog([string]$LogPath) {
-    # Windows: Start-Process cannot append, so the previous run's log is kept as <name>.prev.log.
+    # Windows: Start-OctoDevStackDetachedWindows creates the log anew, so the previous run's log is kept as <name>.prev.log.
     if (-not (Test-Path -LiteralPath $LogPath)) { return }
     $previous = [IO.Path]::ChangeExtension($LogPath, '.prev.log')
     try { Move-Item -LiteralPath $LogPath -Destination $previous -Force -ErrorAction Stop }
@@ -287,7 +515,9 @@ function Start-OctoDevStackDaemon {
         - No build: built with Invoke-Build -configuration Release.
         - Background start: macOS/Linux in its own process group (neither Ctrl+C nor closing the window stops
           it), output appended to <state>/daemon.log; Windows: hidden window, the previous log kept as
-          daemon.prev.log. Then /health is polled for up to -HealthTimeoutSeconds.
+          daemon.prev.log, and the daemon inherits no handle of this pwsh but its two log files (and NUL as
+          input), so a caller that pipes or captures the output, also through further processes, gets its end
+          when the cmdlet returns (AB#9922). Then /health is polled for up to -HealthTimeoutSeconds.
         - -Foreground: runs in this console.
         Claude Code: `claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:<Port>/mcp`.
 
@@ -567,14 +797,17 @@ function Start-OctoDevStackDaemon {
         }
 
         if (-not (Test-Path -LiteralPath $statePath)) { New-Item -ItemType Directory -Force -Path $statePath | Out-Null }
+        $startError = $null
         if (Test-OctoDevStackWindows) {
             $errorLogPath = Join-Path $statePath 'daemon.err.log'
             Save-OctoDevStackPreviousLog -LogPath $logPath
             Save-OctoDevStackPreviousLog -LogPath $errorLogPath
-            # Start-Process joins the arguments with spaces and does not quote them: a path with spaces needs quotes.
-            $process = Start-Process -FilePath 'dotnet' -ArgumentList @("`"$dll`"", '--url', $url) -WorkingDirectory $repoPath `
-                -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath -PassThru
-            $processId = if ($process) { [int]$process.Id } else { $null }
+            # The function quotes each argument itself (a path with blanks).
+            try {
+                $processId = Start-OctoDevStackDetachedWindows -WorkingDirectory $repoPath -LogPath $logPath -ErrorLogPath $errorLogPath `
+                    -FilePath 'dotnet' -ArgumentList @($dll, '--url', $url)
+            }
+            catch { $processId = $null; $startError = $_.Exception.Message }
         }
         else {
             $processId = Start-OctoDevStackDetachedUnix -WorkingDirectory $repoPath -LogPath $logPath -Dll $dll -Url $url
@@ -584,7 +817,8 @@ function Start-OctoDevStackDaemon {
         $env:OCTO_TOOLS_PATH = $previousToolsPath
     }
     if (-not $processId) {
-        Write-OctoDevStackResult $command $Json $false $data "Could not start dotnet $dll; see $logPath."
+        $message = if ($startError) { "Could not start dotnet ${dll}: $startError" } else { "Could not start dotnet $dll; see $logPath." }
+        Write-OctoDevStackResult $command $Json $false $data $message
         return
     }
     $data.pid = $processId

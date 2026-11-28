@@ -5,7 +5,8 @@ namespace Meshmakers.Octo.DevStack.Common;
 
 /// <summary>
 ///     Windows (AB#9377): Start-OctoDevStackDaemon starts the daemon with its stdout and stderr redirected into
-///     daemon.log / daemon.err.log, and Start-Process makes those handles inheritable. CreateProcess hands every
+///     daemon.log / daemon.err.log, and Start-OctoDevStackDetachedWindows (CreateProcessW, AB#9922) opens those handles
+///     inheritable to hand them to the daemon. CreateProcess hands every
 ///     inheritable handle to a child (.NET always passes bInheritHandles = true), so every service, build and probe the
 ///     daemon started held the daemon's log open for its whole life: the next start could not keep it as daemon.prev.log.
 ///     The daemon clears the inherit flag of its own output handles once at its start. No child needs them: every child

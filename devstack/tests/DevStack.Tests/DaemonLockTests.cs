@@ -71,7 +71,7 @@ public sealed class DaemonLockTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0x1u, true)]   // FILE_TYPE_DISK: daemon.log of Start-Process
+    [InlineData(0x1u, true)]   // FILE_TYPE_DISK: daemon.log of Start-OctoDevStackDetachedWindows
     [InlineData(0x3u, true)]   // FILE_TYPE_PIPE
     [InlineData(0x2u, false)]  // FILE_TYPE_CHAR: a console stays as it is
     [InlineData(0x0u, false)]  // FILE_TYPE_UNKNOWN
