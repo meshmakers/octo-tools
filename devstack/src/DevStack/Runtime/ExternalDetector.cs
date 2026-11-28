@@ -61,7 +61,21 @@ public sealed record ExternalSnapshot(IReadOnlyList<ExternalService> Services, I
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Warning { get; init; }
+
+    /// <summary>
+    ///     The processes the scan left out because their analysis failed (AB#9924); every other process is reported as usual,
+    ///     so this is no <see cref="Warning"/>. Null when none was left out.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ExternalSkipped>? Skipped { get; init; }
 }
+
+/// <summary>
+///     A process the scan left out: its pid, the file name of its program (the image name the OS reports, else the first word
+///     of its command line) and the type of the exception. Never its command
+///     line, an argument, its location or the exception message (a message can quote its input).
+/// </summary>
+public sealed record ExternalSkipped(int Pid, string Executable, string ExceptionType);
 
 /// <summary>
 ///     Finds the stack processes octo-devstack did not start and works out where they run from and who started them:
@@ -74,7 +88,8 @@ public sealed partial class ExternalDetector(ConfigStore store)
     private readonly Lock _lock = new();
     private (DateTime At, ExternalSnapshot Snapshot)? _cache;
 
-    public sealed record PsRow(int Pid, int Ppid, TimeSpan Elapsed, string Command);
+    /// <param name="Image">The image (program file) name the OS reports with the process (Windows); null where unknown.</param>
+    public sealed record PsRow(int Pid, int Ppid, TimeSpan Elapsed, string Command, string? Image = null);
 
     /// <summary>The known stack slots, to name the slot of an external process by its port offset (set by the supervisor).</summary>
     public Func<IReadOnlyList<SlotInfo>>? KnownSlots { get; set; }
@@ -163,7 +178,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
 
     /// <summary>
     ///     Windows: a Toolhelp snapshot for pids, parents and creation times, the command lines of the processes the scan
-    ///     looks at, GetExtendedTcpTable for the listeners. A working directory and the stdout target are not readable there; the location of a process is taken
+    ///     looks at (NUL characters read as blanks, <see cref="CommandLines"/>), GetExtendedTcpTable for the listeners. A working directory and the stdout target are not readable there; the location of a process is taken
     ///     from its command line or its loaded modules instead (<see cref="LocationFromCommandLine"/>). A parent created after
     ///     its child is a reused pid: the child gets no parent (an orphan). A session's working directory stays unknown.
     /// </summary>
@@ -186,13 +201,14 @@ public sealed partial class ExternalDetector(ConfigStore store)
             }
         }
 
-        var commandLines = wanted.ToDictionary(pid => pid, WindowsProcesses.CommandLine);
+        var commandLines = CommandLines(wanted, WindowsProcesses.CommandLine);
         var now = DateTimeOffset.Now;
         var processes = rows.Select(r => new PsRow(
             r.Pid,
             ParentOf(r),
             r.CreatedAt is { } created && created <= now ? now - created : TimeSpan.Zero,
-            commandLines.GetValueOrDefault(r.Pid) ?? r.Name)).ToList();
+            commandLines.GetValueOrDefault(r.Pid) ?? r.Name,
+            r.Name)).ToList(); // AB#9924: the image name names a process the scan leaves out, never parsed from its command line
         // Distinct: a pid asked for twice (a candidate that is also a session's ancestor, AB#9556) is observed once.
         return new Observation(processes, listening, pids => pids.Distinct()
             .Select(pid => (Pid: pid, Location: commandLines.GetValueOrDefault(pid) is { } commandLine && !IsClaude(commandLine)
@@ -231,6 +247,20 @@ public sealed partial class ExternalDetector(ConfigStore store)
         var program = args.FirstOrDefault();
         return program != null && Path.IsPathFullyQualified(program) ? Path.GetDirectoryName(program) : null;
     }
+
+    /// <summary>
+    ///     A Windows command line as the scan reads it (AB#9924): a program that splits its own command line in place leaves NUL
+    ///     characters where the blanks were, so they are read as blanks - the arguments are separate again for the secret masks
+    ///     and for <see cref="LocationFromCommandLine"/>.
+    /// </summary>
+    internal static string? NulsAsBlanks(string? commandLine) => commandLine?.Replace('\0', ' ');
+
+    /// <summary>
+    ///     The command lines of <paramref name="pids"/> as the Windows scan reads them: through <paramref name="read"/>
+    ///     (<see cref="WindowsProcesses.CommandLine"/>), NUL characters as blanks (<see cref="NulsAsBlanks"/>); null where unreadable.
+    /// </summary>
+    internal static Dictionary<int, string?> CommandLines(IEnumerable<int> pids, Func<int, string?> read) =>
+        pids.ToDictionary(pid => pid, pid => NulsAsBlanks(read(pid)));
 
     /// <summary>The path of a loaded module of a process (an IL assembly appears there when the loader mapped it), null if not readable.</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -306,13 +336,56 @@ public sealed partial class ExternalDetector(ConfigStore store)
             }
         }
 
+        var skipped = new List<ExternalSkipped>();
         var files = candidates.Count == 0
             ? new Dictionary<int, (string? Cwd, string? Stdout)>()
-            : observation.Files(candidates.Keys.Concat(sessionPids).Distinct().ToList()); // a candidate may be a session's ancestor too (AB#9556)
+            : ObserveFiles(observation, candidates, sessionPids, byPid, skipped);
 
         var services = new List<ExternalService>();
         var groups = new Dictionary<string, (ExternalOrigin Origin, List<ExternalService> Members)>();
         foreach (var (pid, dllService) in candidates)
+        {
+            (ExternalService Service, ExternalOrigin Origin)? found;
+            try
+            {
+                found = AnalyseCandidate(pid, dllService);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // AB#9924: one process that cannot be analysed is left out; the others are reported.
+                skipped.Add(Skip(byPid[pid], e));
+                continue;
+            }
+
+            if (found is not { } result)
+            {
+                continue; // a listening process that is no stack service (IDE, other tools)
+            }
+
+            var (service, origin) = result;
+            services.Add(service);
+            if (!groups.TryGetValue(service.Group, out var group))
+            {
+                groups[service.Group] = group = (origin, []);
+            }
+
+            group.Members.Add(service);
+        }
+
+        var groupList = groups.Select(g => new ExternalGroup(
+            g.Key,
+            g.Value.Origin,
+            g.Value.Members.Select(s => s.Checkout).FirstOrDefault(c => c != null),
+            g.Value.Members.Select(s => s.Configuration).FirstOrDefault(c => c != null),
+            g.Value.Members.Select(s => s.Service).Distinct().ToList(),
+            g.Value.Members.Min(s => s.StartedAt))).OrderByDescending(g => g.Services.Count).ToList();
+
+        return new ExternalSnapshot(services.OrderBy(s => s.Service).ToList(), groupList)
+        {
+            Skipped = skipped.Count == 0 ? null : skipped.OrderBy(s => s.Pid).ToList()
+        };
+
+        (ExternalService Service, ExternalOrigin Origin)? AnalyseCandidate(int pid, string? dllService)
         {
             var row = byPid[pid];
             var cwd = files.GetValueOrDefault(pid).Cwd;
@@ -326,7 +399,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
                 var nonDll = config.Services.Where(s => !dllServices.Any(d => d.Name == s.Key)).ToList();
                 var candidatesByPort = nonDll.Where(s => s.Value.Ports.Any(held.Contains)).Concat(nonDll).Distinct();
                 repoPath = dllService != null
-                    ? FindRepoFolder(cwd, config.Services[dllService].Repo, root)
+                    ? RepoFolderOrUnknown(cwd, config.Services[dllService].Repo, root)
                     : candidatesByPort
                         .Select(s => (s.Key, Repo: FindRepoFolder(cwd, s.Value.Repo, root)))
                         .Where(x => x.Repo != null)
@@ -340,7 +413,7 @@ public sealed partial class ExternalDetector(ConfigStore store)
 
             if (name == null || (dllService == null && repoPath == null))
             {
-                continue; // a listening process that is no stack service (IDE, other tools)
+                return null;
             }
 
             var origin = DescribeOrigin(pid, byPid, files);
@@ -364,24 +437,103 @@ public sealed partial class ExternalDetector(ConfigStore store)
             {
                 SlotHint = SlotHint(serviceConfig, ports, slots)
             };
-            services.Add(service);
-            if (!groups.TryGetValue(key, out var group))
+            return (service, origin);
+        }
+    }
+
+    /// <summary>
+    ///     The repository folder of a process that runs a service .dll, null when it cannot be determined (AB#9924): a failing
+    ///     lookup (a worktree's .git or HEAD file being rewritten, an unreadable folder) makes its location unknown, it never
+    ///     drops the service - it is reported without a repository path.
+    /// </summary>
+    private static string? RepoFolderOrUnknown(string cwd, string repo, string root)
+    {
+        try
+        {
+            return FindRepoFolder(cwd, repo, root);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    ///     Where the candidates and the sessions run (<see cref="Observation.Files"/>). When reading them all at once fails,
+    ///     each pid is read on its own (AB#9924): a listener without a service .dll whose read fails is left out and named in
+    ///     <paramref name="skipped"/>; a service .dll whose read fails stays a candidate with an unknown location; a session
+    ///     whose read fails keeps an unknown working directory. A failing read never fails the scan.
+    /// </summary>
+    private static Dictionary<int, (string? Cwd, string? Stdout)> ObserveFiles(Observation observation, Dictionary<int, string?> candidates,
+        IReadOnlySet<int> sessionPids, IReadOnlyDictionary<int, PsRow> byPid, List<ExternalSkipped> skipped)
+    {
+        var pids = candidates.Keys.Concat(sessionPids).Distinct().ToList(); // a candidate may be a session's ancestor too (AB#9556)
+        try
+        {
+            return observation.Files(pids);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            var files = new Dictionary<int, (string? Cwd, string? Stdout)>();
+            foreach (var pid in pids)
             {
-                groups[key] = group = (origin, []);
+                try
+                {
+                    foreach (var (key, value) in observation.Files([pid]))
+                    {
+                        files[key] = value;
+                    }
+                }
+                catch (Exception one) when (one is not OperationCanceledException)
+                {
+                    if (candidates.TryGetValue(pid, out var dllService) && dllService == null)
+                    {
+                        candidates.Remove(pid);
+                        skipped.Add(Skip(byPid[pid], one));
+                    }
+                }
             }
 
-            group.Members.Add(service);
+            return files;
         }
+    }
 
-        var groupList = groups.Select(g => new ExternalGroup(
-            g.Key,
-            g.Value.Origin,
-            g.Value.Members.Select(s => s.Checkout).FirstOrDefault(c => c != null),
-            g.Value.Members.Select(s => s.Configuration).FirstOrDefault(c => c != null),
-            g.Value.Members.Select(s => s.Service).Distinct().ToList(),
-            g.Value.Members.Min(s => s.StartedAt))).OrderByDescending(g => g.Services.Count).ToList();
+    /// <summary>
+    ///     The note for a process left out: pid, the file name of its program and the exception type - nothing of its arguments.
+    ///     The program is the image name the OS reported (Windows), else read from the command line (<see cref="ExecutableOf"/>).
+    /// </summary>
+    internal static ExternalSkipped Skip(PsRow row, Exception e) =>
+        new(row.Pid, row.Image is { Length: > 0 } image ? FileNameOf(image) : ExecutableOf(row.Command), e.GetType().Name);
 
-        return new ExternalSnapshot(services.OrderBy(s => s.Service).ToList(), groupList);
+    /// <summary>
+    ///     The sentence that names the processes a scan left out (a job plan's warning, a capture's note): pid, executable and
+    ///     exception type of each, nothing else of the process.
+    /// </summary>
+    internal static string LeftOut(IEnumerable<ExternalSkipped> skipped) =>
+        $"The scan of processes outside octo-devstack left out {string.Join(", ", skipped.Select(s => $"pid {s.Pid} ({s.Executable}, {s.ExceptionType})"))}.";
+
+    /// <summary>
+    ///     The program of a command line without the OS's image name: one leading quote off, up to the first whitespace, quote
+    ///     or control character (a NUL can join the program and an argument), its file name. Never a part of an argument, also
+    ///     for an unclosed quote or a quote closed without a blank; a program path with a blank gives its first word.
+    /// </summary>
+    internal static string ExecutableOf(string command)
+    {
+        var rest = command.StartsWith('"') ? command[1..] : command;
+        var end = rest.AsSpan().IndexOfAny(ProgramEnd);
+        return FileNameOf(end < 0 ? rest : rest[..end]);
+    }
+
+    /// <summary>Where the program of a command line ends: a blank, a quote or any control character (tab, CR, LF and NUL among them).</summary>
+    private static readonly System.Buffers.SearchValues<char> ProgramEnd =
+        System.Buffers.SearchValues.Create(" \"" + new string(Enumerable.Range(0, 0x20).Select(c => (char)c).ToArray()));
+
+    /// <summary>The part after the last / or \, cut at the first control character (a NUL can join a program and an argument).</summary>
+    private static string FileNameOf(string path)
+    {
+        var name = path[(path.LastIndexOfAny(['\\', '/']) + 1)..];
+        var control = name.AsSpan().IndexOfAnyInRange('\0', '\u001f');
+        return control < 0 ? name : name[..control];
     }
 
     private static async Task<IReadOnlyList<ExternalService>> ProbeAsync(IReadOnlyList<ExternalService> services) =>
@@ -485,7 +637,17 @@ public sealed partial class ExternalDetector(ConfigStore store)
     /// <summary>The folder of <paramref name="repo"/> that contains <paramref name="cwd"/>: the repo itself or a worktree of it.</summary>
     internal static string? FindRepoFolder(string cwd, string repo, string root)
     {
-        var dir = new DirectoryInfo(cwd);
+        DirectoryInfo? dir;
+        try
+        {
+            dir = new DirectoryInfo(cwd);
+        }
+        catch (ArgumentException)
+        {
+            // AB#9924: no valid path (a NUL character from a command line, an empty string) lies in no repository.
+            return null;
+        }
+
         while (dir != null && dir.FullName.Length >= root.Length)
         {
             if (dir.Name == repo && Directory.Exists(Path.Combine(dir.FullName, ".git")))

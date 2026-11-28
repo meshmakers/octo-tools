@@ -157,6 +157,33 @@ public sealed class ProfileToolsTests : IDisposable
         await supervisor.StopServicesAsync("me", null, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task Capture_of_an_external_stack_names_the_processes_the_scan_left_out()
+    {
+        // AB#9924: a listener the scan could not analyse is left out of it, so the captured profile may lack its service.
+        var (_, store, _) = Create();
+        var origin = new ExternalOrigin("start-octo", "Start-Octo", 7, null, "main", null, true, null, null);
+        var web = new ExternalService("web", 42, [], "pwsh -NoProfile -NonInteractive -Command \"Start-Sleep 30\"", null, null, null, null, null, null,
+            false, null, null, "start-octo:7");
+        var detector = new ExternalDetector(store)
+        {
+            ScanOverride = (_, _, _) => new ExternalSnapshot([web], [new ExternalGroup("start-octo:7", origin, null, null, ["web"], null)])
+            {
+                Skipped = [new ExternalSkipped(901, "probe.exe", "IOException"), new ExternalSkipped(22832, "zenDBSrv.exe", "ArgumentException")]
+            }
+        };
+        var supervisor = new StackSupervisor(store, new LeaseManager(), new StateStore(new DevStackPaths(_checkout.StateDirectory)),
+            NullLogger<StackSupervisor>.Instance, external: detector);
+        var tools = new ProfileTools(store, supervisor, NullLogger<ProfileTools>.Instance);
+
+        var saved = await tools.Save("me", "outside", capture: "start-octo:7");
+
+        store.Load().Profiles["outside"].Services.Should().Equal("web");
+        saved.Notes.Should().ContainSingle(n => n.StartsWith("The scan of processes outside octo-devstack left out", StringComparison.Ordinal))
+            .Which.Should().Be("The scan of processes outside octo-devstack left out pid 901 (probe.exe, IOException), pid 22832 (zenDBSrv.exe, ArgumentException). " +
+                               "The profile may lack a service one of them runs.");
+    }
+
     [Theory]
     [InlineData("OCTO_LICENSE__KEY")]
     [InlineData("Db__ConnectionString")]

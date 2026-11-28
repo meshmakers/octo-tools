@@ -346,6 +346,307 @@ public class WindowsSupportTests
         (await supervisor.StatusAsync()).Masked().External.Warning.Should().StartWith("Processes outside octo-devstack are unknown");
     }
 
+    /// <summary>A lane with the identity service running from its bin folder outside the daemon (pid 500, port 5003).</summary>
+    private static (DevStackConfig Config, string Repo, string Bin, ExternalDetector.PsRow Row) IdentityOutsideTheDaemon(TestCheckout checkout)
+    {
+        var repo = checkout.Repo("octo-identity-services");
+        Directory.CreateDirectory(Path.Combine(repo, ".git"));
+        var bin = Path.Combine(repo, "bin", "DebugL", "net10.0");
+        Directory.CreateDirectory(bin);
+        var config = ConfigStore.Parse(ConfigStore.ReadDefaultYaml());
+        config.RootPath = checkout.Root;
+        var dll = config.Services["identityServices"].Args.First(a => a.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
+        return (config, repo, bin,
+            new ExternalDetector.PsRow(500, 0, TimeSpan.FromMinutes(3), WindowsCommandLine.Join("dotnet", [Path.Combine(bin, dll), "--urls=https://0.0.0.0:5003"])));
+    }
+
+    [Fact]
+    public void A_listener_whose_location_carries_a_NUL_is_no_stack_service_and_the_others_are_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, repo, _, identity) = IdentityOutsideTheDaemon(checkout);
+        // AB#9924: zenon's zenDBSrv.exe listens on a port and its command line carries NUL characters (Windows counts them in its length).
+        var zenon = new ExternalDetector.PsRow(900, 0, TimeSpan.FromMinutes(9),
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "zen\0on", "zenDBSrv.exe"), ["-service"]) + "\0");
+        var commands = new Dictionary<int, string> { [500] = identity.Command, [900] = zenon.Command };
+        Visible(ExternalDetector.LocationFromCommandLine(zenon.Command, _ => null)).Should().Be(Visible(Path.Combine(checkout.Root, "zen\0on")), "the location keeps the NUL");
+        var observation = new ExternalDetector.Observation([identity, zenon], new Dictionary<int, List<int>> { [500] = [5003], [900] = [1103] },
+            pids => pids.ToDictionary(p => p, p => (ExternalDetector.LocationFromCommandLine(commands[p], _ => null), (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Select(s => s.Service).Should().Equal(["identityServices"], "a location that is no valid path lies in no repository");
+        Visible(snapshot.Services[0].RepoPath).Should().Be(repo);
+        Visible(snapshot.Warning).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be("null", "nothing failed");
+    }
+
+    [Fact]
+    public void A_candidate_whose_analysis_throws_is_left_out_with_pid_executable_and_exception_type_and_the_others_are_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
+        // A folder whose .git file names a gitdir the path API rejects: reading it throws while the listener's repo is searched.
+        var odd = checkout.Repo("odd");
+        File.WriteAllText(Path.Combine(odd, ".git"), "gitdir: wt\0x\n");
+        const string marker = "marker-ab9924";
+        var probe = new ExternalDetector.PsRow(901, 0, TimeSpan.FromMinutes(2),
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker, "--token=" + marker]), "probe.exe");
+        var observation = new ExternalDetector.Observation([identity, probe], new Dictionary<int, List<int>> { [500] = [5003], [901] = [6400] },
+            pids => pids.ToDictionary(p => p, p => ((string?)(p == 500 ? bin : odd), (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Should().ContainSingle().Which.Service.Should().Be("identityServices");
+        Visible(snapshot.Warning).Should().BeNull("the other processes are known");
+        Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(901, "probe.exe", "ArgumentException") }));
+        var json = System.Text.Json.JsonSerializer.Serialize(snapshot, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        json.Should().NotContain(marker, "the note carries no argument of the command line").And.NotContain("gitdir").And.NotContain("Null character");
+    }
+
+    [Fact]
+    public void The_executable_of_a_skipped_process_is_its_program_file_name_without_arguments()
+    {
+        Visible(ExternalDetector.ExecutableOf("\"C:\\zen\0on\\zenDBSrv.exe\" -service\0")).Should().Be("zen",
+            "a control character ends the program: whether it joins two parts of the path or the program and an argument cannot be told");
+        Visible(ExternalDetector.ExecutableOf("C:\\tools\\probe.exe\0--secret")).Should().Be("probe.exe", "a NUL joins the program and an argument into one token");
+        ExternalDetector.ExecutableOf("/usr/bin/node /x/server.js --token=abc").Should().Be("node");
+        ExternalDetector.ExecutableOf("").Should().BeEmpty();
+    }
+
+    /// <summary>Command lines whose program, read as one token, would carry a part of an argument (AB#9924).</summary>
+    internal static readonly string[] MarkerCommandLines =
+    [
+        "\"C:\\x\\prog.exe --token=MARKER-AB9924", // unclosed quote
+        "\"C:\\x\\prog.exe\"--token=MARKER-AB9924", // closing quote without a blank
+        "\"C:\\x\\prog.exe --url=https://host/MARKER-AB9924", // unclosed quote, a separator inside the argument
+        "\"C:\\x\\prog.exe --path=C:\\s\\MARKER-AB9924",
+        "C:\\x\\prog.exe\0--path=C:\\s\\MARKER-AB9924" // a NUL joins the program and an argument that holds a separator
+    ];
+
+    public static TheoryData<string> CommandLinesWithAMarkerArgument => new(MarkerCommandLines);
+
+    [Theory]
+    [MemberData(nameof(CommandLinesWithAMarkerArgument))]
+    public void A_process_left_out_is_named_without_any_part_of_its_arguments(string command)
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
+        var observation = new ExternalDetector.Observation([identity, new ExternalDetector.PsRow(903, 0, TimeSpan.FromMinutes(2), command)],
+            new Dictionary<int, List<int>> { [500] = [5003], [903] = [6400] },
+            pids => pids.Contains(903) ? throw new InvalidOperationException("unreadable") : pids.ToDictionary(p => p, _ => ((string?)bin, (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(903, "prog.exe", "InvalidOperationException") }));
+        Shown(snapshot.Skipped).Should().NotContain("MARKER");
+    }
+
+    [Fact]
+    public void A_process_left_out_is_named_by_the_image_name_the_OS_reports_and_else_by_its_program_without_arguments()
+    {
+        // Windows reports the image name with the process snapshot; a program path with a blank is read from the command
+        // line only up to the blank.
+        const string command = "\"C:\\Program Files\\COPA-DATA\\zenDBSrv.exe\" -service MARKER-AB9924";
+
+        ExternalDetector.Skip(new ExternalDetector.PsRow(1103, 0, TimeSpan.Zero, command, "zenDBSrv.exe"), new ArgumentException("x"))
+            .Should().Be(new ExternalSkipped(1103, "zenDBSrv.exe", "ArgumentException"));
+        ExternalDetector.Skip(new ExternalDetector.PsRow(1103, 0, TimeSpan.Zero, command), new ArgumentException("x")).Executable
+            .Should().Be("Program", "without an image name the first word stands for the program, never an argument");
+    }
+
+    [Fact]
+    public void A_candidate_whose_location_cannot_be_read_is_left_out_and_the_others_are_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, bin, identity) = IdentityOutsideTheDaemon(checkout);
+        const string marker = "marker-ab9924";
+        var probe = new ExternalDetector.PsRow(902, 0, TimeSpan.FromMinutes(2),
+            WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), ["--" + marker]), "probe.exe");
+        var observation = new ExternalDetector.Observation([identity, probe], new Dictionary<int, List<int>> { [500] = [5003], [902] = [6400] },
+            pids => pids.Contains(902)
+                ? throw new InvalidOperationException($"no location for --{marker}")
+                : pids.ToDictionary(p => p, _ => ((string?)bin, (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Should().ContainSingle().Which.Service.Should().Be("identityServices");
+        snapshot.Warning.Should().BeNull();
+        snapshot.Skipped.Should().ContainSingle().Which.Should().Be(new ExternalSkipped(902, "probe.exe", "InvalidOperationException"));
+        System.Text.Json.JsonSerializer.Serialize(snapshot).Should().NotContain(marker);
+    }
+
+    [Fact]
+    public void A_service_dll_whose_repository_lookup_throws_is_reported_without_a_repository_path()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
+        // AB#9924: its location lies in a folder whose .git file names a gitdir the path API rejects - the lookup throws.
+        var odd = checkout.Repo("odd");
+        File.WriteAllText(Path.Combine(odd, ".git"), "gitdir: wt\0x\n");
+        var observation = new ExternalDetector.Observation([identity], new Dictionary<int, List<int>>(),
+            pids => pids.ToDictionary(p => p, _ => ((string?)odd, (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        var service = snapshot.Services.Should().ContainSingle("a service .dll is never left out because its location is unknown").Subject;
+        service.Service.Should().Be("identityServices");
+        Visible(service.RepoPath).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be("null");
+        Visible(snapshot.Warning).Should().BeNull();
+    }
+
+    [Fact]
+    public void A_service_dll_whose_single_location_read_throws_is_reported_without_a_location()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
+        // AB#9924: the batch read fails, the identity service's own read fails too, the listener's read succeeds.
+        var listener = new ExternalDetector.PsRow(904, 0, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []));
+        var observation = new ExternalDetector.Observation([identity, listener], new Dictionary<int, List<int>> { [904] = [6400] },
+            pids => pids.Contains(500)
+                ? throw new IOException("unreadable")
+                : pids.ToDictionary(p => p, _ => ((string?)Path.Combine(checkout.Root, "tools"), (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        var service = snapshot.Services.Should().ContainSingle("the listener lies in no repository; the service .dll stays").Subject;
+        service.Service.Should().Be("identityServices");
+        service.WorkingDirectory.Should().BeNull();
+        service.RepoPath.Should().BeNull();
+        snapshot.Skipped.Should().BeNull();
+        snapshot.Warning.Should().BeNull();
+    }
+
+    [Fact]
+    public void With_a_location_reader_that_throws_for_every_pid_each_listener_is_left_out_and_a_service_dll_is_reported_without_a_location()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
+        var listener = new ExternalDetector.PsRow(905, 0, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []),
+            "probe.exe");
+        // AB#9924: neither the batch read nor one single read succeeds; each process is handled on its own, the scan does not fail.
+        var observation = new ExternalDetector.Observation([identity, listener], new Dictionary<int, List<int>> { [905] = [6400] },
+            _ => throw new InvalidOperationException("broken reader"));
+        // ScanAsync turns only an exception of Analyse into the scan-level warning: Analyse must not throw.
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        Visible(snapshot.Warning).Should().BeNull("a failing location read never fails the scan, also when every read fails");
+        snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
+        Visible(snapshot.Services[0].WorkingDirectory).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(905, "probe.exe", "InvalidOperationException") }));
+    }
+
+    [Fact]
+    public void A_service_dll_under_a_session_whose_own_location_read_throws_is_reported_without_a_location()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
+        // AB#9924: the service and a listener run under a Claude Code session; the batch read and their own reads fail, the
+        // session's read succeeds.
+        var session = new ExternalDetector.PsRow(800, 0, TimeSpan.FromMinutes(30), "claude", "claude.exe");
+        var listener = new ExternalDetector.PsRow(906, 800, TimeSpan.FromMinutes(2), WindowsCommandLine.Join(Path.Combine(checkout.Root, "tools", "probe.exe"), []),
+            "probe.exe");
+        var observation = new ExternalDetector.Observation([session, identity with { Ppid = 800 }, listener],
+            new Dictionary<int, List<int>> { [906] = [6400] },
+            pids => pids.Any(p => p != 800)
+                ? throw new InvalidOperationException("unreadable")
+                : pids.ToDictionary(p => p, _ => ((string?)null, (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
+        snapshot.Services[0].Group.Should().Be("session:800", "the session that started it is still found");
+        Visible(snapshot.Services[0].WorkingDirectory).Should().BeNull();
+        Visible(snapshot.Services[0].RepoPath).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be(Shown(new[] { new ExternalSkipped(906, "probe.exe", "InvalidOperationException") }));
+        Visible(snapshot.Warning).Should().BeNull();
+    }
+
+    /// <summary>
+    ///     A NUL shown as \0: the VSTest adapter drops the result of a failed test whose message holds a NUL character (the
+    ///     test then counts nowhere), so an assertion on a value that may carry one compares this form.
+    /// </summary>
+    internal static string? Visible(string? value) => value?.Replace("\0", "\\0");
+
+    /// <summary>A value as JSON, which writes a NUL as \u0000: the NUL-safe form of a record or a list for an assertion.</summary>
+    internal static string Shown<T>(T value) => System.Text.Json.JsonSerializer.Serialize(value);
+
+    [Fact]
+    public void NUL_characters_of_a_Windows_command_line_are_read_as_blanks()
+    {
+        Visible(ExternalDetector.NulsAsBlanks("C:\\x\\prog.exe\0--a\0b\0")).Should().Be("C:\\x\\prog.exe --a b ");
+        Visible(ExternalDetector.NulsAsBlanks("prog.exe --a")).Should().Be("prog.exe --a");
+        ExternalDetector.NulsAsBlanks(null).Should().BeNull();
+    }
+
+    [Fact]
+    public void The_Windows_scan_reads_the_command_lines_of_the_wanted_pids_with_NULs_as_blanks()
+    {
+        // AB#9924: the reader stands for WindowsProcesses.CommandLine; a program that split its command line in place left NULs.
+        var read = new List<int>();
+        var commandLines = ExternalDetector.CommandLines([7, 8], pid =>
+        {
+            read.Add(pid);
+            return pid == 7 ? "C:\\x\\prog.exe\0--a\0b" : null;
+        });
+
+        read.Should().Equal(7, 8);
+        commandLines.Keys.Should().BeEquivalentTo([7, 8]);
+        Visible(commandLines[7]).Should().Be("C:\\x\\prog.exe --a b");
+        commandLines[8].Should().BeNull("an unreadable command line stays unknown");
+    }
+
+    [Fact]
+    public async Task A_service_dll_with_a_NUL_separated_command_line_is_masked_and_runs_from_the_folder_of_its_dll()
+    {
+        using var checkout = new TestCheckout();
+        var (config, repo, bin, _) = IdentityOutsideTheDaemon(checkout);
+        var dll = config.Services["identityServices"].Args.First(a => a.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
+        // AB#9924: a program that splits its own command line in place leaves NUL characters where the blanks were.
+        var raw = $"\"{Path.Combine(checkout.Root, "dotnet", "dotnet.exe")}\"\0\"{Path.Combine(bin, dll)}\"\0--Password=MARKER-AB9924\0--urls=https://0.0.0.0:5003";
+        var command = ExternalDetector.CommandLines([500], _ => raw)[500]!; // what the Windows scan reads
+        var identity = new ExternalDetector.PsRow(500, 0, TimeSpan.FromMinutes(3), command);
+        var observation = new ExternalDetector.Observation([identity], new Dictionary<int, List<int>>(),
+            pids => pids.ToDictionary(p => p, _ => (ExternalDetector.LocationFromCommandLine(command, _ => null), (string?)null)));
+        var store = checkout.WriteConfig("""
+                                           web:
+                                             repo: tools
+                                             command: node
+                                         """);
+        var detector = new ExternalDetector(store) { ScanOverride = (_, own, slots) => ExternalDetector.Analyse(config, observation, own, slots) };
+        var supervisor = new StackSupervisor(store, new Leasing.LeaseManager(), new StateStore(new DevStackPaths(checkout.StateDirectory)),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<StackSupervisor>.Instance, external: detector);
+
+        var external = (await supervisor.StatusAsync()).Masked().External;
+
+        external.Services.Select(s => s.Service).Should().Equal("identityServices");
+        Visible(external.Services[0].WorkingDirectory).Should().Be(bin);
+        Visible(external.Services[0].RepoPath).Should().Be(repo);
+        var json = System.Text.Json.JsonSerializer.Serialize(external, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        json.Should().NotContain("MARKER", "neither the command nor the working directory carries the password");
+    }
+
+    [Fact]
+    public void A_listener_with_a_NUL_in_its_command_line_and_no_service_dll_is_not_reported()
+    {
+        using var checkout = new TestCheckout();
+        var (config, _, _, identity) = IdentityOutsideTheDaemon(checkout);
+        // AB#9924: zenon's zenDBSrv.exe as the Windows scan reads it.
+        var raw = WindowsCommandLine.Join(Path.Combine(checkout.Root, "zen\0on", "zenDBSrv.exe"), ["-service"]) + "\0";
+        var command = ExternalDetector.CommandLines([900], _ => raw)[900]!;
+        var zenon = new ExternalDetector.PsRow(900, 0, TimeSpan.FromMinutes(9), command, "zenDBSrv.exe");
+        var commands = new Dictionary<int, string> { [500] = identity.Command, [900] = command };
+        var observation = new ExternalDetector.Observation([identity, zenon], new Dictionary<int, List<int>> { [500] = [5003], [900] = [1103] },
+            pids => pids.ToDictionary(p => p, p => (ExternalDetector.LocationFromCommandLine(commands[p], _ => null), (string?)null)));
+
+        var snapshot = ExternalDetector.Analyse(config, observation, new HashSet<int>(), [SlotInfo.Default]);
+
+        snapshot.Services.Select(s => s.Service).Should().Equal("identityServices");
+        Visible(snapshot.Warning).Should().BeNull();
+        Shown(snapshot.Skipped).Should().Be("null");
+    }
+
     // ---------- MCP argument errors ----------
 
     [Fact]

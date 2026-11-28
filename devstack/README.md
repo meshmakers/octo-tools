@@ -520,7 +520,24 @@ and log paths. `include=["raw"]` adds the cmdlets' `-Json` documents and the out
   (`Stop-Octo -branch`, then waits until their processes are gone). When the scan of those processes fails (an error
   while reading the OS, e.g. a pid seen twice), no call fails because of it: the processes outside the daemon are
   unknown then, `stack_status` says so in `external.warning` and a job's plan in a warning, and the job runs without that
-  check (AB#9556).
+  check (AB#9556). One process the scan cannot analyse does not hide the others (AB#9924): it is left out, every other
+  process is reported as usual, `external.warning` stays empty, and `external.skipped` names it by `pid`, `executable` (the
+  image name Windows reports with the process, elsewhere the file name of the first word of its command line, which ends
+  at a blank, a quote or a control character - a program path with a blank gives only its first part) and
+  `exceptionType` - never its command line, an argument, its location or the exception message; a job's plan names the
+  processes left out the same way in a warning, and the job runs without checking them; `admin_profile_save` with an
+  external group key names them the same way in a note, because the saved profile may lack a service one of them runs.
+  A process running a configured service .dll is never left out because its location cannot be read or its repository
+  cannot be determined: it is reported without a repository path, and a job whose plan holds that service's repository
+  counts it as a conflict ("could not determine where pid ... runs from"). When the locations cannot be read all at
+  once, each process is read on its own: a listener without a service .dll whose location cannot be read is left out
+  (`external.skipped`), a service .dll stays reported without a location, a Claude Code session that is no listener
+  itself keeps an unknown working directory (one that listens is a listener like any other); a failing read never fails
+  the scan. On Windows a NUL character in a command line is read as a blank (a program that splits its own
+  command line in place leaves NULs where the blanks were; zenon's `zenDBSrv.exe` carries such NULs), so its arguments
+  stay separate for the secret masks and for its location. A location that is still no valid path lies in no repository: a listener
+  without a service .dll is then no stack service and is not reported at all; a process running a configured service
+  .dll is still reported, without a repository path.
 - While a build runs, no service starts from its repos (for range and all: from its lane); `stack_start` and
   `service_start` name the build and its owner. Jobs run strictly first in, first out. A job that needs the lease
   checks right before it runs that its owner still holds it (otherwise it fails with `failedStep: "preflight"`) and pins

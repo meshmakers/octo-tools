@@ -122,6 +122,16 @@ public class ExternalDetectorTests
     }
 
     [Fact]
+    public void A_location_the_path_API_rejects_lies_in_no_repo()
+    {
+        using var checkout = new TestCheckout();
+
+        // AB#9924: a command line with a NUL character (zenon's zenDBSrv.exe) gives a location with a NUL in it.
+        WindowsSupportTests.Visible(ExternalDetector.FindRepoFolder(Path.Combine(checkout.Root, "a\0x"), "tools", checkout.Root)).Should().BeNull();
+        ExternalDetector.FindRepoFolder("", "tools", checkout.Root).Should().BeNull();
+    }
+
+    [Fact]
     public void An_unnamed_stdout_in_lsof_output_is_skipped()
     {
         var files = ExternalDetector.ParseLsofFiles("p42\nfcwd\nn/x/repo\nf1\nn\np43\nf1\nn/x/log.txt\n");
