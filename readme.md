@@ -579,6 +579,11 @@ Start-OctoDevStackDaemon                # builds it on first use (Invoke-Build),
 claude mcp add --transport http --scope user octo-devstack http://127.0.0.1:5090/mcp
 ```
 
+On Windows the daemon runs in a hidden window, its output goes to `daemon.log` and `daemon.err.log` in the state folder
+(the previous run's logs are kept as `daemon.prev.log` and `daemon.err.prev.log`), and it inherits no handle of the
+calling shell but its two log files (and NUL as input), so `Start-OctoDevStackDaemon -Json | ConvertFrom-Json` and other
+piped or captured calls, also through further processes in between, return as soon as the daemon answers `/health`.
+
 `Stop-OctoDevStackDaemon` stops the daemon only; the stack services keep running and the next start adopts them.
 Other sessions use the daemon, so a stop asks it first (`GET /api/daemon`): while a build runs or waits,
 `Stop-OctoDevStackDaemon` and `Start-OctoDevStackDaemon -Restart` stop nothing and name the builds and their owners;

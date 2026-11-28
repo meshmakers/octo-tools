@@ -27,7 +27,8 @@ public static class ConsoleSignal
     /// <summary>
     ///     Fourth helper argument: signal every process of the target's console instead of the target's process group. For a
     ///     process that has a console of its own but leads no process group - the daemon started by Start-OctoDevStackDaemon
-    ///     (Start-Process, hidden window) -, so Stop-OctoDevStackDaemon can stop it gracefully on Windows (AB#9377).
+    ///     (Start-OctoDevStackDetachedWindows: CreateProcessW, hidden console of its own, AB#9922) -, so
+    ///     Stop-OctoDevStackDaemon can stop it gracefully on Windows (AB#9377).
     /// </summary>
     public const string ConsoleMode = "console";
 
